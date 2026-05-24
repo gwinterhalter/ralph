@@ -44,6 +44,12 @@ if ! bash "$SCRIPT_DIR/../lib/validate_artefact.sh" "$SCRIPT_DIR/../schemas/mcp_
   exit 1
 fi
 
+# Phase 4b P4-03(a): iteration-start mtime marker for post-exec read-only-write scan.
+# The post-exec scan (after claude --print) uses `find -newer "$ITER_START_MARKER"` against
+# each read_only_paths[] root to detect writes that occurred during this iteration.
+ITER_START_MARKER="$ITER_DIR/.iter_start"
+touch "$ITER_START_MARKER"
+
 # §10.3 Path A pre-execution gate broker.
 shopt -s nullglob
 for req in "$ITER_DIR"/gate_request_"${ITER}"_*.json; do
@@ -103,11 +109,40 @@ if ! bash "$SCRIPT_DIR/../lib/validate_artefact.sh" "$SCRIPT_DIR/../schemas/exec
   exit 1
 fi
 
-# §10.5 FR-019 post-execution gate (2 conditions; §13.2 exit-0 criteria).
+# Phase 4b P4-03(a): read-only boundary violation scan. Highest priority — exit 2
+# precedes any exit-1 classification per §13.2 hook contract (orchestrator translates
+# exit 2 to its own HALT per FR-017). Scans each read_only_paths[] root for files
+# modified since $ITER_START_MARKER (touched before claude --print ran above).
+ro_count="$(read_seed_field "$SEED" '.read_only_paths | length' 2>/dev/null || echo 0)"
+for ((r=0; r<ro_count; r++)); do
+  ro_path="$(read_seed_field "$SEED" ".read_only_paths[$r]")"
+  if [[ -d "$ro_path" ]]; then
+    modified="$(find "$ro_path" -type f -newer "$ITER_START_MARKER" 2>/dev/null | head -1)"
+    if [[ -n "$modified" ]]; then
+      echo "execute_with_gates: read-only boundary violation — write detected under $ro_path: $modified" >&2
+      exit 2
+    fi
+  fi
+done
+
+# §10.5 FR-019 post-execution gate — Phase 4b P4-03(c) branches narrative classification.
+# Both branches still exit 1 (per §13.2 only the read-only violation is exit 2); the
+# classification + escalation artefact distinguishes auto_mode_denial vs irregular_termination
+# vs the existing native-budget-cap (terminal_reason-driven) path.
 TERMINAL_REASON="$(jq -r '.terminal_reason' "$RESULT_JSON")"
 DENIALS_COUNT="$(jq -r '.permission_denials | length' "$RESULT_JSON")"
-if [[ "$TERMINAL_REASON" != "completed" ]] || [[ "$DENIALS_COUNT" -ne 0 ]]; then
-  echo "execute_with_gates: post-exec gate failed (terminal_reason=$TERMINAL_REASON denials=$DENIALS_COUNT)" >&2
+if [[ "$DENIALS_COUNT" -ne 0 ]]; then
+  mkdir -p "$STATE_DIR/escalations"
+  esc_file="$STATE_DIR/escalations/auto_mode_denial_${ITER}_$(date -u +%s).json"
+  jq --arg iter "$ITER" '{iteration: $iter, classification: "auto_mode_denial", denials_count: (.permission_denials | length), permission_denials: .permission_denials, terminal_reason: .terminal_reason}' "$RESULT_JSON" > "$esc_file"
+  echo "execute_with_gates: auto_mode_denial classification — escalation $esc_file (denials=$DENIALS_COUNT)" >&2
+  NOTIFY="$(read_seed_field "$SEED" '.notification_channel' 2>/dev/null || echo "")"
+  if [[ -n "$NOTIFY" && "$NOTIFY" != "null" ]]; then
+    echo "execute_with_gates: notification target = $NOTIFY (live notification dispatch deferred to P4-05)" >&2
+  fi
+  exit 1
+elif [[ "$TERMINAL_REASON" != "completed" ]]; then
+  echo "execute_with_gates: irregular_termination classification (terminal_reason=$TERMINAL_REASON)" >&2
   exit 1
 fi
 exit 0

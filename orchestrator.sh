@@ -54,11 +54,33 @@ fi
 
 # Main role-call loop (§13.1 verbatim body).
 while true; do
-  if "$SCRIPT_DIR/hooks/stop_check.sh" "$SEED" "$STATE_DIR"; then
-    log "INITIATIVE_COMPLETE: all completion_predicate[] passed"
-    echo "INITIATIVE_COMPLETE"
-    exit 0
-  fi
+  # Phase 4b P4-03(b): capture stop_check.sh exit code and branch all 4 cases
+  # (0 = COMPLETE; 1 = continue; 2 = BUDGET_EXHAUSTED; ≥3 = HALT). Previously the
+  # bare `if "$hook"` collapsed 1/2/3 into a single "not complete → continue" path.
+  set +e
+  "$SCRIPT_DIR/hooks/stop_check.sh" "$SEED" "$STATE_DIR"
+  sc_rc=$?
+  set -e
+  case $sc_rc in
+    0)
+      log "INITIATIVE_COMPLETE: all completion_predicate[] passed"
+      echo "INITIATIVE_COMPLETE"
+      exit 0
+      ;;
+    1)
+      : # continue iteration
+      ;;
+    2)
+      log "BUDGET_EXHAUSTED: stop_check returned exit 2"
+      echo "BUDGET_EXHAUSTED" >&2
+      exit 2
+      ;;
+    *)
+      log "HALT: stop_check returned exit $sc_rc (malformed predicate / error per §13.2)"
+      echo "HALT: STOP_CHECK_ERROR (exit $sc_rc)" >&2
+      exit 3
+      ;;
+  esac
   ITER=$(next_iteration_index "$STATE_DIR")
   ITER_DIR="$STATE_DIR/iterations/$ITER"
   mkdir -p "$ITER_DIR"
@@ -71,11 +93,60 @@ while true; do
   # Plan review (inner loop; bash-hook-orchestrated, §13.2)
   "$SCRIPT_DIR/hooks/plan_review.sh" "$ITER_DIR/session_plan_${ITER}.md"
 
-  # Executor + gate loop
+  # Phase 4b P4-03(b): capture execute_with_gates.sh exit code (0/1/2) and branch.
+  # exit 0 = continue to Consumer; exit 1 = FAILED iteration + escalate gate_human
+  # (loop continues per §12); exit 2 = read-only boundary violation → terminal HALT
+  # per FR-017. Previously bare call under `set -e` collapsed 1/2 indistinguishably.
+  set +e
   "$SCRIPT_DIR/hooks/execute_with_gates.sh" "$SEED" "$ITER_DIR"
+  ewg_rc=$?
+  set -e
+  case $ewg_rc in
+    0)
+      : # success → fall through to Consumer
+      ;;
+    1)
+      log "ITERATION $ITER FAILED (execute_with_gates exit 1 — see escalations/)"
+      mkdir -p "$STATE_DIR/escalations"
+      printf '{"iteration":"%s","classification":"gate_human","reason":"execute_with_gates_exit_1","ts":"%s"}\n' \
+             "$ITER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+             > "$STATE_DIR/escalations/iteration_${ITER}_failed.json"
+      # Continue loop (do not exit) so the Planner can decide to retry / reframe.
+      log "ITERATION $ITER end (FAILED, gate_human escalated)"
+      continue
+      ;;
+    2)
+      log "HALT: execute_with_gates exit 2 (read-only boundary violation per FR-017)"
+      echo "HALT: READ_ONLY_BOUNDARY_VIOLATION (iteration $ITER)" >&2
+      exit 3
+      ;;
+    *)
+      log "HALT: execute_with_gates returned unexpected exit $ewg_rc"
+      echo "HALT: EXECUTE_WITH_GATES_UNEXPECTED_EXIT (rc=$ewg_rc, iteration $ITER)" >&2
+      exit 3
+      ;;
+  esac
 
   # Consumer Role Call
   claude -p "/rl-iteration-consumer $STATE_DIR $ITER_DIR"
+
+  # Phase 4b P4-07: fail_counts ≥3 deterministic guard (additive to FR-013 Planner
+  # self-escalation). The Consumer maintains $STATE_DIR/fail_counts.json (per §5.4 /
+  # FR-012) — a JSON array of {item_id, count, last_failure_iteration, last_reason}.
+  # The orchestrator only READS and GATES; the Consumer owns increments. Threshold = 3.
+  FAIL_COUNTS_FILE="$STATE_DIR/fail_counts.json"
+  if [[ -f "$FAIL_COUNTS_FILE" ]]; then
+    triggered_item="$(jq -r 'map(select(.count >= 3)) | .[0].item_id // empty' "$FAIL_COUNTS_FILE" 2>/dev/null || echo "")"
+    if [[ -n "$triggered_item" ]]; then
+      log "HALT: fail_counts threshold ≥3 for item_id=$triggered_item (P4-07 deterministic guard; gate_human escalated)"
+      mkdir -p "$STATE_DIR/escalations"
+      printf '{"iteration":"%s","classification":"gate_human","reason":"fail_counts_threshold","item_id":"%s","ts":"%s"}\n' \
+             "$ITER" "$triggered_item" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+             > "$STATE_DIR/escalations/fail_counts_threshold_${ITER}_${triggered_item}.json"
+      echo "HALT: FAIL_COUNTS_THRESHOLD (item=$triggered_item, iteration=$ITER)" >&2
+      exit 3
+    fi
+  fi
 
   # Budget check
   "$SCRIPT_DIR/hooks/budget_check.sh" "$SEED" "$STATE_DIR" || { log "BUDGET_EXHAUSTED"; exit 2; }
