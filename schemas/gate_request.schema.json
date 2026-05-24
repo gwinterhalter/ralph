@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gwinterhalter/ralph/schemas/gate_request.schema.json",
+  "title": "gate_request",
+  "description": "Schema for gate_request_NNNN_M.json artefacts produced by the Path A gate broker (Initiative_Orchestrator_Spec_v1_4 §10.3 step 1). Phase 4a P4-06.",
+  "type": "object",
+  "required": ["gate_id", "question_text", "options"],
+  "properties": {
+    "gate_id": {
+      "type": "string",
+      "description": "Stable identifier for the gate, used by seed.gate_policy.pre_classification[].pattern matching."
+    },
+    "question_text": {
+      "type": "string",
+      "description": "The full question posed to the operator (or rl-operator-answerer) in natural language."
+    },
+    "options": {
+      "type": "array",
+      "items": {"type": "string"},
+      "minItems": 1,
+      "description": "Enumerated answer choices."
+    },
+    "cluster": {
+      "type": "string",
+      "description": "Optional cluster tag for pre-classification (consumed by §10.2 cluster: pattern form)."
+    },
+    "context": {
+      "type": "string",
+      "description": "Optional free-form context preceding the question."
+    },
+    "iteration": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Optional iteration number this gate was raised in."
+    }
+  },
+  "additionalProperties": false
+}

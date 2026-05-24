@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gwinterhalter/ralph/schemas/gate_response.schema.json",
+  "title": "gate_response",
+  "description": "Schema for gate_response_NNNN_M.json artefacts produced by rl-operator-answerer (FR-008; Initiative_Orchestrator_Spec_v1_4 §14). Phase 4a P4-06.",
+  "type": "object",
+  "required": ["gate_id", "reasoning", "confidence", "classification_check"],
+  "properties": {
+    "gate_id": {
+      "type": "string",
+      "description": "Must match the gate_id of the gate_request being answered."
+    },
+    "selected_option": {
+      "type": "string",
+      "description": "One of the options enumerated in the gate_request. Mutually exclusive with custom_text."
+    },
+    "custom_text": {
+      "type": "string",
+      "description": "Free-form answer when no enumerated option fits. Mutually exclusive with selected_option."
+    },
+    "reasoning": {
+      "type": "string",
+      "description": "Justification for the chosen answer; how the answerer arrived at it."
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Self-assessed confidence in [0,1]. Compared against seed.gate_policy.confidence_threshold."
+    },
+    "classification_check": {
+      "type": "string",
+      "description": "Answerer's self-classification of the question class (matches FR-008 classification check)."
+    }
+  },
+  "oneOf": [
+    {"required": ["selected_option"]},
+    {"required": ["custom_text"]}
+  ],
+  "additionalProperties": false
+}

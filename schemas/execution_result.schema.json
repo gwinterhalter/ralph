@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gwinterhalter/ralph/schemas/execution_result.schema.json",
+  "title": "execution_result",
+  "description": "Schema for execution_result_NNNN.json artefacts mirroring claude --print --output-format json payload (Initiative_Orchestrator_Spec_v1_4 §5.2 + Phase 0 Test 6). Phase 4a P4-06. NOTE: additionalProperties is false per plan §13; real claude output containing fields not enumerated here will fail validation — surface as Phase Z phase4a_validator_stub_data_quality if encountered.",
+  "type": "object",
+  "required": ["session_id", "result", "total_cost_usd", "permission_denials", "terminal_reason"],
+  "properties": {
+    "session_id": {
+      "type": "string",
+      "description": "Claude Code session identifier."
+    },
+    "result": {
+      "type": "string",
+      "description": "Final text output from the session."
+    },
+    "total_cost_usd": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Cumulative USD spend for the session."
+    },
+    "permission_denials": {
+      "type": "array",
+      "description": "Per-permission denial records. Non-empty array fails §10.5 FR-019 post-execution gate.",
+      "items": {
+        "type": "object",
+        "required": ["tool"],
+        "properties": {
+          "tool": {"type": "string"},
+          "reason": {"type": "string"}
+        },
+        "additionalProperties": true
+      }
+    },
+    "terminal_reason": {
+      "type": "string",
+      "enum": ["completed", "max_budget_exceeded", "max_turns_exceeded", "permission_denied", "hang_timeout", "irregular_termination"],
+      "description": "Termination cause. §10.5 FR-019 requires `completed` to pass the post-execution gate."
+    },
+    "duration_ms": {"type": "number", "minimum": 0, "description": "Optional wall-clock duration in ms."},
+    "duration_api_ms": {"type": "number", "minimum": 0, "description": "Optional API-call cumulative duration in ms."},
+    "num_turns": {"type": "integer", "minimum": 0, "description": "Optional turn count."},
+    "usage": {"type": "object", "description": "Optional token-usage breakdown (input_tokens, output_tokens, cache_*).", "additionalProperties": true},
+    "is_error": {"type": "boolean", "description": "Optional error flag from claude CLI."},
+    "subtype": {"type": "string", "description": "Optional CLI subtype tag."},
+    "type": {"type": "string", "description": "Optional CLI envelope type."}
+  },
+  "additionalProperties": false
+}

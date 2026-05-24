@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gwinterhalter/ralph/schemas/mcp_config.schema.json",
+  "title": "mcp_config",
+  "description": "Schema for the iterations/NNNN/mcp_config.json artefact produced by the generate_mcp_config hook (Phase 4a P4-01). Format mirrors `claude --mcp-config` documented shape: {\"mcpServers\": {<name>: {command, args, env}, ...}}. Phase 4a P4-06.",
+  "type": "object",
+  "required": ["mcpServers"],
+  "properties": {
+    "mcpServers": {
+      "type": "object",
+      "description": "Map of server name → server descriptor. Empty object is valid (no MCP servers configured).",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["command"],
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "Executable name or absolute path."
+          },
+          "args": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Positional arguments passed to command."
+          },
+          "env": {
+            "type": "object",
+            "additionalProperties": {"type": "string"},
+            "description": "Environment variables for the server process; values must be strings."
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}
