@@ -147,42 +147,62 @@ for ((i=0; i<count; i++)); do
       ;;
     skill_clean|doc_review_clean)
       # Phase 4b P4-02 / FUP-0641: per-skill clean-marker map. Markers DERIVED from each
-      # skill's SKILL.md output spec at implement time (operator-confirmed 2026-05-24 via
-      # plan §8.3 operator-choice; "output-presence detection" path). Map:
-      #   cf-doc-reviewer (\fix2):     stdout grep "All findings resolved: YES"
-      #   cf-corpus-auditor:           REPORT file has no `^|` table rows (append-only output spec)
-      #   cf-cross-reference-audit:    Issues file matches "Coverage summary: 100%" OR has no `^|` rows
-      #   cf-skill-reviewer (mode A):  stdout grep "Recommended Action:.*KEEP"
+      # skill's SKILL.md output spec at implement time. FUP-0696 alignment 2026-05-24:
+      # 3 of 4 predicates re-aligned to match actual SKILL.md output formats. Map:
+      #   cf-doc-reviewer (\fix2):     stdout grep "All findings resolved: YES" (unchanged)
+      #   cf-corpus-auditor:           parse "- Report location:" line from stdout (SKILL.md L210);
+      #                                then REPORT file has no `^|` table rows
+      #   cf-cross-reference-audit:    require audit_type=db_columns argv; "Issues path:" line OR
+      #                                workspace-root-anchored audit/ glob fallback;
+      #                                "Coverage summary:.*100%.*references resolved" (SKILL.md L144)
+      #   cf-skill-reviewer (mode A):  awk parses "## Recommended Action" heading + next non-blank
+      #                                line; grep validates ^KEEP\b (SKILL.md L195-200)
       # Each branch keys on predicate name (independent evaluation per #4-#7). Missing/failed
       # marker → all_pass=0 (continue; never silent pass). Unknown predicate-name → exit 3 (HALT).
       pred_name="$(read_seed_field "$SEED" ".completion_predicate[$i].name")"
       skill_name="$(read_seed_field "$SEED" ".completion_predicate[$i].params.skill" 2>/dev/null || echo "")"
       target="$(read_seed_field "$SEED" ".completion_predicate[$i].params.target" 2>/dev/null || echo "")"
       tmp_out="$(mktemp)"
+      workspace_root="$(read_seed_field "$SEED" '.workspace_root')"
       case "$pred_name" in
         corpus_auditor_clean)
           claude -p "/cf-corpus-auditor target=$target" > "$tmp_out" 2>&1 || true
-          report_file="$(tail -1 "$tmp_out")"
+          # cf-corpus-auditor v1.7 emits `- Report location: {path}` into stdout (status echo);
+          # skill's own SKILL.md L210 confirms this is the declared output convention.
+          report_file="$(grep -oE '^- Report location: .+$' "$tmp_out" | sed 's/^- Report location: //' | tail -1)"
           if [[ -z "$report_file" || ! -f "$report_file" ]]; then
-            echo "stop_check: cf-corpus-auditor did not name a readable REPORT file (last stdout line empty or not a file)" >&2
+            echo "stop_check: cf-corpus-auditor did not emit '- Report location: <path>' line OR report file unreadable" >&2
             all_pass=0
           elif grep -qE '^\|' "$report_file"; then
             all_pass=0
           fi
           ;;
         cross_reference_audit_clean)
-          claude -p "/cf-cross-reference-audit target=$target mode=A severity_floor=severe" > "$tmp_out" 2>&1 || true
-          issues_file="$(tail -1 "$tmp_out")"
+          # cf-cross-reference-audit v1.7 SKILL.md L122-129 Inputs require audit_type=;
+          # default to db_columns (most-commonly-referenced Tier-1 audit per skill's audit-type table).
+          claude -p "/cf-cross-reference-audit target=$target audit_type=db_columns mode=A severity_floor=severe" > "$tmp_out" 2>&1 || true
+          # Issues-file resolution: prefer explicit "Issues path:" line; else workspace-root-anchored glob
+          # under audit/. SKILL.md L139-146 documents output at <workspace>/audit/<descriptor>_Issues_<date>_v1.0.md.
+          issues_file="$(grep -oE '^Issues path: .+$' "$tmp_out" | sed 's/^Issues path: //' | tail -1)"
           if [[ -z "$issues_file" || ! -f "$issues_file" ]]; then
-            echo "stop_check: cf-cross-reference-audit did not name a readable Issues file" >&2
+            if [[ -n "$workspace_root" && -d "$workspace_root" ]]; then
+              issues_file="$(find "$workspace_root" -path '*/audit/*_Issues_*.md' -type f -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)"
+            fi
+          fi
+          if [[ -z "$issues_file" || ! -f "$issues_file" ]]; then
+            echo "stop_check: cf-cross-reference-audit did not emit 'Issues path:' line and no recent audit/ Issues file found under workspace_root" >&2
             all_pass=0
-          elif ! grep -qE 'Coverage summary:\s*100%' "$issues_file" && grep -qE '^\|' "$issues_file"; then
+          elif ! grep -qE 'Coverage summary:.*100%.*references resolved' "$issues_file" && grep -qE '^\|' "$issues_file"; then
             all_pass=0
           fi
           ;;
         new_skills_clean)
           claude -p "/cf-skill-reviewer mode=A target=$target" > "$tmp_out" 2>&1 || true
-          if ! grep -qE 'Recommended Action:.*KEEP' "$tmp_out"; then
+          # cf-skill-reviewer v1.9 SKILL.md L195-200 emits `## Recommended Action` header then
+          # the value (KEEP / REPAIR / REBUILD) on a separate non-blank line. Awk picks the next
+          # non-blank line after the header; grep validates KEEP.
+          recommended="$(awk '/^## Recommended Action/{getline; while(/^[[:space:]]*$/) getline; print; exit}' "$tmp_out")"
+          if ! echo "$recommended" | grep -qE '^KEEP\b'; then
             all_pass=0
           fi
           ;;
