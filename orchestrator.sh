@@ -17,6 +17,8 @@ STATE_DIR="$WORKSPACE_ROOT/$STATE_DIR_REL"          # absolute; §6.1 layout roo
 WORK_REGISTRY="$(read_seed_field "$SEED" .work_registry)"
 # FUP-0720 cost instrumentation: read budget cap from seed; running spend in state dir.
 BUDGET_CAP="$(read_seed_field "$SEED" .budget.tokens_usd)"
+# FUP-0736: read declared iteration cap (enforced in outer loop; empty/null = unbounded).
+ITER_MAX="$(read_seed_field "$SEED" .budget.iterations_max)"
 RUNNING_SPEND_FILE="$STATE_DIR/spend.json"
 
 log() { mkdir -p "$STATE_DIR/logs"; printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$STATE_DIR/logs/orchestrator.log"; }
@@ -30,7 +32,7 @@ run_claude_json() {
   [[ -f "$RUNNING_SPEND_FILE" ]] || echo '{"total_spend_usd": 0.0}' > "$RUNNING_SPEND_FILE"
   current_spend="$(jq -r '.total_spend_usd' "$RUNNING_SPEND_FILE")"
   remaining_budget="$(jq -rn --argjson cap "$BUDGET_CAP" --argjson cur "$current_spend" '$cap - $cur')"
-  if (( $(echo "$remaining_budget <= 0" | bc -l) )); then
+  if awk "BEGIN { exit !($remaining_budget <= 0) }"; then
     log "HALT: BUDGET_EXHAUSTED before next claude -p (spend=$current_spend cap=$BUDGET_CAP)"
     echo "HALT: BUDGET_EXHAUSTED" >&2; exit 2
   fi
@@ -106,6 +108,11 @@ while true; do
       ;;
   esac
   ITER=$(next_iteration_index "$STATE_DIR")
+  if [[ -n "$ITER_MAX" && "$ITER_MAX" != "null" ]] && (( 10#$ITER > ITER_MAX )); then
+    log "HALT: MAX_ITERATIONS_EXCEEDED (iter=$ITER max=$ITER_MAX)"
+    echo "HALT: MAX_ITERATIONS_EXCEEDED" >&2
+    exit 6
+  fi
   ITER_DIR="$STATE_DIR/iterations/$ITER"
   mkdir -p "$ITER_DIR"
   log "ITERATION $ITER begin"

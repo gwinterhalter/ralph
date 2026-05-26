@@ -45,5 +45,5 @@
     "subtype": {"type": "string", "description": "Optional CLI subtype tag."},
     "type": {"type": "string", "description": "Optional CLI envelope type."}
   },
-  "additionalProperties": false
+  "additionalProperties": true
 }

@@ -25,8 +25,8 @@
       "description": "Optional cluster tag for pre-classification (consumed by §10.2 cluster: pattern form)."
     },
     "context": {
-      "type": "string",
-      "description": "Optional free-form context preceding the question."
+      "type": ["string", "object"],
+      "description": "Optional free-form context preceding the question (string) or structured context object emitted by the Executor."
     },
     "iteration": {
       "type": "integer",
@@ -34,5 +34,5 @@
       "description": "Optional iteration number this gate was raised in."
     }
   },
-  "additionalProperties": false
+  "additionalProperties": true
 }
