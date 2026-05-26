@@ -13,8 +13,13 @@ for round in 1 2 3 4 5; do
   FINDINGS="$ITER_DIR/review_findings_${round}.json"
   # Invoke cf-session-plan-reviewer; capture findings JSON.
   claude -p "/cf-session-plan-reviewer $PLAN_PATH" > "$FINDINGS"
-  # Zero findings -> converged.
-  if jq -e '.findings | length == 0' "$FINDINGS" >/dev/null 2>&1; then
+  # Converged when the reviewer emits its completion block reporting zero BLOCKER
+  # and zero DRIFT findings. cf-session-plan-reviewer Delivery Format contract:
+  # a "## Session Plan Review Complete" header followed by a
+  # "- Findings: N BLOCKER, N DRIFT, N COSMETIC" summary line. COSMETIC findings
+  # do NOT block convergence (reviewer Step 6 severity model). FUP-0716 / FUP-0719.
+  if grep -qF '## Session Plan Review Complete' "$FINDINGS" \
+     && grep -qE '^-[[:space:]]*Findings:[[:space:]]*0[[:space:]]+BLOCKER,[[:space:]]*0[[:space:]]+DRIFT' "$FINDINGS"; then
     exit 0
   fi
   # Else invoke planner --revise to produce a revised plan (overwrites $PLAN_PATH).
