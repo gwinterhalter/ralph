@@ -15,8 +15,32 @@ WORKSPACE_ROOT="$(read_seed_field "$SEED" .workspace_root)"
 STATE_DIR_REL="$(read_seed_field "$SEED" .state_dir_relative)"
 STATE_DIR="$WORKSPACE_ROOT/$STATE_DIR_REL"          # absolute; §6.1 layout root
 WORK_REGISTRY="$(read_seed_field "$SEED" .work_registry)"
+# FUP-0720 cost instrumentation: read budget cap from seed; running spend in state dir.
+BUDGET_CAP="$(read_seed_field "$SEED" .budget.tokens_usd)"
+RUNNING_SPEND_FILE="$STATE_DIR/spend.json"
 
 log() { mkdir -p "$STATE_DIR/logs"; printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$STATE_DIR/logs/orchestrator.log"; }
+
+# run_claude_json — wraps `claude -p` with --output-format json + --max-budget-usd;
+# captures total_cost_usd into the running spend; HALTs orchestrator if cumulative
+# spend exceeds cap. FUP-0720. Usage: run_claude_json <output_file> <claude_prompt>
+run_claude_json() {
+  local out_file="$1"; shift
+  local current_spend remaining_budget call_cost new_total
+  [[ -f "$RUNNING_SPEND_FILE" ]] || echo '{"total_spend_usd": 0.0}' > "$RUNNING_SPEND_FILE"
+  current_spend="$(jq -r '.total_spend_usd' "$RUNNING_SPEND_FILE")"
+  remaining_budget="$(jq -rn --argjson cap "$BUDGET_CAP" --argjson cur "$current_spend" '$cap - $cur')"
+  if (( $(echo "$remaining_budget <= 0" | bc -l) )); then
+    log "HALT: BUDGET_EXHAUSTED before next claude -p (spend=$current_spend cap=$BUDGET_CAP)"
+    echo "HALT: BUDGET_EXHAUSTED" >&2; exit 2
+  fi
+  claude -p --output-format json --max-budget-usd "$remaining_budget" "$@" > "$out_file"
+  call_cost="$(jq -r '.total_cost_usd // 0' "$out_file")"
+  new_total="$(jq -rn --argjson cur "$current_spend" --argjson cc "$call_cost" '$cur + $cc')"
+  jq --argjson nt "$new_total" '.total_spend_usd = $nt' "$RUNNING_SPEND_FILE" > "$RUNNING_SPEND_FILE.tmp" \
+    && mv "$RUNNING_SPEND_FILE.tmp" "$RUNNING_SPEND_FILE"
+  log "claude -p call_cost=$call_cost running_total=$new_total cap=$BUDGET_CAP"
+}
 
 # next_iteration_index — canonical algorithm (§13.1 verbatim).
 # Returns the next 4-digit iteration index by scanning iterations/NNNN/.
@@ -86,9 +110,11 @@ while true; do
   mkdir -p "$ITER_DIR"
   log "ITERATION $ITER begin"
 
-  # Planner Role Call
-  claude -p "/rl-initiative-planner $STATE_DIR $ITER_DIR" \
-    > "$ITER_DIR/planner.stdout" 2> "$ITER_DIR/planner.stderr"
+  # Planner Role Call (FUP-0720: --output-format json + --max-budget-usd via run_claude_json)
+  run_claude_json "$ITER_DIR/planner.json" "/rl-initiative-planner $STATE_DIR $ITER_DIR" \
+    2> "$ITER_DIR/planner.stderr"
+  # Extract markdown result for any downstream consumer expecting the textual emission:
+  jq -r '.result // empty' "$ITER_DIR/planner.json" > "$ITER_DIR/planner.stdout"
 
   # Plan review (inner loop; bash-hook-orchestrated, §13.2)
   "$SCRIPT_DIR/hooks/plan_review.sh" "$ITER_DIR/session_plan_${ITER}.md"
@@ -127,8 +153,8 @@ while true; do
       ;;
   esac
 
-  # Consumer Role Call
-  claude -p "/rl-iteration-consumer $STATE_DIR $ITER_DIR"
+  # Consumer Role Call (FUP-0720: --output-format json + --max-budget-usd via run_claude_json)
+  run_claude_json "$ITER_DIR/consumer.json" "/rl-iteration-consumer $STATE_DIR $ITER_DIR"
 
   # Phase 4b P4-07: fail_counts ≥3 deterministic guard (additive to FR-013 Planner
   # self-escalation). The Consumer maintains $STATE_DIR/fail_counts.json (per §5.4 /
