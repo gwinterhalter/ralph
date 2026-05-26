@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/gwinterhalter/ralph/schemas/execution_result.schema.json",
   "title": "execution_result",
-  "description": "Schema for execution_result_NNNN.json artefacts mirroring claude --print --output-format json payload (Initiative_Orchestrator_Spec_v1_4 §5.2 + Phase 0 Test 6). Phase 4a P4-06. NOTE: additionalProperties is false per plan §13; real claude output containing fields not enumerated here will fail validation — surface as Phase Z phase4a_validator_stub_data_quality if encountered.",
+  "description": "Schema for execution_result_NNNN.json artefacts mirroring claude --print --output-format json payload (Initiative_Orchestrator_Spec_v1_4 §5.2 + Phase 0 Test 6). Phase 4a P4-06. NOTE (updated 2026-05-26 by FUP-0733 + FUP-0737): root additionalProperties is true (FUP-0733 flipped 2026-05-26 to accept real claude envelope fields like api_error_status / modelUsage / ttft_ms / uuid); permission_denials.items.required uses anyOf [tool | tool_name] to accept BOTH the original synthetic-fixture shape ({tool, reason}) AND the real claude --output-format json shape ({tool_name, tool_use_id, tool_input, reason}) — see FUP-0737. items.additionalProperties remains true; required keys enumerated via anyOf, not bare required[]; surface any unrelated future shape drift as Phase Z (do NOT re-tighten without re-verifying against current claude CLI output).",
   "type": "object",
   "required": ["session_id", "result", "total_cost_usd", "permission_denials", "terminal_reason"],
   "properties": {
@@ -24,9 +24,15 @@
       "description": "Per-permission denial records. Non-empty array fails §10.5 FR-019 post-execution gate.",
       "items": {
         "type": "object",
-        "required": ["tool"],
+        "anyOf": [
+          {"required": ["tool"]},
+          {"required": ["tool_name"]}
+        ],
         "properties": {
-          "tool": {"type": "string"},
+          "tool": {"type": "string", "description": "Legacy synthetic-fixture shape (pre-FUP-0737). Optional now; either `tool` or `tool_name` must be present (anyOf)."},
+          "tool_name": {"type": "string", "description": "Real claude --output-format json shape (added 2026-05-26 per FUP-0737). Either `tool` or `tool_name` must be present (anyOf)."},
+          "tool_use_id": {"type": "string", "description": "Real claude shape companion to tool_name. Optional."},
+          "tool_input": {"type": "object", "description": "Real claude shape companion to tool_name; the input args that were attempted. Optional.", "additionalProperties": true},
           "reason": {"type": "string"}
         },
         "additionalProperties": true
