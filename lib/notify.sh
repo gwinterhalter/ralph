@@ -33,6 +33,48 @@ dispatch_notification() {
     else
       channel_result="fail"
     fi
+  elif [[ "$primary" == "gmail_smtp" ]]; then
+    # gmail_smtp branch (seed v1.3): reads env-var NAMES from .notification_channel.primary_env_vars
+    # map, then indirect-lookups VALUES — same pattern as slack_webhook but multi-var. Env vars are
+    # operator-supplied out-of-band (app password generated at myaccount.google.com/apppasswords);
+    # values are NEVER echoed, logged, or persisted by this function (curl --user passes them in
+    # process env only). On any unset var or unreachable host, channel_result records the failure
+    # mode and the unconditional audit-log append below still fires (FR-009).
+    channel_attempted="gmail_smtp"
+    local smtp_user_env smtp_app_pw_env to_addr_env smtp_host smtp_port
+    smtp_user_env="$(read_seed_field "$seed_path" '.notification_channel.primary_env_vars.smtp_user' 2>/dev/null || echo "")"
+    smtp_app_pw_env="$(read_seed_field "$seed_path" '.notification_channel.primary_env_vars.smtp_app_password' 2>/dev/null || echo "")"
+    to_addr_env="$(read_seed_field "$seed_path" '.notification_channel.primary_env_vars.to_address' 2>/dev/null || echo "")"
+    smtp_host="$(read_seed_field "$seed_path" '.notification_channel.primary_smtp_host' 2>/dev/null || echo "")"
+    smtp_port="$(read_seed_field "$seed_path" '.notification_channel.primary_smtp_port' 2>/dev/null || echo "")"
+    local smtp_user_val="${!smtp_user_env:-}" smtp_app_pw_val="${!smtp_app_pw_env:-}" to_addr_val="${!to_addr_env:-}"
+    if [[ -z "$smtp_user_val" || -z "$smtp_app_pw_val" || -z "$to_addr_val" || -z "$smtp_host" || -z "$smtp_port" ]]; then
+      channel_result="skipped:env_unset"
+    else
+      local tmp_msg
+      tmp_msg="$(mktemp 2>/dev/null || printf '/tmp/notify_msg.%s' "$$")"
+      {
+        printf 'From: %s\r\n' "$smtp_user_val"
+        printf 'To: %s\r\n' "$to_addr_val"
+        printf 'Subject: [CF Orchestrator] %s — iteration %s\r\n' "$event" "${iteration:-unknown}"
+        printf 'Date: %s\r\n' "$(date -R)"
+        printf '\r\n'
+        printf '%s\r\n' "$msg"
+      } > "$tmp_msg"
+      curl --silent --show-error --max-time 30 --ssl-reqd \
+           --url "smtps://${smtp_host}:${smtp_port}" \
+           --mail-from "$smtp_user_val" \
+           --mail-rcpt "$to_addr_val" \
+           --user "${smtp_user_val}:${smtp_app_pw_val}" \
+           --upload-file "$tmp_msg" >/dev/null 2>&1
+      local rc=$?
+      if [[ $rc -eq 0 ]]; then
+        channel_result="success"
+      else
+        channel_result="failure:rc=$rc"
+      fi
+      rm -f "$tmp_msg"
+    fi
   elif [[ "$fallback" == "win11toast" ]]; then
     channel_attempted="win11toast"
     if command -v win11toast >/dev/null 2>&1; then
