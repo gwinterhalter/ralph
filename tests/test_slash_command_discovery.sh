@@ -53,8 +53,8 @@ grep -qF 'export MSYS_NO_PATHCONV=1' "$ORCH" \
 grep -qF "export MSYS2_ARG_CONV_EXCL='*'" "$ORCH" \
   || fail "FUP-0740 guard \"export MSYS2_ARG_CONV_EXCL='*'\" missing from orchestrator.sh"
 
-grep -qF ': "${CLAUDE_SKILLS_DIR:=' "$ORCH" \
-  || fail "FUP-0739 default-assignment ': \"\${CLAUDE_SKILLS_DIR:=...}\"' missing from orchestrator.sh"
+grep -qE '^export[[:space:]]+CLAUDE_SKILLS_DIR=' "$ORCH" \
+  || fail "FUP-0739 'export CLAUDE_SKILLS_DIR=...' missing from orchestrator.sh (must be exported so child hooks inherit it under set -u)"
 
 grep -qF -- '--add-dir "$CLAUDE_SKILLS_DIR" --' "$ORCH" \
   || fail "FUP-0739 '--add-dir \"\$CLAUDE_SKILLS_DIR\" --' missing from orchestrator.sh claude -p invocation"

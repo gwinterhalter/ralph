@@ -13,7 +13,9 @@ export MSYS2_ARG_CONV_EXCL='*'
 # FUP-0739: skills-tree root (the dir CONTAINING .claude/skills) — passed via --add-dir so
 # `claude -p` resolves the rl-* slash commands from the ralph/ CWD (skills live in a SIBLING
 # tree, not an ancestor of ralph/). Env-overridable; portable across drive/path changes (Q1 default).
-: "${CLAUDE_SKILLS_DIR:=K:/Claude Code Factory/V3/Project_Docs}"
+# EXPORT (not bare `:=`) so child hooks under `set -euo pipefail` (which makes unset vars an error)
+# inherit the value — without export the variable lives only in orchestrator.sh's shell.
+export CLAUDE_SKILLS_DIR="${CLAUDE_SKILLS_DIR:-K:/Claude Code Factory/V3/Project_Docs}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/seed.sh
