@@ -175,9 +175,15 @@ fi
 PERMISSION_POSTURE="$(read_seed_field "$SEED" .permission_posture)"
 PER_CALL_CAP="$(read_seed_field "$SEED" '.budget.per_call_usd_cap // .budget.tokens_usd')"
 MAX_TURNS="$(read_seed_field "$SEED" '.budget.max_turns_per_call // 200')"
+# FUP-0752: seed convention is to declare permission_posture as the FULL flag string
+# (e.g. "--permission-mode auto"), but `claude --permission-mode <value>` wants just the
+# VALUE. Strip the leading `--permission-mode ` prefix when present (liberal accept of
+# either form). Without this, claude rejects `--permission-mode "--permission-mode auto"`
+# with "Allowed choices are acceptEdits, auto, bypassPermissions, default, dontAsk, plan."
+posture_value="${PERMISSION_POSTURE#--permission-mode }"
 # shellcheck disable=SC2086
 claude --print --output-format json \
-       --permission-mode "$PERMISSION_POSTURE" \
+       --permission-mode "$posture_value" \
        --strict-mcp-config --mcp-config "$MCP_CONFIG" \
        --max-budget-usd "$PER_CALL_CAP" --max-turns "$MAX_TURNS" \
        < "$PLAN_PATH" > "$RESULT_JSON"
