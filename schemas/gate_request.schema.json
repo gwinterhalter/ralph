@@ -35,8 +35,8 @@
       "description": "Enumerated answer choices. anyOf {string | {id, label?, consequence?}} — Planner emits objects per IOS §10.3 step 1; synthetic-fixture shape (string) accepted for backward-compat."
     },
     "cluster": {
-      "type": "string",
-      "description": "Optional cluster tag for pre-classification (consumed by §10.2 cluster: pattern form)."
+      "type": ["string", "null"],
+      "description": "Optional cluster tag for pre-classification (consumed by §10.2 cluster: pattern form). Null permitted (FUP-0751) — the Planner emits cluster: null on gate_dc-default requests where no cluster tag applies; the broker's classification DSL treats null as 'no cluster match' (default gate_dc)."
     },
     "context": {
       "type": ["string", "object"],
