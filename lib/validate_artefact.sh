@@ -37,7 +37,12 @@ fi
 if command -v ajv >/dev/null 2>&1; then
   ajv validate -s "$SCHEMA_NATIVE" -d "$INSTANCE_NATIVE" --spec=draft2020 --strict=false
 elif command -v python >/dev/null 2>&1; then
-  python -c "import sys,json,jsonschema; jsonschema.validate(instance=json.load(open(sys.argv[2])), schema=json.load(open(sys.argv[1])))" "$SCHEMA_NATIVE" "$INSTANCE_NATIVE"
+  # FUP-0747: explicit encoding='utf-8' — Python on Windows defaults open() to the
+  # locale encoding (cp1252 on US-EN), but JSON is UTF-8 by spec (RFC 8259), and the
+  # ralph execution_result_NNNN.json carries em-dashes / smart-quotes / etc. from LLM
+  # narrative output that aren't cp1252-decodable (byte 0x8f and friends). Without
+  # encoding='utf-8' the validator hits UnicodeDecodeError mid-file.
+  python -c "import sys,json,jsonschema; jsonschema.validate(instance=json.load(open(sys.argv[2], encoding='utf-8')), schema=json.load(open(sys.argv[1], encoding='utf-8')))" "$SCHEMA_NATIVE" "$INSTANCE_NATIVE"
 else
   echo "validate_artefact: neither ajv nor python+jsonschema available on PATH" >&2
   exit 2
