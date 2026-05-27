@@ -63,7 +63,7 @@ dispatch_notification() {
         printf '%s\r\n' "$msg"
       } > "$tmp_msg"
       curl --silent --show-error --max-time 30 --ssl-reqd \
-           --url "smtps://${smtp_host}:${smtp_port}" \
+           --url "smtp://${smtp_host}:${smtp_port}" \
            --mail-from "$smtp_user_val" \
            --mail-rcpt "$to_addr_val" \
            --user "${smtp_user_val}:${smtp_app_pw_val}" \

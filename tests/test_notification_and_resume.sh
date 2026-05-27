@@ -34,7 +34,7 @@ check "gmail_smtp reads literal primary_to_address (dest)"   "grep -q 'primary_t
 check "gmail_smtp reads primary_env_vars.smtp_app_password (only secret)" "grep -q 'primary_env_vars.smtp_app_password' '$NOTIFY'"
 check "gmail_smtp reads primary_smtp_host"    "grep -q 'primary_smtp_host' '$NOTIFY'"
 check "gmail_smtp reads primary_smtp_port"    "grep -q 'primary_smtp_port' '$NOTIFY'"
-check "gmail_smtp uses curl --ssl-reqd smtps://"  "grep -q -- '--ssl-reqd' '$NOTIFY' && grep -q 'smtps://' '$NOTIFY'"
+check "gmail_smtp uses curl --ssl-reqd smtp:// (STARTTLS upgrade on port 587)"  "grep -q -- '--ssl-reqd' '$NOTIFY' && grep -qE 'smtp://' '$NOTIFY'"
 check "gmail_smtp uses --mail-from --mail-rcpt --user" "grep -q -- '--mail-from' '$NOTIFY' && grep -q -- '--mail-rcpt' '$NOTIFY' && grep -q -- '--user' '$NOTIFY'"
 check "slack_webhook branch retained"         "grep -q '\"slack_webhook\"' '$NOTIFY' && grep -q 'curl -fsS -X POST' '$NOTIFY'"
 check "audit log append unconditional (preceded by UNCONDITIONAL comment)" "grep -q 'UNCONDITIONAL audit append' '$NOTIFY'"
