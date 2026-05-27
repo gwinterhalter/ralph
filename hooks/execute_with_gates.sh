@@ -91,7 +91,9 @@ for req in "$ITER_DIR"/gate_request_"${ITER}"_*.json; do
   if [[ "$cls" == "gate_human" ]]; then
     # Defer to pass 2 — but dispatch a classification-time notification iff no operator response exists
     # (avoids re-notifying on resume; only fires on first-time escalation path).
-    resp_existing="$ITER_DIR/gate_response_$(basename "$req")"
+    # FUP-0750: canonical response path is `gate_response_${suffix}.json` (NNNN_MMMM stripped from request basename).
+    req_suffix="$(basename "$req" .json)"; req_suffix="${req_suffix#gate_request_}"
+    resp_existing="$ITER_DIR/gate_response_${req_suffix}.json"
     if [[ ! -f "$resp_existing" ]]; then
       dispatch_notification "$SEED" "$STATE_DIR" gate_human \
         "$(jq -nc --arg it "$ITER" --arg gid "$gate_id" '{iteration:$it, gate_id:$gid, reason:"broker_classified_gate_human"}')"
@@ -101,15 +103,25 @@ for req in "$ITER_DIR"/gate_request_"${ITER}"_*.json; do
   fi
   # gate_dc -> resolve via rl-operator-answerer; answer inlined into plan text by the answerer.
   # FUP-0744: --add-dir + -- required for slash-command resolution from ralph/ CWD.
-  resp_file="$ITER_DIR/gate_response_$(basename "$req")"
-  claude -p --add-dir "$CLAUDE_SKILLS_DIR" -- "/rl-operator-answerer $req" > "$resp_file"
+  # FUP-0750 path-naming normalisation: the Answerer writes its canonical FR-008 JSON
+  # to `gate_response_${suffix}.json` (suffix = NNNN_MMMM extracted from the gate_request
+  # basename) as a side effect of the skill. The broker captures the slash-command's
+  # markdown summary stdout to a SEPARATE filename so it cannot overwrite that canonical
+  # JSON. Prior shape (`gate_response_$(basename "$req")` = `gate_response_gate_request_…`)
+  # both broke naming + raced/overwrote the Answerer's JSON with markdown text.
+  req_suffix="$(basename "$req" .json)"; req_suffix="${req_suffix#gate_request_}"
+  resp_file="$ITER_DIR/gate_response_${req_suffix}.json"   # canonical FR-008 path — Answerer-written
+  answerer_stdout_file="$ITER_DIR/answerer_stdout_${req_suffix}.md"
+  claude -p --add-dir "$CLAUDE_SKILLS_DIR" -- "/rl-operator-answerer $req" > "$answerer_stdout_file"
   # §1.2(b) Answerer-demotion check (FR-009): if the Answerer self-escalated per §5.3
   # (sub-threshold confidence / irreversible / out-of-scope), it emits a gate_escalation
   # artefact alongside / instead of a conformant gate_response. Detect either form
-  # (escalation file present, or response missing the 4-field FR-008 payload) and dispatch.
-  demote_artefact="$(find "$ITER_DIR" -maxdepth 1 -name "gate_escalation_$(basename "$req" .json)*.md" 2>/dev/null | head -1)"
+  # (escalation file present, or canonical response missing the 4-field FR-008 payload).
+  demote_artefact="$(find "$ITER_DIR" -maxdepth 1 -name "gate_escalation_${req_suffix}*.md" 2>/dev/null | head -1)"
   demoted=0
   if [[ -n "$demote_artefact" ]]; then
+    demoted=1
+  elif [[ ! -f "$resp_file" ]]; then
     demoted=1
   elif ! jq -e '((.selected_option // null) != null or (.custom_text // null) != null) and ((.reasoning // "") | length > 0) and ((.confidence // null) | type == "number")' "$resp_file" >/dev/null 2>&1; then
     demoted=1
@@ -124,14 +136,17 @@ done
 shopt -u nullglob
 
 # Pass 2: handle deferred gate_human — §2.2 gate_response-before-escalate + §2.3 pending_gate.
+# FUP-0750: response precheck reads canonical `gate_response_${suffix}.json` (matching the
+# Answerer's side-effect write path + the orchestrator §6.3 resume scan pattern).
 any_blocked=0
 for req in "${deferred_human[@]}"; do
   basename_req="$(basename "$req")"
-  resp_file="$ITER_DIR/gate_response_$basename_req"
+  req_suffix="$(basename "$req" .json)"; req_suffix="${req_suffix#gate_request_}"
+  resp_file="$ITER_DIR/gate_response_${req_suffix}.json"
   if [[ -f "$resp_file" ]]; then
     # Operator already wrote the answer — resume entry. Inline (the answer is consumed
     # by the next role call's plan reading) and proceed, no re-escalation.
-    echo "execute_with_gates: gate_human $basename_req already resolved by operator gate_response — inlined, proceeding" >&2
+    echo "execute_with_gates: gate_human ${req_suffix} already resolved by operator gate_response — inlined, proceeding" >&2
     continue
   fi
   # Response absent — escalate: cp to escalations/, write pending_gate, mark blocked.
