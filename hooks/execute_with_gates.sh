@@ -8,6 +8,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../lib/seed.sh
 source "$SCRIPT_DIR/../lib/seed.sh"
+# shellcheck source=../lib/notify.sh
+source "$SCRIPT_DIR/../lib/notify.sh"
 
 SEED="${1:?usage: execute_with_gates.sh <seed_path> <iter_dir>}"
 ITER_DIR="${2:?usage: execute_with_gates.sh <seed_path> <iter_dir>}"
@@ -50,7 +52,12 @@ fi
 ITER_START_MARKER="$ITER_DIR/.iter_start"
 touch "$ITER_START_MARKER"
 
-# §10.3 Path A pre-execution gate broker.
+# §10.3 Path A pre-execution gate broker — TWO-PASS structure (§6.3 step 3 / NFR-006 resume wiring).
+# Pass 1: classify each request, resolve every gate_dc inline via Answerer, collect gate_human into deferred[].
+# Pass 2: handle deferred gate_human — gate_response-precheck (resume entry) before cp + dispatch + pending_gate.
+# Rationale: makes BOTH gate classes observable in one run regardless of glob/gate_index order;
+# removes the prior "exit at first gate_human" fragility; opens the §6.3 resume path.
+deferred_human=()
 shopt -s nullglob
 for req in "$ITER_DIR"/gate_request_"${ITER}"_*.json; do
   # Phase 4a P4-06: validate gate_request against schema before classifying (typo-catch).
@@ -82,16 +89,72 @@ for req in "$ITER_DIR"/gate_request_"${ITER}"_*.json; do
     fi
   done
   if [[ "$cls" == "gate_human" ]]; then
-    mkdir -p "$STATE_DIR/escalations"
-    cp "$req" "$STATE_DIR/escalations/$(basename "$req")"
-    echo "execute_with_gates: gate_human escalation for $gate_id" >&2
-    return 1 2>/dev/null || exit 1
+    # Defer to pass 2 — but dispatch a classification-time notification iff no operator response exists
+    # (avoids re-notifying on resume; only fires on first-time escalation path).
+    resp_existing="$ITER_DIR/gate_response_$(basename "$req")"
+    if [[ ! -f "$resp_existing" ]]; then
+      dispatch_notification "$SEED" "$STATE_DIR" gate_human \
+        "$(jq -nc --arg it "$ITER" --arg gid "$gate_id" '{iteration:$it, gate_id:$gid, reason:"broker_classified_gate_human"}')"
+    fi
+    deferred_human+=("$req")
+    continue
   fi
   # gate_dc -> resolve via rl-operator-answerer; answer inlined into plan text by the answerer.
   # FUP-0744: --add-dir + -- required for slash-command resolution from ralph/ CWD.
-  claude -p --add-dir "$CLAUDE_SKILLS_DIR" -- "/rl-operator-answerer $req" > "$ITER_DIR/gate_response_$(basename "$req")"
+  resp_file="$ITER_DIR/gate_response_$(basename "$req")"
+  claude -p --add-dir "$CLAUDE_SKILLS_DIR" -- "/rl-operator-answerer $req" > "$resp_file"
+  # §1.2(b) Answerer-demotion check (FR-009): if the Answerer self-escalated per §5.3
+  # (sub-threshold confidence / irreversible / out-of-scope), it emits a gate_escalation
+  # artefact alongside / instead of a conformant gate_response. Detect either form
+  # (escalation file present, or response missing the 4-field FR-008 payload) and dispatch.
+  demote_artefact="$(find "$ITER_DIR" -maxdepth 1 -name "gate_escalation_$(basename "$req" .json)*.md" 2>/dev/null | head -1)"
+  demoted=0
+  if [[ -n "$demote_artefact" ]]; then
+    demoted=1
+  elif ! jq -e '((.selected_option // null) != null or (.custom_text // null) != null) and ((.reasoning // "") | length > 0) and ((.confidence // null) | type == "number")' "$resp_file" >/dev/null 2>&1; then
+    demoted=1
+  fi
+  if (( demoted == 1 )); then
+    echo "execute_with_gates: Answerer demoted gate_dc $gate_id to gate_human" >&2
+    dispatch_notification "$SEED" "$STATE_DIR" gate_human \
+      "$(jq -nc --arg it "$ITER" --arg gid "$gate_id" '{iteration:$it, gate_id:$gid, reason:"answerer_demote"}')"
+    deferred_human+=("$req")
+  fi
 done
 shopt -u nullglob
+
+# Pass 2: handle deferred gate_human — §2.2 gate_response-before-escalate + §2.3 pending_gate.
+any_blocked=0
+for req in "${deferred_human[@]}"; do
+  basename_req="$(basename "$req")"
+  resp_file="$ITER_DIR/gate_response_$basename_req"
+  if [[ -f "$resp_file" ]]; then
+    # Operator already wrote the answer — resume entry. Inline (the answer is consumed
+    # by the next role call's plan reading) and proceed, no re-escalation.
+    echo "execute_with_gates: gate_human $basename_req already resolved by operator gate_response — inlined, proceeding" >&2
+    continue
+  fi
+  # Response absent — escalate: cp to escalations/, write pending_gate, mark blocked.
+  mkdir -p "$STATE_DIR/escalations"
+  cp "$req" "$STATE_DIR/escalations/$basename_req"
+  gate_id="$(jq -r '.gate_id // empty' "$req")"
+  echo "execute_with_gates: gate_human escalation for $gate_id" >&2
+  # §2.3: write pending_gate to state_snapshot.json (the value §6.3 step 3 consumes).
+  mkdir -p "$STATE_DIR"
+  if [[ -f "$STATE_DIR/state_snapshot.json" ]]; then
+    jq --arg it "$ITER" --arg gi "$basename_req" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+       '.pending_gate = {iteration:$it, gate_request:$gi, written_at:$ts}' \
+       "$STATE_DIR/state_snapshot.json" > "$STATE_DIR/state_snapshot.json.tmp" \
+       && mv "$STATE_DIR/state_snapshot.json.tmp" "$STATE_DIR/state_snapshot.json"
+  else
+    jq -n --arg it "$ITER" --arg gi "$basename_req" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+       '{pending_gate:{iteration:$it, gate_request:$gi, written_at:$ts}}' > "$STATE_DIR/state_snapshot.json"
+  fi
+  any_blocked=1
+done
+if (( any_blocked == 1 )); then
+  exit 1
+fi
 
 # Execute (§5.2 canonical invocation).
 PERMISSION_POSTURE="$(read_seed_field "$SEED" .permission_posture)"

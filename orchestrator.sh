@@ -20,6 +20,8 @@ export CLAUDE_SKILLS_DIR="${CLAUDE_SKILLS_DIR:-K:/Claude Code Factory/V3/Project
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/seed.sh
 source "$SCRIPT_DIR/lib/seed.sh"
+# shellcheck source=lib/notify.sh
+source "$SCRIPT_DIR/lib/notify.sh"
 
 SEED="${1:?usage: orchestrator.sh <seed_path>}"
 
@@ -46,6 +48,7 @@ run_claude_json() {
   remaining_budget="$(jq -rn --argjson cap "$BUDGET_CAP" --argjson cur "$current_spend" '$cap - $cur')"
   if awk "BEGIN { exit !($remaining_budget <= 0) }"; then
     log "HALT: BUDGET_EXHAUSTED before next claude -p (spend=$current_spend cap=$BUDGET_CAP)"
+    dispatch_notification "$SEED" "$STATE_DIR" budget_exhausted "$(jq -nc --arg sp "$current_spend" --arg cap "$BUDGET_CAP" '{iteration:"", reason:"run_claude_json_pre_call", spend:$sp, cap:$cap}')"
     echo "HALT: BUDGET_EXHAUSTED" >&2; exit 2
   fi
   claude -p --output-format json --max-budget-usd "$remaining_budget" --add-dir "$CLAUDE_SKILLS_DIR" -- "$@" > "$out_file"
@@ -83,6 +86,48 @@ if [[ -f "$STATE_DIR/state_snapshot.json" ]]; then
   pending_gate="$(jq -r '.pending_gate // empty' "$STATE_DIR/state_snapshot.json")"
   if [[ -n "$pending_gate" && "$pending_gate" != "null" ]]; then
     log "RESUME: pending_gate present — gate-resolution path (§6.3 step 3)"
+    pending_iter="$(jq -r '.pending_gate.iteration // empty' "$STATE_DIR/state_snapshot.json")"
+    if [[ -n "$pending_iter" ]]; then
+      pending_iter_dir="$STATE_DIR/iterations/$pending_iter"
+      # §2.4 controller resume — present matching gate_response → re-invoke broker for the pending iteration.
+      response_count=$(find "$pending_iter_dir" -maxdepth 1 -name "gate_response_${pending_iter}_*.json" 2>/dev/null | wc -l)
+      if (( response_count > 0 )); then
+        log "RESUME: operator gate_response found for iteration $pending_iter — re-running execute_with_gates"
+        set +e
+        "$SCRIPT_DIR/hooks/execute_with_gates.sh" "$SEED" "$pending_iter_dir"
+        resume_rc=$?
+        set -e
+        case $resume_rc in
+          0)
+            log "RESUME: broker resolved + Executor ran — clearing pending_gate, running Consumer for $pending_iter"
+            jq 'del(.pending_gate)' "$STATE_DIR/state_snapshot.json" > "$STATE_DIR/state_snapshot.json.tmp" \
+              && mv "$STATE_DIR/state_snapshot.json.tmp" "$STATE_DIR/state_snapshot.json"
+            run_claude_json "$pending_iter_dir/consumer.json" "/rl-iteration-consumer $STATE_DIR $pending_iter_dir"
+            ;;
+          1)
+            log "RESUME: broker still pending after re-run — re-block"
+            dispatch_notification "$SEED" "$STATE_DIR" gate_human "$(jq -nc --arg it "$pending_iter" '{iteration:$it, reason:"resume_still_pending"}')"
+            echo "BLOCKED: pending gate_human (iteration $pending_iter)" >&2
+            exit 0
+            ;;
+          2)
+            log "HALT: execute_with_gates exit 2 on resume (read-only violation)"
+            echo "HALT: READ_ONLY_BOUNDARY_VIOLATION (iteration $pending_iter)" >&2
+            exit 3
+            ;;
+          *)
+            log "HALT: execute_with_gates returned unexpected exit $resume_rc on resume"
+            echo "HALT: EXECUTE_WITH_GATES_UNEXPECTED_EXIT (rc=$resume_rc, resume iteration $pending_iter)" >&2
+            exit 3
+            ;;
+        esac
+      else
+        log "RESUME: no operator gate_response for iteration $pending_iter — re-dispatching and blocking"
+        dispatch_notification "$SEED" "$STATE_DIR" gate_human "$(jq -nc --arg it "$pending_iter" '{iteration:$it, reason:"awaiting_operator_response"}')"
+        echo "BLOCKED: awaiting gate_response (iteration $pending_iter)" >&2
+        exit 0
+      fi
+    fi
   fi
 else
   log "BOOTSTRAP: no snapshot — initialising state dir"
@@ -102,6 +147,7 @@ while true; do
   case $sc_rc in
     0)
       log "INITIATIVE_COMPLETE: all completion_predicate[] passed"
+      dispatch_notification "$SEED" "$STATE_DIR" initiative_complete "$(jq -nc '{iteration:"", reason:"completion_predicate_all_passed"}')"
       echo "INITIATIVE_COMPLETE"
       exit 0
       ;;
@@ -110,6 +156,7 @@ while true; do
       ;;
     2)
       log "BUDGET_EXHAUSTED: stop_check returned exit 2"
+      dispatch_notification "$SEED" "$STATE_DIR" budget_exhausted "$(jq -nc '{iteration:"", reason:"stop_check_exit_2"}')"
       echo "BUDGET_EXHAUSTED" >&2
       exit 2
       ;;
@@ -151,11 +198,22 @@ while true; do
       : # success → fall through to Consumer
       ;;
     1)
+      # §2.5 carve: distinguish gate_human-block (broker wrote pending_gate) vs genuine FAILED iteration.
+      # gate_human-block → exit-and-persist (operator answers async + restarts → §6.3 step 3 resume).
+      # Genuine FAILED (no pending_gate) → existing continue/re-plan path (bounded by P4-07 fail_count ≥3).
+      pending_gate_check="$(jq -r '.pending_gate // empty' "$STATE_DIR/state_snapshot.json" 2>/dev/null || echo "")"
+      if [[ -n "$pending_gate_check" && "$pending_gate_check" != "null" ]]; then
+        log "ITERATION $ITER BLOCKED on gate_human — pending_gate persisted; awaiting operator gate_response"
+        dispatch_notification "$SEED" "$STATE_DIR" gate_human "$(jq -nc --arg it "$ITER" '{iteration:$it, reason:"broker_block_pending_gate"}')"
+        echo "BLOCKED: pending gate_human (iteration $ITER) — write gate_response_*.json to resume" >&2
+        exit 0
+      fi
       log "ITERATION $ITER FAILED (execute_with_gates exit 1 — see escalations/)"
       mkdir -p "$STATE_DIR/escalations"
       printf '{"iteration":"%s","classification":"gate_human","reason":"execute_with_gates_exit_1","ts":"%s"}\n' \
              "$ITER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
              > "$STATE_DIR/escalations/iteration_${ITER}_failed.json"
+      dispatch_notification "$SEED" "$STATE_DIR" iteration_failed "$(jq -nc --arg it "$ITER" '{iteration:$it, reason:"execute_with_gates_exit_1"}')"
       # Continue loop (do not exit) so the Planner can decide to retry / reframe.
       log "ITERATION $ITER end (FAILED, gate_human escalated)"
       continue
@@ -188,6 +246,7 @@ while true; do
       printf '{"iteration":"%s","classification":"gate_human","reason":"fail_counts_threshold","item_id":"%s","ts":"%s"}\n' \
              "$ITER" "$triggered_item" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
              > "$STATE_DIR/escalations/fail_counts_threshold_${ITER}_${triggered_item}.json"
+      dispatch_notification "$SEED" "$STATE_DIR" fail_counts_threshold "$(jq -nc --arg it "$ITER" --arg item "$triggered_item" '{iteration:$it, gate_id:$item, reason:"P4_07_fail_counts_ge_3"}')"
       echo "HALT: FAIL_COUNTS_THRESHOLD (item=$triggered_item, iteration=$ITER)" >&2
       exit 3
     fi
