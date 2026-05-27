@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# test_slash_command_discovery.sh — regression test for FUP-0739 + FUP-0740 patch
-# (orchestrator.sh `claude -p` invocation flags for slash-command discovery + MSYS env guards).
+# test_slash_command_discovery.sh — regression test for FUP-0739 + FUP-0740 + FUP-0743/0744/0745 patches
+# (claude -p invocation flags for slash-command discovery + MSYS env guards — covers orchestrator.sh
+# AND all 3 hook files: plan_review.sh, execute_with_gates.sh, stop_check.sh).
 #
 # Two parts:
-#   1) Static guard (always runs; zero spend) — asserts orchestrator.sh retains the patch.
+#   1) Static guard (always runs; zero spend) — asserts orchestrator.sh + 3 hook files retain the patch
+#      (all 8 claude -p invocation sites carry --add-dir "$CLAUDE_SKILLS_DIR" --).
 #   2) Behavioral check (--live; ~$0.05–0.30 spend; requires network + auth) — reproduces
 #      Diagnostic 3 from Ralph_Loop_FUP-0717_0718_0737_R4_Gating_Fix_Execution_Report_2026-05-26_v1.0.md
 #      §3, asserting `claude -p` resolves /rl-initiative-planner from the ralph/ CWD.
@@ -21,6 +23,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RALPH_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 ORCH="$RALPH_ROOT/orchestrator.sh"
+HOOK_PLAN_REVIEW="$RALPH_ROOT/hooks/plan_review.sh"
+HOOK_EXEC_GATES="$RALPH_ROOT/hooks/execute_with_gates.sh"
+HOOK_STOP_CHECK="$RALPH_ROOT/hooks/stop_check.sh"
 
 LIVE=0
 for arg in "$@"; do
@@ -59,7 +64,47 @@ if grep -qF -- '--max-budget-usd "$remaining_budget" "$@"' "$ORCH"; then
   fail "pre-patch claude -p form '--max-budget-usd \"\$remaining_budget\" \"\$@\"' (no --add-dir) still present in orchestrator.sh"
 fi
 
-echo "[static] PASS — all 4 patch markers present + pre-patch form absent"
+# FUP-0743 + FUP-0744 + FUP-0745: hook files must also carry --add-dir on every claude -p site.
+# Total claude -p sites by file: orchestrator.sh 1 (patched above), plan_review.sh 2, execute_with_gates.sh 2
+# (the gate_dc rl-operator-answerer call PLUS the canonical Executor `claude --print` call which uses
+# its own flag set — counted separately), stop_check.sh 4. Static guard: every `claude -p` line in the
+# 3 hook files must carry `--add-dir "$CLAUDE_SKILLS_DIR" --`. (The Executor invocation uses
+# `claude --print` not `claude -p`; we grep for `^[[:space:]]*claude -p` to scope correctly.)
+echo "[static] checking hook files retain FUP-0743/0744/0745 patch..."
+
+check_hook_claude_p_sites() {
+  local hook_file="$1"
+  local hook_name="$2"
+  [[ -f "$hook_file" ]] || fail "$hook_name not found at $hook_file"
+  # Each `claude -p` invocation may span multiple lines via backslash continuation; join
+  # continued lines first, then verify --add-dir is present in every joined invocation.
+  # awk: at each line starting (after optional whitespace) with `claude -p `, accumulate
+  # the line; if it ends with `\`, append the next line; emit the joined invocation; check.
+  local violations
+  violations=$(awk '
+    /^[[:space:]]*claude -p / {
+      joined = $0
+      while (joined ~ /\\$/) {
+        sub(/\\$/, "", joined)
+        if ((getline next_line) <= 0) break
+        joined = joined " " next_line
+      }
+      if (joined !~ /--add-dir/) {
+        printf("  line %d: %s\n", NR, $0)
+      }
+    }
+  ' "$hook_file")
+  if [[ -n "$violations" ]]; then
+    echo "$violations" >&2
+    fail "$hook_name has claude -p invocations without --add-dir (FUP-0743/0744/0745 patch missing)"
+  fi
+}
+
+check_hook_claude_p_sites "$HOOK_PLAN_REVIEW" "plan_review.sh"
+check_hook_claude_p_sites "$HOOK_EXEC_GATES"  "execute_with_gates.sh"
+check_hook_claude_p_sites "$HOOK_STOP_CHECK"  "stop_check.sh"
+
+echo "[static] PASS — all patch markers present + pre-patch form absent (orchestrator.sh + 3 hook files)"
 
 # ---------------------------------------------------------------------------
 # Part 2 — behavioral check (--live only)

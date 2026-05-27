@@ -166,7 +166,8 @@ for ((i=0; i<count; i++)); do
       workspace_root="$(read_seed_field "$SEED" '.workspace_root')"
       case "$pred_name" in
         corpus_auditor_clean)
-          claude -p "/cf-corpus-auditor target=$target" > "$tmp_out" 2>&1 || true
+          # FUP-0745: --add-dir + -- required for slash-command resolution from ralph/ CWD.
+          claude -p --add-dir "$CLAUDE_SKILLS_DIR" -- "/cf-corpus-auditor target=$target" > "$tmp_out" 2>&1 || true
           # cf-corpus-auditor v1.7 emits `- Report location: {path}` into stdout (status echo);
           # skill's own SKILL.md L210 confirms this is the declared output convention.
           report_file="$(grep -oE '^- Report location: .+$' "$tmp_out" | sed 's/^- Report location: //' | tail -1)"
@@ -180,7 +181,8 @@ for ((i=0; i<count; i++)); do
         cross_reference_audit_clean)
           # cf-cross-reference-audit v1.7 SKILL.md L122-129 Inputs require audit_type=;
           # default to db_columns (most-commonly-referenced Tier-1 audit per skill's audit-type table).
-          claude -p "/cf-cross-reference-audit target=$target audit_type=db_columns mode=A severity_floor=severe" > "$tmp_out" 2>&1 || true
+          # FUP-0745: --add-dir + -- required for slash-command resolution from ralph/ CWD.
+          claude -p --add-dir "$CLAUDE_SKILLS_DIR" -- "/cf-cross-reference-audit target=$target audit_type=db_columns mode=A severity_floor=severe" > "$tmp_out" 2>&1 || true
           # Issues-file resolution: prefer explicit "Issues path:" line; else workspace-root-anchored glob
           # under audit/. SKILL.md L139-146 documents output at <workspace>/audit/<descriptor>_Issues_<date>_v1.0.md.
           issues_file="$(grep -oE '^Issues path: .+$' "$tmp_out" | sed 's/^Issues path: //' | tail -1)"
@@ -197,7 +199,8 @@ for ((i=0; i<count; i++)); do
           fi
           ;;
         new_skills_clean)
-          claude -p "/cf-skill-reviewer mode=A target=$target" > "$tmp_out" 2>&1 || true
+          # FUP-0745: --add-dir + -- required for slash-command resolution from ralph/ CWD.
+          claude -p --add-dir "$CLAUDE_SKILLS_DIR" -- "/cf-skill-reviewer mode=A target=$target" > "$tmp_out" 2>&1 || true
           # cf-skill-reviewer v1.9 SKILL.md L195-200 emits `## Recommended Action` header then
           # the value (KEEP / REPAIR / REBUILD) on a separate non-blank line. Awk picks the next
           # non-blank line after the header; grep validates KEEP.
@@ -207,7 +210,8 @@ for ((i=0; i<count; i++)); do
           fi
           ;;
         auto_build_spec_clean)
-          claude -p "/cf-doc-reviewer \\fix2 target=$target" > "$tmp_out" 2>&1 || true
+          # FUP-0745: --add-dir + -- required for slash-command resolution from ralph/ CWD.
+          claude -p --add-dir "$CLAUDE_SKILLS_DIR" -- "/cf-doc-reviewer \\fix2 target=$target" > "$tmp_out" 2>&1 || true
           if ! grep -qE 'All findings resolved:\s*YES' "$tmp_out"; then
             all_pass=0
           fi

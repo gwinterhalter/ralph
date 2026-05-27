@@ -22,8 +22,10 @@ for round in 1 2 3 4 5; do
   FINDINGS="$ITER_DIR/review_findings_${round}.json"
   RESULT_TEXT="$ITER_DIR/review_result_${round}.txt"
   # Invoke cf-session-plan-reviewer; capture JSON envelope via --output-format json. FUP-0720.
+  # FUP-0743: --add-dir "$CLAUDE_SKILLS_DIR" -- required so the slash command resolves from
+  # the ralph/ CWD (skills live in a SIBLING tree); env var exported by orchestrator.sh.
   claude -p --output-format json --max-budget-usd "$BUDGET_CAP" \
-    "/cf-session-plan-reviewer $PLAN_PATH" > "$FINDINGS"
+    --add-dir "$CLAUDE_SKILLS_DIR" -- "/cf-session-plan-reviewer $PLAN_PATH" > "$FINDINGS"
   # Extract .result field for convergence regex (newlines unescaped) — FUP-0720.
   jq -r '.result // empty' "$FINDINGS" > "$RESULT_TEXT"
   # Converged when the reviewer emits its completion block reporting zero BLOCKER
@@ -36,8 +38,9 @@ for round in 1 2 3 4 5; do
     exit 0
   fi
   # Else invoke planner --revise to produce a revised plan (overwrites $PLAN_PATH).
+  # FUP-0743: --add-dir + -- (same rationale as the reviewer call above).
   claude -p --output-format json --max-budget-usd "$BUDGET_CAP" \
-    "/rl-initiative-planner --revise $FINDINGS" > "$ITER_DIR/revise_round_${round}.json"
+    --add-dir "$CLAUDE_SKILLS_DIR" -- "/rl-initiative-planner --revise $FINDINGS" > "$ITER_DIR/revise_round_${round}.json"
 done
 
 # Did not converge — write escalation (§13.2 exit 1).

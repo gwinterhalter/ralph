@@ -88,7 +88,8 @@ for req in "$ITER_DIR"/gate_request_"${ITER}"_*.json; do
     return 1 2>/dev/null || exit 1
   fi
   # gate_dc -> resolve via rl-operator-answerer; answer inlined into plan text by the answerer.
-  claude -p "/rl-operator-answerer $req" > "$ITER_DIR/gate_response_$(basename "$req")"
+  # FUP-0744: --add-dir + -- required for slash-command resolution from ralph/ CWD.
+  claude -p --add-dir "$CLAUDE_SKILLS_DIR" -- "/rl-operator-answerer $req" > "$ITER_DIR/gate_response_$(basename "$req")"
 done
 shopt -u nullglob
 
