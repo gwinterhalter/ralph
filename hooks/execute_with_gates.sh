@@ -181,12 +181,22 @@ MAX_TURNS="$(read_seed_field "$SEED" '.budget.max_turns_per_call // 200')"
 # either form). Without this, claude rejects `--permission-mode "--permission-mode auto"`
 # with "Allowed choices are acceptEdits, auto, bypassPermissions, default, dontAsk, plan."
 posture_value="${PERMISSION_POSTURE#--permission-mode }"
+# FUP-0764: capture the CLI's authoritative JSON envelope to a collision-proof dotfile temp,
+# then atomically mv it into place. The executed agent can itself write a file named
+# execution_result_${ITER}.json as a side effect (observed on the §6.3 resume leg: an Executor
+# hand-authored the envelope "to leave the exit-0 shape"), which races the `>` redirect's shared
+# fd and leaves a concatenated two-document file (jsonschema "Extra data: line 2"). Redirecting
+# to a name the agent does not target + mv -f guarantees the CLI envelope is the sole final
+# content — same orchestrator-owns-its-output-files invariant the FUP-0756 fix applied to the
+# Consumer-written state files.
+RESULT_JSON_TMP="$ITER_DIR/.execution_result_${ITER}.cli.json"
 # shellcheck disable=SC2086
 claude --print --output-format json \
        --permission-mode "$posture_value" \
        --strict-mcp-config --mcp-config "$MCP_CONFIG" \
        --max-budget-usd "$PER_CALL_CAP" --max-turns "$MAX_TURNS" \
-       < "$PLAN_PATH" > "$RESULT_JSON"
+       < "$PLAN_PATH" > "$RESULT_JSON_TMP"
+mv -f "$RESULT_JSON_TMP" "$RESULT_JSON"
 
 # Phase 4a P4-06: validate execution_result.json against schema before §10.5 fires (typo-catch).
 if ! bash "$SCRIPT_DIR/../lib/validate_artefact.sh" "$SCRIPT_DIR/../schemas/execution_result.schema.json" "$RESULT_JSON"; then
