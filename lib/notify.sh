@@ -24,7 +24,10 @@ dispatch_notification() {
   msg="ralph-loop event=$event iteration=$iteration gate_id=$gate_id"
   channel_attempted="none"
   channel_result="no_channel"
-  if [[ "$primary" == "slack_webhook" && -n "$primary_env" && "$primary_env" != "null" && -n "${!primary_env:-}" ]]; then
+  # Slack interface disabled by default per operator directive 2026-05-28 — the slack_webhook
+  # branch fires ONLY when the operator explicitly exports CF_ORCHESTRATOR_ENABLE_SLACK=1
+  # (fully reversible; code retained). Email (gmail_smtp) is primary per seed v1.3.
+  if [[ "$primary" == "slack_webhook" && "${CF_ORCHESTRATOR_ENABLE_SLACK:-0}" == "1" && -n "$primary_env" && "$primary_env" != "null" && -n "${!primary_env:-}" ]]; then
     channel_attempted="slack_webhook"
     if curl -fsS -X POST -H 'Content-Type: application/json' \
             --data "$(jq -nc --arg t "$msg" '{text:$t}')" \

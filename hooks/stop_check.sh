@@ -139,8 +139,52 @@ for ((i=0; i<count; i++)); do
             [[ "$missing_count" -eq 0 ]] || all_pass=0
             ;;
           *)
-            echo "stop_check: registry_zero_open predicate '$pred_name' has no known sub-evaluator (expected: zero_open_gaps, every_closure_cites_iteration)" >&2
-            exit 3
+            # FUP-0767: predicates whose name is not one of the hardcoded sub-evaluators above
+            # (e.g. a V7-shaped seed's descriptively-named `all_v7_items_closed`) carry their
+            # semantics in params.filter. Generic evaluator for the "<column> != <value>" form
+            # (e.g. "status != closed"): locate <column> by its markdown-table header name, count
+            # data rows whose cell != <value>, pass (clean) when that count is 0. The name-based
+            # zero_open_gaps / every_closure_cites_iteration arms above remain unchanged.
+            pred_filter="$(read_seed_field "$SEED" ".completion_predicate[$i].params.filter" 2>/dev/null || echo "")"
+            if [[ -z "$pred_filter" || "$pred_filter" == "null" ]]; then
+              echo "stop_check: registry_zero_open predicate '$pred_name' has no known sub-evaluator (expected: zero_open_gaps, every_closure_cites_iteration) and no params.filter" >&2
+              exit 3
+            fi
+            if [[ "$pred_filter" != *"!="* ]]; then
+              echo "stop_check: registry_zero_open params.filter '$pred_filter' unsupported for predicate '$pred_name' (expected '<column> != <value>')" >&2
+              exit 3
+            fi
+            filter_col="$(printf '%s' "$pred_filter" | sed -E 's/[[:space:]]*!=.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')"
+            filter_val="$(printf '%s' "$pred_filter" | sed -E 's/^.*!=[[:space:]]*//; s/^"//; s/"$//; s/^[[:space:]]*//; s/[[:space:]]*$//')"
+            if [[ -z "$filter_col" ]]; then
+              echo "stop_check: registry_zero_open params.filter '$pred_filter' has no column name (expected '<column> != <value>')" >&2
+              exit 3
+            fi
+            col_idx=-1
+            unmet_count=0
+            while IFS= read -r line; do
+              line="${line%$'\r'}"
+              [[ "$line" == \|* ]] || continue
+              [[ "$line" =~ ^\|[[:space:]]*-+ ]] && continue
+              IFS='|' read -ra cells <<< "$line"
+              if [[ "$col_idx" -lt 0 ]]; then
+                for idx in "${!cells[@]}"; do
+                  hdr="${cells[$idx]}"
+                  hdr="${hdr#"${hdr%%[![:space:]]*}"}"; hdr="${hdr%"${hdr##*[![:space:]]}"}"
+                  if [[ "$hdr" == "$filter_col" ]]; then col_idx="$idx"; break; fi
+                done
+                if [[ "$col_idx" -lt 0 ]]; then
+                  echo "stop_check: registry_zero_open params.filter column '$filter_col' not found in register header ($register_path)" >&2
+                  exit 3
+                fi
+                continue
+              fi
+              [[ ${#cells[@]} -gt "$col_idx" ]] || continue
+              cell="${cells[$col_idx]}"
+              cell="${cell#"${cell%%[![:space:]]*}"}"; cell="${cell%"${cell##*[![:space:]]}"}"
+              [[ "$cell" != "$filter_val" ]] && unmet_count=$((unmet_count+1))
+            done < "$register_path"
+            [[ "$unmet_count" -eq 0 ]] || all_pass=0
             ;;
         esac
       fi

@@ -33,8 +33,12 @@ for round in 1 2 3 4 5; do
   # a "## Session Plan Review Complete" header followed by a
   # "- Findings: N BLOCKER, N DRIFT, N COSMETIC" summary line. COSMETIC findings
   # do NOT block convergence (reviewer Step 6 severity model). FUP-0716 / FUP-0719.
-  if grep -qF '## Session Plan Review Complete' "$RESULT_TEXT" \
-     && grep -qE '^-[[:space:]]*Findings:[[:space:]]*0[[:space:]]+BLOCKER,[[:space:]]*0[[:space:]]+DRIFT' "$RESULT_TEXT"; then
+  # FUP-0770: the reviewer may emit the Findings/header line wrapped in markdown
+  # bold (e.g. "- **Findings: 0 BLOCKER, 0 DRIFT, 0 COSMETIC**"); strip all '*'
+  # before the convergence greps so bold anywhere on the line cannot block a match.
+  CLEAN_RESULT="$(sed 's/\*//g' "$RESULT_TEXT")"
+  if printf '%s' "$CLEAN_RESULT" | grep -qF '## Session Plan Review Complete' \
+     && printf '%s' "$CLEAN_RESULT" | grep -qE '^-[[:space:]]*Findings:[[:space:]]*0[[:space:]]+BLOCKER,[[:space:]]*0[[:space:]]+DRIFT'; then
     exit 0
   fi
   # Else invoke planner --revise to produce a revised plan (overwrites $PLAN_PATH).

@@ -72,7 +72,10 @@ next_iteration_index() {
 }
 
 # §6.3 resumability rule / bootstrap.
-registry_hash() { [[ -f "$1" ]] && sha256sum "$1" | cut -d' ' -f1 || echo "MISSING"; }
+# FUP-0769: hash via stdin so the filename never appears in sha256sum output —
+# a Windows backslash path would otherwise make coreutils prepend '\' to the
+# digest line, corrupting the §6.3 resume hash comparison on a false mismatch.
+registry_hash() { [[ -f "$1" ]] && sha256sum < "$1" | cut -d' ' -f1 || echo "MISSING"; }
 
 if [[ -f "$STATE_DIR/state_snapshot.json" ]]; then
   log "RESUME: state_snapshot.json found"
@@ -181,6 +184,15 @@ while true; do
     2> "$ITER_DIR/planner.stderr"
   # Extract markdown result for any downstream consumer expecting the textual emission:
   jq -r '.result // empty' "$ITER_DIR/planner.json" > "$ITER_DIR/planner.stdout"
+
+  # FUP-0768: Planner Path-A (Spec §10.3) — Planner emits INITIATIVE_COMPLETE and writes NO
+  # session_plan; terminate clean rather than running plan_review.sh on a missing file.
+  if [[ ! -f "$ITER_DIR/session_plan_${ITER}.md" ]] && grep -qF 'INITIATIVE_COMPLETE' "$ITER_DIR/planner.stdout"; then
+    log "INITIATIVE_COMPLETE: Planner Path-A signal (iteration $ITER; no session_plan written)"
+    dispatch_notification "$SEED" "$STATE_DIR" initiative_complete "$(jq -nc --arg it "$ITER" '{iteration:$it, reason:"planner_path_a_initiative_complete"}')"
+    echo "INITIATIVE_COMPLETE"
+    exit 0
+  fi
 
   # Plan review (inner loop; bash-hook-orchestrated, §13.2)
   "$SCRIPT_DIR/hooks/plan_review.sh" "$ITER_DIR/session_plan_${ITER}.md"
