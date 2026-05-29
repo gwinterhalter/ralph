@@ -65,6 +65,12 @@ dispatch_notification() {
         printf '\r\n'
         printf '%s\r\n' "$msg"
       } > "$tmp_msg"
+      # FUP-0787: guard curl under the inherited `set -e` (this file is sourced by
+      # execute_with_gates.sh / orchestrator.sh). Unguarded, a transient non-zero curl
+      # (e.g. 26 read error) aborts the function before `local rc=$?` captures it, propagating
+      # the raw exit up and HALTing the orchestrator on EXECUTE_WITH_GATES_UNEXPECTED_EXIT.
+      # Notification failures must stay non-fatal: capture rc, log it, never propagate.
+      set +e
       curl --silent --show-error --max-time 30 --ssl-reqd \
            --url "smtp://${smtp_host}:${smtp_port}" \
            --mail-from "$smtp_user_val" \
@@ -72,6 +78,7 @@ dispatch_notification() {
            --user "${smtp_user_val}:${smtp_app_pw_val}" \
            --upload-file "$tmp_msg" >/dev/null 2>&1
       local rc=$?
+      set -e
       if [[ $rc -eq 0 ]]; then
         channel_result="success"
       else
