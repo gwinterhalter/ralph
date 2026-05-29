@@ -187,15 +187,27 @@ while true; do
 
   # FUP-0768: Planner Path-A (Spec §10.3) — Planner emits INITIATIVE_COMPLETE and writes NO
   # session_plan; terminate clean rather than running plan_review.sh on a missing file.
-  if [[ ! -f "$ITER_DIR/session_plan_${ITER}.md" ]] && grep -qF 'INITIATIVE_COMPLETE' "$ITER_DIR/planner.stdout"; then
-    log "INITIATIVE_COMPLETE: Planner Path-A signal (iteration $ITER; no session_plan written)"
+  # FUP-0790: ALSO require no gate_request_*.json — the bare grep matched the literal
+  # "INITIATIVE_COMPLETE" string inside a gate_human escalation narrative (iter 0004:
+  # "Neither INITIATIVE_COMPLETE nor a draft plan"), falsely declaring completion. A real
+  # Path-A has neither plan nor gates; an escalation has gates but no plan — distinguishable.
+  if [[ ! -f "$ITER_DIR/session_plan_${ITER}.md" ]] \
+     && ! compgen -G "$ITER_DIR/gate_request_${ITER}_*.json" > /dev/null \
+     && grep -qF 'INITIATIVE_COMPLETE' "$ITER_DIR/planner.stdout"; then
+    log "INITIATIVE_COMPLETE: Planner Path-A signal (iteration $ITER; no session_plan, no gate_request)"
     dispatch_notification "$SEED" "$STATE_DIR" initiative_complete "$(jq -nc --arg it "$ITER" '{iteration:$it, reason:"planner_path_a_initiative_complete"}')"
     echo "INITIATIVE_COMPLETE"
     exit 0
   fi
 
   # Plan review (inner loop; bash-hook-orchestrated, §13.2)
-  "$SCRIPT_DIR/hooks/plan_review.sh" "$ITER_DIR/session_plan_${ITER}.md"
+  # FUP-0790: skip plan_review when Planner escalated without a plan — execute_with_gates
+  # below routes the gate_request files (broker writes pending_gate + exits 1 -> BLOCKED).
+  if [[ -f "$ITER_DIR/session_plan_${ITER}.md" ]]; then
+    "$SCRIPT_DIR/hooks/plan_review.sh" "$ITER_DIR/session_plan_${ITER}.md"
+  else
+    log "ITERATION $ITER Planner escalated without plan — skipping plan_review; routing gate_request(s) via execute_with_gates"
+  fi
 
   # Phase 4b P4-03(b): capture execute_with_gates.sh exit code (0/1/2) and branch.
   # exit 0 = continue to Consumer; exit 1 = FAILED iteration + escalate gate_human
