@@ -126,6 +126,19 @@ for req in "$ITER_DIR"/gate_request_"${ITER}"_*.json; do
   resp_file="$ITER_DIR/gate_response_${req_suffix}.json"   # canonical FR-008 path — Answerer-written
   answerer_stdout_file="$ITER_DIR/answerer_stdout_${req_suffix}.md"
   claude -p --add-dir "$CLAUDE_SKILLS_DIR" -- "/rl-operator-answerer $req" > "$answerer_stdout_file"
+  # FUP-NEW (path-mismatch tolerance): rl-operator-answerer occasionally writes the
+  # gate_response into an `<iter_dir>/gates/` subdir instead of the canonical `<iter_dir>/`
+  # root (stochastic path-confusion when the Answerer notices the state-level `gates/` dir
+  # and replicates it inside the iteration tree). Promote any such file to the canonical
+  # location before the demotion check so a well-formed Answerer response isn't lost to a
+  # spurious gate_human escalation. Long-term fix is in the rl-operator-answerer skill; this
+  # is the hook-side safety net.
+  if [[ ! -f "$resp_file" && -f "$ITER_DIR/gates/gate_response_${req_suffix}.json" ]]; then
+    mv "$ITER_DIR/gates/gate_response_${req_suffix}.json" "$resp_file"
+    echo "execute_with_gates: promoted gate_response from $ITER_DIR/gates/ to canonical iter root for $req_suffix" >&2
+    # If gates/ is now empty, prune it so it doesn't pollute the iter directory listing.
+    rmdir "$ITER_DIR/gates" 2>/dev/null || true
+  fi
   # §1.2(b) Answerer-demotion check (FR-009): if the Answerer self-escalated per §5.3
   # (sub-threshold confidence / irreversible / out-of-scope), it emits a gate_escalation
   # artefact alongside / instead of a conformant gate_response. Detect either form
