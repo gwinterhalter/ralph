@@ -13,6 +13,32 @@ SEED="${1:?usage: stop_check.sh <seed_path> <state_dir>}"
 # shellcheck disable=SC2034  # STATE_DIR required by §13.2 hook signature; predicates use seed-absolute paths
 STATE_DIR="${2:?usage: stop_check.sh <seed_path> <state_dir>}"
 
+# FUP-0806: scan-newest resolution for bare-name register references (mirrors Planner-side per
+# seed §4.1 / FUP-0788). Args: $1 = workspace_root, $2 = bare register name (e.g.
+# "Auto_Build_Gap_Register.md"). Echoes the resolved absolute path of the highest-versioned
+# match, or empty if no candidate. Excludes Project_Docs_Current subtree (CLAUDE.md
+# read-only historical snapshot) so sibling-project legacy copies don't shadow the live
+# Sub_Projects/<project>/{New,design}/ versioned files.
+resolve_register_scan_newest() {
+  local root="$1" name="$2"
+  local base="${name%.md}"
+  local best="" best_v="" f bn v
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    [[ "$f" == *Project_Docs_Current* ]] && continue
+    bn="${f##*/}"
+    v="${bn#${base}_v}"
+    v="${v%.md}"
+    [[ "$v" =~ ^[0-9]+(\.[0-9]+)*$ ]] || continue
+    if [[ -z "$best_v" ]]; then
+      best_v="$v"; best="$f"
+    elif [[ "$(printf '%s\n%s\n' "$best_v" "$v" | sort -V | tail -1)" == "$v" ]]; then
+      best_v="$v"; best="$f"
+    fi
+  done < <(find "$root" "$SCRIPT_DIR/.." -type f -name "${base}_v*.md" 2>/dev/null)
+  echo "$best"
+}
+
 count="$(read_seed_field "$SEED" '.completion_predicate | length')"
 if ! [[ "$count" =~ ^[0-9]+$ ]]; then
   echo "stop_check: completion_predicate not an array" >&2; exit 3
@@ -54,6 +80,13 @@ for ((i=0; i<count; i++)); do
         register_path="$targets_source"
       else
         register_path="$(find "$workspace_root" "$SCRIPT_DIR/.." -type f -name "$targets_source" 2>/dev/null | head -1)"
+        # FUP-0806: scan-newest fallback (parallel to registry_zero_open branch above).
+        if [[ -z "$register_path" || ! -f "$register_path" ]]; then
+          register_path="$(resolve_register_scan_newest "$workspace_root" "$targets_source")"
+          if [[ -n "$register_path" && -f "$register_path" ]]; then
+            echo "stop_check: artefact_exists targets_source register '$targets_source' resolved via scan-newest to '$register_path'" >&2
+          fi
+        fi
       fi
       if [[ -z "$register_path" || ! -f "$register_path" ]]; then
         echo "stop_check: artefact_exists targets_source register '$targets_source' not found" >&2
@@ -98,6 +131,17 @@ for ((i=0; i<count; i++)); do
       else
         workspace_root="$(read_seed_field "$SEED" '.workspace_root')"
         register_path="$(find "$workspace_root" "$SCRIPT_DIR/.." -type f -name "$register_rel" 2>/dev/null | head -1)"
+        # FUP-0806: scan-newest fallback — bare-name register references (per FUP-0788 / seed §4.1)
+        # like "Auto_Build_Gap_Register.md" don't match versioned files by exact find -name. Try
+        # `<base>_v*.md` pattern, extract version from basename, take highest. Mirrors the Planner-
+        # side resolution rule. (Plain `sort -V` on full paths is unsafe — archive subtrees and
+        # sibling project copies sort by directory before version.)
+        if [[ -z "$register_path" || ! -f "$register_path" ]]; then
+          register_path="$(resolve_register_scan_newest "$workspace_root" "$register_rel")"
+          if [[ -n "$register_path" && -f "$register_path" ]]; then
+            echo "stop_check: registry_zero_open predicate '$pred_name' register '$register_rel' resolved via scan-newest to '$register_path'" >&2
+          fi
+        fi
       fi
       if [[ -z "$register_path" || ! -f "$register_path" ]]; then
         echo "stop_check: registry_zero_open predicate '$pred_name' register '$register_rel' not found" >&2
