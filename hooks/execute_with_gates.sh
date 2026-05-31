@@ -33,7 +33,20 @@ generate_mcp_config() {
   else
     plan_block='[]'
   fi
-  merged="$(echo "$seed_block $plan_block" | jq -s 'add | map({(.name): {command, args, env}}) | add // {} | {"mcpServers": .}')"
+  # FUP-0807: filter to objects with a `.name` key BEFORE the map() projection. Seed entries
+  # that are bare strings (schema-violation per seed.example.md v1.1 per-server {name,command,args,env}
+  # shape — observed in Auto_Build_Spec_Closure_Initiative_Seed_v1_5_1.md as `[supabase, filesystem]`)
+  # would otherwise hit `jq: error: Cannot index string with string "name"` and abort execute_with_gates
+  # with rc=5 → orchestrator HALT EXECUTE_WITH_GATES_UNEXPECTED_EXIT. With the filter, bare-string entries
+  # are silently dropped from the merged config (Executor receives `{"mcpServers": {}}` for that pair),
+  # matching the pre-Phase-4a-P4-01 fall-through behaviour. A stderr warning enumerates the dropped names
+  # so seed authors notice the schema-violation without the orchestrator crashing.
+  local dropped
+  dropped="$(echo "$seed_block $plan_block" | jq -s -r 'add | map(select(type == "string")) | join(",")')"
+  if [[ -n "$dropped" ]]; then
+    echo "generate_mcp_config: WARN — dropped bare-name mcp_servers entries (schema-violation, expected {name,command,args,env}): $dropped" >&2
+  fi
+  merged="$(echo "$seed_block $plan_block" | jq -s 'add | map(select(type == "object" and has("name"))) | map({(.name): {command, args, env}}) | add // {} | {"mcpServers": .}')"
   mkdir -p "$iter_dir"
   echo "$merged" > "$iter_dir/mcp_config.json"
   echo "generate_mcp_config: wrote $iter_dir/mcp_config.json" >&2
