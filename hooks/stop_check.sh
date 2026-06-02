@@ -126,6 +126,17 @@ for ((i=0; i<count; i++)); do
         echo "stop_check: artefact_exists targets_source register '$targets_source' not found" >&2
         all_pass=0
       else
+        # FUP-0820: skip downstream .md-token existence check for describe-not-prescribe
+        # seeds where cited closure artefacts are planned-not-authored (semantic § refs
+        # inside the spec text rather than filesystem files). Operator opts in via
+        # params.skip_artefact_existence_check: true. Without this, register rows citing
+        # template-stem names (e.g. Build_Artifact_Templates.md, _Plan.md) fail existence
+        # check even though the substrate is substantively complete per the §10.4 convention.
+        skip_existence="$(read_seed_field "$SEED" ".completion_predicate[$i].params.skip_artefact_existence_check" 2>/dev/null || echo "")"
+        if [[ "$skip_existence" == "true" ]]; then
+          pred_label="$(read_seed_field "$SEED" ".completion_predicate[$i].name" 2>/dev/null || echo "<unnamed>")"
+          echo "stop_check: artefact_exists predicate '$pred_label' SKIP-EXISTENCE-CHECK per params.skip_artefact_existence_check (FUP-0820; describe-not-prescribe convention)" >&2
+        else
         missing_count=0
         while IFS= read -r line; do
           line="${line%$'\r'}"
@@ -146,6 +157,7 @@ for ((i=0; i<count; i++)); do
           done < <(echo "$resolution" | grep -oE '[A-Za-z0-9_./-]+\.md' || true)
         done < "$register_path"
         [[ "$missing_count" -eq 0 ]] || all_pass=0
+        fi
       fi
       ;;
     registry_zero_open)
