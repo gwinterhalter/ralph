@@ -389,6 +389,11 @@ for ((i=0; i<count; i++)); do
           # 'doc' for doc_review_clean predicates per Initiative_Orchestrator_Spec §8 schema
           # flexibility); ensures target_stem resolves to a meaningful identifier.
           doc_field="$(read_seed_field "$SEED" ".completion_predicate[$i].params.doc" 2>/dev/null || echo "")"
+          # yq returns literal "null" for missing fields (not empty string), so explicit
+          # check is needed in addition to bash ${x:-y} fallback (which only fires on
+          # empty/unset). Treat "null" as absent so the doc-field fallback fires.
+          [[ "$target" == "null" ]] && target=""
+          [[ "$doc_field" == "null" ]] && doc_field=""
           effective_target="${target:-$doc_field}"
           target_stem="$(basename "$effective_target" .md)"
           cached_audit="$(find "$workspace_root" -path "*/audit/*${target_stem}*fix2*.md" -type f -mtime -7 -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)"
