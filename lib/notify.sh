@@ -14,10 +14,19 @@ dispatch_notification() {
   local state_dir="$2"
   local event="$3"
   local context_json="$4"
-  local primary primary_env fallback msg ts iteration gate_id channel_attempted channel_result
+  local primary primary_env fallback msg ts iteration gate_id reason channel_attempted channel_result
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   iteration="$(printf '%s' "$context_json" | jq -r '.iteration // ""' 2>/dev/null || echo "")"
   gate_id="$(printf '%s' "$context_json" | jq -r '.gate_id // "null"' 2>/dev/null || echo "null")"
+  # FUP-0774: persist `reason` field from context_json to the audit log entry. Without this,
+  # DW assertions that target a specific dispatch path (e.g. `.reason == "answerer_demote"`
+  # against notifications.log) are unverifiable — the demote signal previously only lived in
+  # execute_with_gates.sh stderr ("Answerer demoted gate_dc <id> to gate_human"). With this
+  # fix, both surfaces carry the reason: stderr for live-tail observability, notifications.log
+  # for after-the-fact JSON-queryable audit. Backward-compat: context_json without a `reason`
+  # field resolves to `"null"` (jq default) — the log entry emits `reason: null` in that case
+  # rather than failing or omitting the field, preserving the schema for queries.
+  reason="$(printf '%s' "$context_json" | jq -r '.reason // "null"' 2>/dev/null || echo "null")"
   primary="$(read_seed_field "$seed_path" '.notification_channel.primary' 2>/dev/null || echo "")"
   primary_env="$(read_seed_field "$seed_path" '.notification_channel.primary_env_var' 2>/dev/null || echo "")"
   fallback="$(read_seed_field "$seed_path" '.notification_channel.fallback' 2>/dev/null || echo "")"
@@ -154,8 +163,8 @@ dispatch_notification() {
   fi
   # UNCONDITIONAL audit append — runs regardless of channel attempt / success (FR-009).
   mkdir -p "$state_dir/logs"
-  jq -nc --arg ev "$event" --arg it "$iteration" --arg gid "$gate_id" \
+  jq -nc --arg ev "$event" --arg it "$iteration" --arg gid "$gate_id" --arg rsn "$reason" \
          --arg att "$channel_attempted" --arg res "$channel_result" --arg ts "$ts" \
-         '{event:$ev, iteration:$it, gate_id:(if $gid=="null" then null else $gid end), channel_attempted:$att, channel_result:$res, ts:$ts}' \
+         '{event:$ev, iteration:$it, gate_id:(if $gid=="null" then null else $gid end), reason:(if $rsn=="null" then null else $rsn end), channel_attempted:$att, channel_result:$res, ts:$ts}' \
          >> "$state_dir/logs/notifications.log"
 }
