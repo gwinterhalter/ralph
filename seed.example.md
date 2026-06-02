@@ -1,5 +1,5 @@
 ---
-seed_schema_version: 1.3
+seed_schema_version: 1.4
 initiative:
   slug: example-initiative
   title: Example Initiative
@@ -69,6 +69,21 @@ gate_policy:
   pre_classification:
     - pattern: "cluster:high-risk"
       class: gate_human
+    # FUP-0791 (schema 1.4): optional auto_resolve field on a pre_classification entry. When
+    # the matching pattern fires AND auto_resolve is set, the broker writes a gate_response
+    # directly with the named option_id, skipping both gate_dc Answerer escalation and
+    # gate_human operator-wait paths. Use for recurring A/A operator patterns (e.g. cf-* skill
+    # build sub-gates "deliverable-scope = A=SKILL.md+tests" and "section-8-4-spec-wiring =
+    # A=defer to follow-on spec_bump"). Operator override: bump the seed to remove the
+    # auto_resolve field if a future iteration needs a different shape. Backward-compat:
+    # entries without auto_resolve resolve through the existing classify-and-escalate path.
+    # Example:
+    # - pattern: "contains:deliverable-scope"
+    #   class: gate_human
+    #   auto_resolve: A
+    # - pattern: "contains:section-8-4-spec-wiring-coupling"
+    #   class: gate_human
+    #   auto_resolve: A
   confidence_threshold: 0.7
 budget:
   iterations_max: 20
@@ -89,7 +104,7 @@ values in the YAML frontmatter, and point the orchestrator at the copy:
 
 | Field | Required | Meaning |
 |---|---|---|
-| `seed_schema_version` | yes | Schema format version; orchestrator refuses a seed whose major exceeds its supported major (§8.3). Current: `1.3`. |
+| `seed_schema_version` | yes | Schema format version; orchestrator refuses a seed whose major exceeds its supported major (§8.3). Current: `1.4`. |
 | `initiative.slug` / `.title` / `.owner` | yes | Kebab-case id, human title, operator handle. |
 | `workspace_root` | yes | Absolute path; root for all initiative writes. |
 | `read_only_paths[]` | yes | Absolute paths the orchestrator and every subprocess must never write to. Always include `Project_Docs_Current`. |
@@ -100,7 +115,8 @@ values in the YAML frontmatter, and point the orchestrator at the copy:
 | `session_shape_catalog[]` | yes | Named shapes the Planner may select; each pairs a `name` with a `template_pointer`. |
 | `verification_bindings.<shape>[]` | yes | Per-shape list of verification skills the Consumer invokes. |
 | `completion_predicate[]` | yes | Ordered named checks; orchestrator emits `INITIATIVE_COMPLETE` when all pass. Each entry: `name`, `check_kind`, `params`. |
-| `gate_policy.pre_classification[]` | yes | Patterns (per §10.2 DSL) that pre-class a gate as `gate_human`. |
+| `gate_policy.pre_classification[]` | yes | Patterns (per §10.2 DSL) that pre-class a gate as `gate_human`. Each entry: `pattern` (required; `gate_id:<id>` / `cluster:<name>` / `contains:<substring>`) + `class` (required; `gate_human` or `gate_dc`) + `auto_resolve` (optional; schema 1.4 — when set, broker writes a gate_response directly with the named option_id, skipping Answerer/operator). |
+| `gate_policy.pre_classification[].auto_resolve` | no (schema 1.4) | Optional string holding the gate `selected_option` value the broker auto-fills when this pattern matches. Closes FUP-0791 — recurring A/A operator patterns (e.g. cf-* skill_build deliverable-scope = A=SKILL.md+tests; section-8-4-spec-wiring = A=defer to follow-on spec_bump) no longer interrupt the run. Backward-compat: entries without `auto_resolve` use existing classify-and-escalate path. Audit trail: every auto-resolve appends a row to `state_dir/logs/auto_resolve.log`. |
 | `gate_policy.confidence_threshold` | yes | Float in [0,1]; default `0.7`. |
 | `budget.iterations_max` / `.tokens_usd` / `.hang_timeout_seconds` | yes | Iteration ceiling; USD ceiling; per-Executor no-progress timeout. |
 | `notification_channel` | yes | Declarative target for the notification one-liner. |
@@ -123,6 +139,7 @@ Optional fields (§8.2): `target_order[]`, `initiative.description`, `initiative
 
 | Version | Date | Author | Summary |
 |---------|------|--------|---------|
+| 1.4 | 2026-06-02 | Claude Code | **FUP-0791 closure** — adds optional `auto_resolve: <option_id>` field on `gate_policy.pre_classification[]` entries. When the matching pattern fires AND auto_resolve is set, the `hooks/execute_with_gates.sh` broker writes `gate_response_NNNN_MMMM.json` directly with the named `selected_option`, skipping both `gate_dc` Answerer escalation and `gate_human` operator-wait paths. Closes the recurring A/A operator pattern observed 3 times in Phase 6 S2 (iter-0003 G24+G25, iter-0005 G26, iter-0006 G28; each instance cost ~$2-4 Answerer compute + operator wait-state + orchestrator BLOCK/resume cycle). Operator override preserved: bump the seed to remove the `auto_resolve` field if a future iteration needs a different shape. Audit trail: every auto-resolve appends a row to `state_dir/logs/auto_resolve.log` (gate_id, matched pattern, matched pc index, auto-resolved option, timestamp). Wiring: `hooks/execute_with_gates.sh` Pass-1 broker loop gains `matched_pc_idx` tracking + post-loop auto_resolve handling block that writes the gate_response and `continue`s before the gate_human deferral / gate_dc Answerer paths. Backward-compat: entries without `auto_resolve` use existing classify-and-escalate behaviour unchanged. Field-reference table extended (gate_policy.pre_classification row note + new auto_resolve row). No required-field change; no schema-major bump. Surfaced as IOS §8.1 schema-1.4 candidate via FUP-0791 closure metadata. |
 | 1.3 | 2026-06-02 | Claude Code | **FUP-0798 closure** — adds optional `heartbeat:` block at the frontmatter top with 3 fields: `heartbeat.workstream_id` (integer; the workstreams.workstream_id PK to UPSERT) + `heartbeat.env_vars.project_url` (env var NAME holding the Supabase project URL) + `heartbeat.env_vars.service_role_key` (env var NAME holding the service-role key). When all 3 declared AND env vars exported at machine scope, the orchestrator UPSERTs `last_session_label` / `next_session_blocker` / `metadata.heartbeat_at` / `metadata.heartbeat_iter` / `metadata.heartbeat_phase` at iteration begin + close. When any field absent or env var unset, silent skip (logged to `state_dir/logs/heartbeat.log`). Wiring: NEW `lib/heartbeat.sh` with the `heartbeat_workstream()` function (PostgREST PATCH with metadata merge; non-fatal on any error — never propagates curl rc up the orchestrator); `orchestrator.sh` sources lib/heartbeat.sh + calls `heartbeat_workstream` at iteration begin (line ~195) + close (line ~351). Backward-compat: absent OR partial heartbeat block → no-op + log. Closes the operator-awareness gap that the auto_build_spec_closure 22-hour run surfaced ("I was unaware auto-build-spec had begun"). Field-reference table +3 rows. §8.2 optional fields list extended. No required-field change; no schema-major bump. Surfaced as IOS §8.1 schema-1.3 candidate via FUP-0798 closure metadata. |
 | 1.2 | 2026-06-02 | Claude Code | **FUP-0721 closure** — adds 4 optional model-override fields (`executor_model`, `planner_model`, `consumer_model`, `answerer_model`) at the frontmatter top with a commented-out example block. When declared, the orchestrator passes `--model <value>` to the matching role-call invocation; when absent, the CLI default applies (no breaking change to existing schema-1.1 seeds). Wiring sites: `hooks/execute_with_gates.sh` line 220 (Executor `claude --print`) + line 128 (Answerer `claude -p`); `orchestrator.sh` `run_claude_json` wrapper at line 43-60 + Planner dispatch line 183 + Consumer dispatches lines 108 + 291. Closes the Plan-side model-binding enforceability gap (e.g. SA Q3 "Sonnet 4.6" was previously aspirational; the orchestrator inherited the CLI default). Field-reference table gains 4 rows. §8.2 optional fields list extended. No required-field change; no schema-major bump. Surfaced as IOS §8.1 schema-1.2 candidate via FUP-0721 closure metadata. |
 | 1.1 | 2026-05-23 | Claude Code | Phase 4a (P4-01): added `mcp_servers[]` frontmatter block + body field-reference row. Per-server shape `{name, command, args, env}` consumed by the new `generate_mcp_config` hook in `execute_with_gates.sh`. This is a §8.1 extension to `Initiative_Orchestrator_Spec_v1_4.md`; surfaced as Spec v1.5 candidate via Phase Z `phase4a_seed_mcp_servers_spec_extension`. |

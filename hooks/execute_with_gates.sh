@@ -83,24 +83,57 @@ for req in "$ITER_DIR"/gate_request_"${ITER}"_*.json; do
   # First-match-wins; default to gate_dc if no entry matches.
   gate_id="$(jq -r '.gate_id // empty' "$req")"
   cls="gate_dc"
+  matched_pc_idx=""  # FUP-0791: track which pre_classification entry matched so we can read its auto_resolve field after the loop
   pc_count="$(read_seed_field "$SEED" '.gate_policy.pre_classification | length')"
   for ((j=0; j<pc_count; j++)); do
     pat="$(read_seed_field "$SEED" ".gate_policy.pre_classification[$j].pattern")"
     if [[ "$pat" == gate_id:* && "$gate_id" == "${pat#gate_id:}" ]]; then
-      cls="$(read_seed_field "$SEED" ".gate_policy.pre_classification[$j].class")"; break
+      cls="$(read_seed_field "$SEED" ".gate_policy.pre_classification[$j].class")"
+      matched_pc_idx=$j; break
     elif [[ "$pat" == cluster:* ]]; then
       cluster_value="$(jq -r '.cluster // empty' "$req")"
       if [[ "$cluster_value" == "${pat#cluster:}" ]]; then
-        cls="$(read_seed_field "$SEED" ".gate_policy.pre_classification[$j].class")"; break
+        cls="$(read_seed_field "$SEED" ".gate_policy.pre_classification[$j].class")"
+        matched_pc_idx=$j; break
       fi
     elif [[ "$pat" == contains:* ]]; then
       q_text="$(jq -r '.question_text // empty' "$req")"
       substring="${pat#contains:}"
       if [[ "${q_text,,}" == *"${substring,,}"* ]]; then
-        cls="$(read_seed_field "$SEED" ".gate_policy.pre_classification[$j].class")"; break
+        cls="$(read_seed_field "$SEED" ".gate_policy.pre_classification[$j].class")"
+        matched_pc_idx=$j; break
       fi
     fi
   done
+  # FUP-0791 (seed schema 1.4): auto_resolve handling. When the matched pre_classification entry
+  # declares `auto_resolve: <option_id>`, the broker writes a gate_response directly without
+  # escalation/Answerer (skips both gate_dc Answerer path and gate_human operator-wait path).
+  # Closes the recurring A/A operator pattern (e.g. <skill>-deliverable-scope = A=SKILL.md+tests;
+  # <skill>-section-8-4-spec-wiring-coupling = A=defer §8.4 to follow-on spec_bump) — observed
+  # 3 times in Phase 6 S2 iter-0003 / 0005 / 0006. Operator override preserved: bump the seed to
+  # remove the auto_resolve field if a future skill_build needs a different shape. Backward-compat:
+  # entries without auto_resolve OR pre_classification absent → existing classify-and-escalate
+  # behaviour unchanged.
+  auto_resolve_opt=""
+  if [[ -n "$matched_pc_idx" ]]; then
+    auto_resolve_opt="$(read_seed_field "$SEED" ".gate_policy.pre_classification[$matched_pc_idx].auto_resolve" 2>/dev/null || echo "")"
+    [[ "$auto_resolve_opt" == "null" ]] && auto_resolve_opt=""
+  fi
+  if [[ -n "$auto_resolve_opt" ]]; then
+    req_suffix="$(basename "$req" .json)"; req_suffix="${req_suffix#gate_request_}"
+    resp_file="$ITER_DIR/gate_response_${req_suffix}.json"
+    auto_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    jq -nc --arg gid "$gate_id" --arg opt "$auto_resolve_opt" --arg ts "$auto_ts" --arg idx "$matched_pc_idx" \
+       '{gate_id:$gid, selected_option:$opt, reasoning:("broker_auto_resolve per seed.gate_policy.pre_classification[" + $idx + "].auto_resolve = " + $opt), confidence:1.0, classification_check:"auto_resolve_match", source:"broker_auto_resolve", resolved_at:$ts}' \
+       > "$resp_file"
+    echo "execute_with_gates: broker auto_resolve fired — gate_id=$gate_id matched pc[$matched_pc_idx] resolved to option=$auto_resolve_opt (FUP-0791); gate_response written without Answerer/operator escalation" >&2
+    # Audit append to a dedicated log so the operator can re-confirm the auto_resolve decisions post-run.
+    mkdir -p "$STATE_DIR/logs"
+    jq -nc --arg ts "$auto_ts" --arg it "$ITER" --arg gid "$gate_id" --arg opt "$auto_resolve_opt" --arg idx "$matched_pc_idx" --arg pat "$pat" \
+       '{ts:$ts, iter:$it, gate_id:$gid, matched_pattern:$pat, matched_pc_idx:$idx, auto_resolved_option:$opt}' \
+       >> "$STATE_DIR/logs/auto_resolve.log"
+    continue
+  fi
   if [[ "$cls" == "gate_human" ]]; then
     # Defer to pass 2 — but dispatch a classification-time notification iff no operator response exists
     # (avoids re-notifying on resume; only fires on first-time escalation path).
