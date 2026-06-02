@@ -125,7 +125,15 @@ for req in "$ITER_DIR"/gate_request_"${ITER}"_*.json; do
   req_suffix="$(basename "$req" .json)"; req_suffix="${req_suffix#gate_request_}"
   resp_file="$ITER_DIR/gate_response_${req_suffix}.json"   # canonical FR-008 path — Answerer-written
   answerer_stdout_file="$ITER_DIR/answerer_stdout_${req_suffix}.md"
-  claude -p --add-dir "$CLAUDE_SKILLS_DIR" -- "/rl-operator-answerer $req" > "$answerer_stdout_file"
+  # FUP-0721 (seed schema 1.2): optional answerer_model override; see EXECUTOR_MODEL block
+  # below for the read-and-flag idiom. Resolved here (per-dispatch site rather than top-of-
+  # script) so the resolution is colocated with the consumer call site for grep-ability.
+  ANSWERER_MODEL="$(read_seed_field "$SEED" .answerer_model 2>/dev/null || echo "")"
+  [[ "$ANSWERER_MODEL" == "null" ]] && ANSWERER_MODEL=""
+  ANSWERER_MODEL_FLAG=""
+  [[ -n "$ANSWERER_MODEL" ]] && ANSWERER_MODEL_FLAG="--model $ANSWERER_MODEL"
+  # shellcheck disable=SC2086
+  claude -p $ANSWERER_MODEL_FLAG --add-dir "$CLAUDE_SKILLS_DIR" -- "/rl-operator-answerer $req" > "$answerer_stdout_file"
   # FUP-NEW (path-mismatch tolerance): rl-operator-answerer occasionally writes the
   # gate_response into an `<iter_dir>/gates/` subdir instead of the canonical `<iter_dir>/`
   # root (stochastic path-confusion when the Answerer notices the state-level `gates/` dir
@@ -201,6 +209,16 @@ fi
 PERMISSION_POSTURE="$(read_seed_field "$SEED" .permission_posture)"
 PER_CALL_CAP="$(read_seed_field "$SEED" '.budget.per_call_usd_cap // .budget.tokens_usd')"
 MAX_TURNS="$(read_seed_field "$SEED" '.budget.max_turns_per_call // 200')"
+# FUP-0721 (seed schema 1.2): optional executor_model override. read_seed_field returns the
+# literal string "null" when the field is absent (yq behaviour). Treat "null" + empty as
+# "no override; omit --model and inherit CLI default". When set to a real model id (e.g.
+# "claude-sonnet-4-6"), the orchestrator passes --model <value> to claude --print so the
+# Plan-side model binding (e.g. Plan SA Q3 "Sonnet 4.6") is enforceable rather than
+# aspirational. Backward-compat: existing schema-1.1 seeds resolve to no-op (CLI default).
+EXECUTOR_MODEL="$(read_seed_field "$SEED" .executor_model 2>/dev/null || echo "")"
+[[ "$EXECUTOR_MODEL" == "null" ]] && EXECUTOR_MODEL=""
+EXECUTOR_MODEL_FLAG=""
+[[ -n "$EXECUTOR_MODEL" ]] && EXECUTOR_MODEL_FLAG="--model $EXECUTOR_MODEL"
 # FUP-0752: seed convention is to declare permission_posture as the FULL flag string
 # (e.g. "--permission-mode auto"), but `claude --permission-mode <value>` wants just the
 # VALUE. Strip the leading `--permission-mode ` prefix when present (liberal accept of
@@ -219,6 +237,7 @@ RESULT_JSON_TMP="$ITER_DIR/.execution_result_${ITER}.cli.json"
 # shellcheck disable=SC2086
 claude --print --output-format json \
        --permission-mode "$posture_value" \
+       $EXECUTOR_MODEL_FLAG \
        --strict-mcp-config --mcp-config "$MCP_CONFIG" \
        --max-budget-usd "$PER_CALL_CAP" --max-turns "$MAX_TURNS" \
        < "$PLAN_PATH" > "$RESULT_JSON_TMP"

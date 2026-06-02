@@ -1,9 +1,21 @@
 ---
-seed_schema_version: 1.1
+seed_schema_version: 1.2
 initiative:
   slug: example-initiative
   title: Example Initiative
   owner: gwinterhalter
+
+# Optional model overrides (schema 1.2; FUP-0721). When declared, the orchestrator passes
+# `--model <value>` to the matching role-call invocation. When absent, the CLI default
+# applies (whatever the user's `claude` session resolves). Recommended values:
+# `claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5`. Per-role overrides let an
+# initiative pin a model for determinism + per-role cost tuning (e.g. Sonnet for the
+# Executor's bulk write work, Opus for the Planner / Answerer judgement, Haiku for the
+# Consumer's mechanical projection).
+# executor_model: claude-sonnet-4-6
+# planner_model: claude-sonnet-4-6
+# consumer_model: claude-sonnet-4-6
+# answerer_model: claude-sonnet-4-6
 workspace_root: K:/Claude Code Factory/V3/initiatives/example
 read_only_paths:
   - K:/Claude Code Factory/V3/Project_Docs/Project_Docs_Current
@@ -64,7 +76,7 @@ values in the YAML frontmatter, and point the orchestrator at the copy:
 
 | Field | Required | Meaning |
 |---|---|---|
-| `seed_schema_version` | yes | Schema format version; orchestrator refuses a seed whose major exceeds its supported major (§8.3). Current: `1.1`. |
+| `seed_schema_version` | yes | Schema format version; orchestrator refuses a seed whose major exceeds its supported major (§8.3). Current: `1.2`. |
 | `initiative.slug` / `.title` / `.owner` | yes | Kebab-case id, human title, operator handle. |
 | `workspace_root` | yes | Absolute path; root for all initiative writes. |
 | `read_only_paths[]` | yes | Absolute paths the orchestrator and every subprocess must never write to. Always include `Project_Docs_Current`. |
@@ -80,8 +92,12 @@ values in the YAML frontmatter, and point the orchestrator at the copy:
 | `budget.iterations_max` / `.tokens_usd` / `.hang_timeout_seconds` | yes | Iteration ceiling; USD ceiling; per-Executor no-progress timeout. |
 | `notification_channel` | yes | Declarative target for the notification one-liner. |
 | `permission_posture` | yes | Exact flag set passed to the Executor. Default `--permission-mode auto`; fallback `--permission-mode acceptEdits --dangerously-skip-permissions`. |
+| `executor_model` | no (schema 1.2) | Optional `--model` value passed to the `claude --print` Executor invocation (`hooks/execute_with_gates.sh`). Absent → orchestrator omits `--model`, CLI default applies. Closes FUP-0721 — Plan-side model bindings (e.g. SA Q3 "Sonnet 4.6") are now enforceable rather than aspirational. |
+| `planner_model` | no (schema 1.2) | Optional `--model` value passed to the `claude -p` Planner Role Call (`orchestrator.sh` `run_claude_json` wrapper at line 183). Absent → CLI default. |
+| `consumer_model` | no (schema 1.2) | Optional `--model` value passed to the `claude -p` Consumer Role Call (`orchestrator.sh` lines 108 + 291). Absent → CLI default. |
+| `answerer_model` | no (schema 1.2) | Optional `--model` value passed to the `claude -p` Operator-Answerer Role Call (`hooks/execute_with_gates.sh` line 128). Absent → CLI default. |
 
-Optional fields (§8.2): `target_order[]`, `initiative.description`, `initiative.target_completion_estimate`.
+Optional fields (§8.2): `target_order[]`, `initiative.description`, `initiative.target_completion_estimate`, `executor_model`, `planner_model`, `consumer_model`, `answerer_model`.
 
 ## `completion_predicate[].check_kind` enum (§8.4)
 
@@ -91,5 +107,6 @@ Optional fields (§8.2): `target_order[]`, `initiative.description`, `initiative
 
 | Version | Date | Author | Summary |
 |---------|------|--------|---------|
-| 1.0 | 2026-05-20 | Claude Code | Initial seed template transcribing the §8.5 normative contract (Ralph Loop Phase 3, Step 12). All §8.1 required fields present; `check_kind` values drawn from the §8.4 enum. |
+| 1.2 | 2026-06-02 | Claude Code | **FUP-0721 closure** — adds 4 optional model-override fields (`executor_model`, `planner_model`, `consumer_model`, `answerer_model`) at the frontmatter top with a commented-out example block. When declared, the orchestrator passes `--model <value>` to the matching role-call invocation; when absent, the CLI default applies (no breaking change to existing schema-1.1 seeds). Wiring sites: `hooks/execute_with_gates.sh` line 220 (Executor `claude --print`) + line 128 (Answerer `claude -p`); `orchestrator.sh` `run_claude_json` wrapper at line 43-60 + Planner dispatch line 183 + Consumer dispatches lines 108 + 291. Closes the Plan-side model-binding enforceability gap (e.g. SA Q3 "Sonnet 4.6" was previously aspirational; the orchestrator inherited the CLI default). Field-reference table gains 4 rows. §8.2 optional fields list extended. No required-field change; no schema-major bump. Surfaced as IOS §8.1 schema-1.2 candidate via FUP-0721 closure metadata. |
 | 1.1 | 2026-05-23 | Claude Code | Phase 4a (P4-01): added `mcp_servers[]` frontmatter block + body field-reference row. Per-server shape `{name, command, args, env}` consumed by the new `generate_mcp_config` hook in `execute_with_gates.sh`. This is a §8.1 extension to `Initiative_Orchestrator_Spec_v1_4.md`; surfaced as Spec v1.5 candidate via Phase Z `phase4a_seed_mcp_servers_spec_extension`. |
+| 1.0 | 2026-05-20 | Claude Code | Initial seed template transcribing the §8.5 normative contract (Ralph Loop Phase 3, Step 12). All §8.1 required fields present; `check_kind` values drawn from the §8.4 enum. |

@@ -39,10 +39,19 @@ log() { mkdir -p "$STATE_DIR/logs"; printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:
 
 # run_claude_json — wraps `claude -p` with --output-format json + --max-budget-usd;
 # captures total_cost_usd into the running spend; HALTs orchestrator if cumulative
-# spend exceeds cap. FUP-0720. Usage: run_claude_json <output_file> <claude_prompt>
+# spend exceeds cap. FUP-0720.
+# FUP-0721 (seed schema 1.2): optional model override via env var ROLE_MODEL. Caller
+# resolves the seed field per role (`planner_model` / `consumer_model`) immediately
+# before calling; ROLE_MODEL="" → CLI default (no --model flag passed). Backward-compat
+# preserved — pre-1.2 seeds have no model fields, so ROLE_MODEL is always empty.
+# Usage: ROLE_MODEL="$(read_seed_field "$SEED" .planner_model)" run_claude_json <out> <prompt>
 run_claude_json() {
   local out_file="$1"; shift
-  local current_spend remaining_budget call_cost new_total
+  local current_spend remaining_budget call_cost new_total role_model_flag=""
+  # FUP-0721: convert empty/"null"/unset ROLE_MODEL → no flag; concrete value → `--model <val>`.
+  local rm_val="${ROLE_MODEL:-}"
+  [[ "$rm_val" == "null" ]] && rm_val=""
+  [[ -n "$rm_val" ]] && role_model_flag="--model $rm_val"
   [[ -f "$RUNNING_SPEND_FILE" ]] || echo '{"total_spend_usd": 0.0}' > "$RUNNING_SPEND_FILE"
   current_spend="$(jq -r '.total_spend_usd' "$RUNNING_SPEND_FILE")"
   remaining_budget="$(jq -rn --argjson cap "$BUDGET_CAP" --argjson cur "$current_spend" '$cap - $cur')"
@@ -51,12 +60,13 @@ run_claude_json() {
     dispatch_notification "$SEED" "$STATE_DIR" budget_exhausted "$(jq -nc --arg sp "$current_spend" --arg cap "$BUDGET_CAP" '{iteration:"", reason:"run_claude_json_pre_call", spend:$sp, cap:$cap}')"
     echo "HALT: BUDGET_EXHAUSTED" >&2; exit 2
   fi
-  claude -p --output-format json --max-budget-usd "$remaining_budget" --add-dir "$CLAUDE_SKILLS_DIR" -- "$@" > "$out_file"
+  # shellcheck disable=SC2086
+  claude -p $role_model_flag --output-format json --max-budget-usd "$remaining_budget" --add-dir "$CLAUDE_SKILLS_DIR" -- "$@" > "$out_file"
   call_cost="$(jq -r '.total_cost_usd // 0' "$out_file")"
   new_total="$(jq -rn --argjson cur "$current_spend" --argjson cc "$call_cost" '$cur + $cc')"
   jq --argjson nt "$new_total" '.total_spend_usd = $nt' "$RUNNING_SPEND_FILE" > "$RUNNING_SPEND_FILE.tmp" \
     && mv "$RUNNING_SPEND_FILE.tmp" "$RUNNING_SPEND_FILE"
-  log "claude -p call_cost=$call_cost running_total=$new_total cap=$BUDGET_CAP"
+  log "claude -p call_cost=$call_cost running_total=$new_total cap=$BUDGET_CAP model=${rm_val:-<cli-default>}"
 }
 
 # next_iteration_index — canonical algorithm (§13.1 verbatim).
@@ -105,7 +115,8 @@ if [[ -f "$STATE_DIR/state_snapshot.json" ]]; then
             log "RESUME: broker resolved + Executor ran — clearing pending_gate, running Consumer for $pending_iter"
             jq 'del(.pending_gate)' "$STATE_DIR/state_snapshot.json" > "$STATE_DIR/state_snapshot.json.tmp" \
               && mv "$STATE_DIR/state_snapshot.json.tmp" "$STATE_DIR/state_snapshot.json"
-            run_claude_json "$pending_iter_dir/consumer.json" "/rl-iteration-consumer $STATE_DIR $pending_iter_dir"
+            ROLE_MODEL="$(read_seed_field "$SEED" .consumer_model 2>/dev/null || echo "")" \
+              run_claude_json "$pending_iter_dir/consumer.json" "/rl-iteration-consumer $STATE_DIR $pending_iter_dir"
             ;;
           1)
             log "RESUME: broker still pending after re-run — re-block"
@@ -180,8 +191,10 @@ while true; do
   log "ITERATION $ITER begin"
 
   # Planner Role Call (FUP-0720: --output-format json + --max-budget-usd via run_claude_json)
-  run_claude_json "$ITER_DIR/planner.json" "/rl-initiative-planner $STATE_DIR $ITER_DIR" \
-    2> "$ITER_DIR/planner.stderr"
+  # FUP-0721 (seed schema 1.2): optional planner_model override; CLI default when seed omits.
+  ROLE_MODEL="$(read_seed_field "$SEED" .planner_model 2>/dev/null || echo "")" \
+    run_claude_json "$ITER_DIR/planner.json" "/rl-initiative-planner $STATE_DIR $ITER_DIR" \
+      2> "$ITER_DIR/planner.stderr"
   # Extract markdown result for any downstream consumer expecting the textual emission:
   jq -r '.result // empty' "$ITER_DIR/planner.json" > "$ITER_DIR/planner.stdout"
 
@@ -288,7 +301,9 @@ while true; do
   esac
 
   # Consumer Role Call (FUP-0720: --output-format json + --max-budget-usd via run_claude_json)
-  run_claude_json "$ITER_DIR/consumer.json" "/rl-iteration-consumer $STATE_DIR $ITER_DIR"
+  # FUP-0721 (seed schema 1.2): optional consumer_model override; CLI default when seed omits.
+  ROLE_MODEL="$(read_seed_field "$SEED" .consumer_model 2>/dev/null || echo "")" \
+    run_claude_json "$ITER_DIR/consumer.json" "/rl-iteration-consumer $STATE_DIR $ITER_DIR"
 
   # Phase 4b P4-07: fail_counts ≥3 deterministic guard (additive to FR-013 Planner
   # self-escalation). The Consumer maintains $STATE_DIR/fail_counts.json (per §5.4 /
