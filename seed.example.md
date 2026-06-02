@@ -1,5 +1,5 @@
 ---
-seed_schema_version: 1.2
+seed_schema_version: 1.3
 initiative:
   slug: example-initiative
   title: Example Initiative
@@ -16,6 +16,19 @@ initiative:
 # planner_model: claude-sonnet-4-6
 # consumer_model: claude-sonnet-4-6
 # answerer_model: claude-sonnet-4-6
+
+# Optional per-iteration workstreams heartbeat (schema 1.3; FUP-0798). When declared, the
+# orchestrator UPSERTs the named workstreams row at iteration begin + close so the operator
+# has a DB-queryable signal of progress during long-running headless RL runs (rather than
+# leaving last_session_label / next_session_blocker / metadata stale at the launch state).
+# The env_vars indirection holds env-var NAMES the operator exports at machine scope; the
+# orchestrator indirect-looks-up the values (same pattern as notification_channel.primary_env_vars).
+# Backward-compat: omit the heartbeat: block entirely OR omit workstream_id → silent skip.
+# heartbeat:
+#   workstream_id: 42                         # integer; the workstreams.workstream_id PK
+#   env_vars:
+#     project_url: CF_SUPABASE_PROJECT_URL    # e.g. https://eybdbshxswutgaaylpol.supabase.co
+#     service_role_key: CF_SUPABASE_SERVICE_ROLE_KEY
 workspace_root: K:/Claude Code Factory/V3/initiatives/example
 read_only_paths:
   - K:/Claude Code Factory/V3/Project_Docs/Project_Docs_Current
@@ -76,7 +89,7 @@ values in the YAML frontmatter, and point the orchestrator at the copy:
 
 | Field | Required | Meaning |
 |---|---|---|
-| `seed_schema_version` | yes | Schema format version; orchestrator refuses a seed whose major exceeds its supported major (§8.3). Current: `1.2`. |
+| `seed_schema_version` | yes | Schema format version; orchestrator refuses a seed whose major exceeds its supported major (§8.3). Current: `1.3`. |
 | `initiative.slug` / `.title` / `.owner` | yes | Kebab-case id, human title, operator handle. |
 | `workspace_root` | yes | Absolute path; root for all initiative writes. |
 | `read_only_paths[]` | yes | Absolute paths the orchestrator and every subprocess must never write to. Always include `Project_Docs_Current`. |
@@ -96,8 +109,11 @@ values in the YAML frontmatter, and point the orchestrator at the copy:
 | `planner_model` | no (schema 1.2) | Optional `--model` value passed to the `claude -p` Planner Role Call (`orchestrator.sh` `run_claude_json` wrapper at line 183). Absent → CLI default. |
 | `consumer_model` | no (schema 1.2) | Optional `--model` value passed to the `claude -p` Consumer Role Call (`orchestrator.sh` lines 108 + 291). Absent → CLI default. |
 | `answerer_model` | no (schema 1.2) | Optional `--model` value passed to the `claude -p` Operator-Answerer Role Call (`hooks/execute_with_gates.sh` line 128). Absent → CLI default. |
+| `heartbeat.workstream_id` | no (schema 1.3) | Optional integer naming the `workstreams.workstream_id` PK the orchestrator UPSERTs at iteration begin + close (`orchestrator.sh` lines ~195 / ~351). Closes FUP-0798 — Plan-side operator awareness during long-running headless RL runs is now DB-queryable without manually reading `state_dir/state_snapshot.json`. Absent → silent skip (logged to `state_dir/logs/heartbeat.log`). |
+| `heartbeat.env_vars.project_url` | no (schema 1.3) | Optional string holding the NAME of an env var the operator exports at machine scope; the orchestrator indirect-looks-up the value (the Supabase project URL e.g. `https://eybdbshxswutgaaylpol.supabase.co`). Same indirect-via-env-var-name pattern as `notification_channel.primary_env_vars`. Required iff `heartbeat.workstream_id` declared; absent → silent skip. |
+| `heartbeat.env_vars.service_role_key` | no (schema 1.3) | Optional string holding the NAME of an env var holding the Supabase service-role key (sensitive; never echoed/logged). Required iff `heartbeat.workstream_id` declared; absent → silent skip. |
 
-Optional fields (§8.2): `target_order[]`, `initiative.description`, `initiative.target_completion_estimate`, `executor_model`, `planner_model`, `consumer_model`, `answerer_model`.
+Optional fields (§8.2): `target_order[]`, `initiative.description`, `initiative.target_completion_estimate`, `executor_model`, `planner_model`, `consumer_model`, `answerer_model`, `heartbeat.workstream_id`, `heartbeat.env_vars.project_url`, `heartbeat.env_vars.service_role_key`.
 
 ## `completion_predicate[].check_kind` enum (§8.4)
 
@@ -107,6 +123,7 @@ Optional fields (§8.2): `target_order[]`, `initiative.description`, `initiative
 
 | Version | Date | Author | Summary |
 |---------|------|--------|---------|
+| 1.3 | 2026-06-02 | Claude Code | **FUP-0798 closure** — adds optional `heartbeat:` block at the frontmatter top with 3 fields: `heartbeat.workstream_id` (integer; the workstreams.workstream_id PK to UPSERT) + `heartbeat.env_vars.project_url` (env var NAME holding the Supabase project URL) + `heartbeat.env_vars.service_role_key` (env var NAME holding the service-role key). When all 3 declared AND env vars exported at machine scope, the orchestrator UPSERTs `last_session_label` / `next_session_blocker` / `metadata.heartbeat_at` / `metadata.heartbeat_iter` / `metadata.heartbeat_phase` at iteration begin + close. When any field absent or env var unset, silent skip (logged to `state_dir/logs/heartbeat.log`). Wiring: NEW `lib/heartbeat.sh` with the `heartbeat_workstream()` function (PostgREST PATCH with metadata merge; non-fatal on any error — never propagates curl rc up the orchestrator); `orchestrator.sh` sources lib/heartbeat.sh + calls `heartbeat_workstream` at iteration begin (line ~195) + close (line ~351). Backward-compat: absent OR partial heartbeat block → no-op + log. Closes the operator-awareness gap that the auto_build_spec_closure 22-hour run surfaced ("I was unaware auto-build-spec had begun"). Field-reference table +3 rows. §8.2 optional fields list extended. No required-field change; no schema-major bump. Surfaced as IOS §8.1 schema-1.3 candidate via FUP-0798 closure metadata. |
 | 1.2 | 2026-06-02 | Claude Code | **FUP-0721 closure** — adds 4 optional model-override fields (`executor_model`, `planner_model`, `consumer_model`, `answerer_model`) at the frontmatter top with a commented-out example block. When declared, the orchestrator passes `--model <value>` to the matching role-call invocation; when absent, the CLI default applies (no breaking change to existing schema-1.1 seeds). Wiring sites: `hooks/execute_with_gates.sh` line 220 (Executor `claude --print`) + line 128 (Answerer `claude -p`); `orchestrator.sh` `run_claude_json` wrapper at line 43-60 + Planner dispatch line 183 + Consumer dispatches lines 108 + 291. Closes the Plan-side model-binding enforceability gap (e.g. SA Q3 "Sonnet 4.6" was previously aspirational; the orchestrator inherited the CLI default). Field-reference table gains 4 rows. §8.2 optional fields list extended. No required-field change; no schema-major bump. Surfaced as IOS §8.1 schema-1.2 candidate via FUP-0721 closure metadata. |
 | 1.1 | 2026-05-23 | Claude Code | Phase 4a (P4-01): added `mcp_servers[]` frontmatter block + body field-reference row. Per-server shape `{name, command, args, env}` consumed by the new `generate_mcp_config` hook in `execute_with_gates.sh`. This is a §8.1 extension to `Initiative_Orchestrator_Spec_v1_4.md`; surfaced as Spec v1.5 candidate via Phase Z `phase4a_seed_mcp_servers_spec_extension`. |
 | 1.0 | 2026-05-20 | Claude Code | Initial seed template transcribing the §8.5 normative contract (Ralph Loop Phase 3, Step 12). All §8.1 required fields present; `check_kind` values drawn from the §8.4 enum. |

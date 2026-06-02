@@ -22,6 +22,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/seed.sh"
 # shellcheck source=lib/notify.sh
 source "$SCRIPT_DIR/lib/notify.sh"
+# shellcheck source=lib/heartbeat.sh
+# FUP-0798: per-iteration workstreams-row UPSERT for operator-awareness during long-running
+# headless RL runs. No-op when seed.heartbeat.workstream_id is absent or env vars unset.
+source "$SCRIPT_DIR/lib/heartbeat.sh"
 
 SEED="${1:?usage: orchestrator.sh <seed_path>}"
 
@@ -189,6 +193,9 @@ while true; do
   ITER_DIR="$STATE_DIR/iterations/$ITER"
   mkdir -p "$ITER_DIR"
   log "ITERATION $ITER begin"
+  # FUP-0798: heartbeat UPSERT to workstreams row (operator-awareness for long-running runs).
+  # Resilient + non-fatal: no-op when seed.heartbeat.workstream_id absent or env vars unset.
+  heartbeat_workstream "$SEED" "$STATE_DIR" "$ITER" "begin"
 
   # Planner Role Call (FUP-0720: --output-format json + --max-budget-usd via run_claude_json)
   # FUP-0721 (seed schema 1.2): optional planner_model override; CLI default when seed omits.
@@ -342,4 +349,7 @@ while true; do
   # Budget check
   "$SCRIPT_DIR/hooks/budget_check.sh" "$SEED" "$STATE_DIR" || { log "BUDGET_EXHAUSTED"; exit 2; }
   log "ITERATION $ITER end"
+  # FUP-0798: heartbeat at iteration close so the workstreams row final state reflects the last
+  # completed iteration's outcome (not just "begin"; pairs with iter-begin call above).
+  heartbeat_workstream "$SEED" "$STATE_DIR" "$ITER" "close"
 done
