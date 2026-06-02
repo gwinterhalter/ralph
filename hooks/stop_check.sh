@@ -292,7 +292,7 @@ for ((i=0; i<count; i++)); do
           # audit/ within 7-day TTL before invoking claude -p (each invocation costs $1-3 LLM
           # + is stochastic). Falls through to the original claude -p path if no recent
           # audit is found OR if cached audit lacks the clean signal.
-          cached_audit="$(find "$workspace_root" -path '*/audit/Corpus_Audit*.md' -type f -mtime -7 2>/dev/null | sort -r | head -1)"
+          cached_audit="$(find "$workspace_root" -path '*/audit/Corpus_Audit*.md' -type f -mtime -7 -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)"
           if [[ -n "$cached_audit" && -f "$cached_audit" ]]; then
             # Clean signal per cf-corpus-auditor v1.7 output format: zero attributable
             # Layer-1 / Layer-2 findings ("Layer 1 findings attributable...: 0 🔴 / 0 🟡 / 0 🟢").
@@ -320,7 +320,7 @@ for ((i=0; i<count; i++)); do
         cross_reference_audit_clean)
           # FUP-0819: cache-first — look for existing Cross_Reference_Audit*.md report
           # under workspace audit/ within 7-day TTL before invoking claude -p.
-          cached_audit="$(find "$workspace_root" -path '*/audit/Cross_Reference_Audit*.md' -type f -mtime -7 2>/dev/null | sort -r | head -1)"
+          cached_audit="$(find "$workspace_root" -path '*/audit/Cross_Reference_Audit*.md' -type f -mtime -7 -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)"
           if [[ -n "$cached_audit" && -f "$cached_audit" ]]; then
             # Clean signal per cf-cross-reference-audit v1.7 output format: presence of
             # "🟢 clean" markers (per-row severity) or "0 severe attributable" summary.
@@ -376,7 +376,7 @@ for ((i=0; i<count; i++)); do
           # workspace audit/ matching the target doc + within 7-day TTL. Common naming
           # convention: <target_stem>_v*_fix2_<date>.md (e.g. Auto_Build_Spec_v1.39_fix2_2026-05-31.md).
           target_stem="$(basename "$target" .md)"
-          cached_audit="$(find "$workspace_root" -path "*/audit/*${target_stem}*fix2*.md" -type f -mtime -7 2>/dev/null | sort -r | head -1)"
+          cached_audit="$(find "$workspace_root" -path "*/audit/*${target_stem}*fix2*.md" -type f -mtime -7 -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)"
           if [[ -n "$cached_audit" && -f "$cached_audit" ]]; then
             # Clean signal per cf-doc-reviewer fix2 output convention: "All findings resolved: YES"
             # (possibly with markdown bold wrapping, e.g. "All findings resolved: **YES**").
