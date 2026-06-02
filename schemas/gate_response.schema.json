@@ -33,9 +33,9 @@
       "description": "Answerer's self-classification of the question class (matches FR-008 classification check)."
     }
   },
-  "oneOf": [
+  "anyOf": [
     {"required": ["selected_option"]},
     {"required": ["custom_text"]}
   ],
-  "additionalProperties": false
+  "additionalProperties": true
 }
