@@ -299,22 +299,70 @@ for ((r=0; r<ro_count; r++)); do
 done
 
 # §10.5 FR-019 post-execution gate — Phase 4b P4-03(c) branches narrative classification.
-# Both branches still exit 1 (per §13.2 only the read-only violation is exit 2); the
-# classification + escalation artefact distinguishes auto_mode_denial vs irregular_termination
-# vs the existing native-budget-cap (terminal_reason-driven) path.
+# FUP-0765 / FUP-0779 / FUP-0804 horn (C): classify each permission_denial as either
+# `verification_spawn` (nested `claude -p` / `claude --print` Bash invocation — the Executor
+# spawning an audit / verification subprocess; benign, since the verification skill is the
+# legitimate recipient of the permission boundary) or `deliverable_blocking` (any other
+# denial — actual permission overreach that would corrupt the run).
+#
+# Exit 1 ONLY when at least one denial is deliverable_blocking. When ALL denials are
+# verification_spawn, log + audit but continue, so the iteration's Consumer can still run
+# against the Executor's completed deliverables. This eliminates the FUP-0765 failure mode
+# (Executor completes all deliverables but headless auto-mode denies its nested
+# `claude -p --dangerously-skip-permissions` for `run cf-doc-reviewer` → permission_denials
+# non-empty → exit 1 → Consumer never runs → consumer.json single-object validation never
+# happens) without regressing the Executor's `--permission-mode auto` security posture.
+#
+# Pairs with the Path A interim (rl-iteration-consumer v1_4 empty-binding rule +
+# rl-initiative-planner v1.3 inline-audit verification_policy branch, both promoted+pushed
+# 2026-05-28 commit 082a9ea); Path A reduces the SURFACE of verification_spawn denials by
+# moving inline-audit out of the Consumer's path, but the Executor itself may still spawn
+# nested claude for verification per session_plan §5 instructions — this horn handles those
+# remaining cases at the gate rather than upstream at the planner.
+#
+# Detection regex: tool_name == "Bash" AND tool_input.command matches
+# `\bclaude\s+(-p|--print)\b` (the two CLI invocation forms used by all cf-*/rl-* skills).
+# Conservative by design — only denials matching BOTH conditions are reclassified; any other
+# denial (incl. non-Bash, non-claude Bash commands, MCP tool denials) remains
+# deliverable_blocking.
 TERMINAL_REASON="$(jq -r '.terminal_reason' "$RESULT_JSON")"
 DENIALS_COUNT="$(jq -r '.permission_denials | length' "$RESULT_JSON")"
 if [[ "$DENIALS_COUNT" -ne 0 ]]; then
-  mkdir -p "$STATE_DIR/escalations"
-  esc_file="$STATE_DIR/escalations/auto_mode_denial_${ITER}_$(date -u +%s).json"
-  jq --arg iter "$ITER" '{iteration: $iter, classification: "auto_mode_denial", denials_count: (.permission_denials | length), permission_denials: .permission_denials, terminal_reason: .terminal_reason}' "$RESULT_JSON" > "$esc_file"
-  echo "execute_with_gates: auto_mode_denial classification — escalation $esc_file (denials=$DENIALS_COUNT)" >&2
-  NOTIFY="$(read_seed_field "$SEED" '.notification_channel' 2>/dev/null || echo "")"
-  if [[ -n "$NOTIFY" && "$NOTIFY" != "null" ]]; then
-    echo "execute_with_gates: notification target = $NOTIFY (live notification dispatch deferred to P4-05)" >&2
+  # Count verification_spawn-classified denials. The jq expression uses .tool_name first
+  # (current claude --output-format json shape per FUP-0737), falling back to .tool (legacy
+  # synthetic-fixture shape). The command regex matches both `claude -p` and `claude --print`
+  # invocation forms (word-boundary guarded to avoid matching e.g. `claudette --print-only`).
+  VERIFICATION_SPAWN_COUNT="$(jq -r '[.permission_denials[] | select(((.tool_name // .tool // "") == "Bash") and (((.tool_input.command // "") | test("\\bclaude\\s+(-p|--print)\\b")) or ((.reason // "") | test("\\bclaude\\s+(-p|--print)\\b"))))] | length' "$RESULT_JSON")"
+  DELIVERABLE_BLOCKING_COUNT=$((DENIALS_COUNT - VERIFICATION_SPAWN_COUNT))
+
+  if [[ "$DELIVERABLE_BLOCKING_COUNT" -gt 0 ]]; then
+    # At least one deliverable_blocking denial — existing exit-1 path preserved.
+    mkdir -p "$STATE_DIR/escalations"
+    esc_file="$STATE_DIR/escalations/auto_mode_denial_${ITER}_$(date -u +%s).json"
+    jq --arg iter "$ITER" --arg vsc "$VERIFICATION_SPAWN_COUNT" --arg dbc "$DELIVERABLE_BLOCKING_COUNT" \
+       '{iteration: $iter, classification: "auto_mode_denial", denials_count: (.permission_denials | length), verification_spawn_count: ($vsc | tonumber), deliverable_blocking_count: ($dbc | tonumber), permission_denials: .permission_denials, terminal_reason: .terminal_reason}' "$RESULT_JSON" > "$esc_file"
+    echo "execute_with_gates: auto_mode_denial classification — escalation $esc_file (denials=$DENIALS_COUNT, verification_spawn=$VERIFICATION_SPAWN_COUNT, deliverable_blocking=$DELIVERABLE_BLOCKING_COUNT)" >&2
+    NOTIFY="$(read_seed_field "$SEED" '.notification_channel' 2>/dev/null || echo "")"
+    if [[ -n "$NOTIFY" && "$NOTIFY" != "null" ]]; then
+      dispatch_notification "$SEED" "$STATE_DIR" iteration_failed \
+        "$(jq -nc --arg it "$ITER" --arg dc "$DENIALS_COUNT" --arg dbc "$DELIVERABLE_BLOCKING_COUNT" --arg vsc "$VERIFICATION_SPAWN_COUNT" \
+          '{iteration:$it, reason:"auto_mode_denial_deliverable_blocking", denials_count:($dc|tonumber), deliverable_blocking_count:($dbc|tonumber), verification_spawn_count:($vsc|tonumber)}')"
+    fi
+    exit 1
+  else
+    # ALL denials are verification_spawn — log + audit + continue. The Executor completed its
+    # deliverables; the denied nested claude -p was an optional verification spawn that didn't
+    # block the actual work product. The Consumer will run against the completed deliverables
+    # in the next phase. Pairs with FUP-0809 + lib/notify.sh resilient observability.
+    mkdir -p "$STATE_DIR/logs"
+    audit_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    jq --arg ts "$audit_ts" --arg iter "$ITER" --arg dc "$DENIALS_COUNT" \
+       '{ts:$ts, iter:$iter, classification:"verification_spawn_all", denials_count:($dc|tonumber), permission_denials:.permission_denials}' \
+       "$RESULT_JSON" >> "$STATE_DIR/logs/verification_spawn_denials.log"
+    echo "execute_with_gates: all $DENIALS_COUNT permission_denials classified verification_spawn (FUP-0765/0779/0804 horn C) — proceeding without exit (audit: $STATE_DIR/logs/verification_spawn_denials.log)" >&2
   fi
-  exit 1
-elif [[ "$TERMINAL_REASON" != "completed" ]]; then
+fi
+if [[ "$TERMINAL_REASON" != "completed" ]]; then
   echo "execute_with_gates: irregular_termination classification (terminal_reason=$TERMINAL_REASON)" >&2
   exit 1
 fi
