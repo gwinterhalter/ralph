@@ -70,17 +70,38 @@ dispatch_notification() {
       # (e.g. 26 read error) aborts the function before `local rc=$?` captures it, propagating
       # the raw exit up and HALTing the orchestrator on EXECUTE_WITH_GATES_UNEXPECTED_EXIT.
       # Notification failures must stay non-fatal: capture rc, log it, never propagate.
-      set +e
-      curl --silent --show-error --max-time 30 --ssl-reqd \
-           --url "smtp://${smtp_host}:${smtp_port}" \
-           --mail-from "$smtp_user_val" \
-           --mail-rcpt "$to_addr_val" \
-           --user "${smtp_user_val}:${smtp_app_pw_val}" \
-           --upload-file "$tmp_msg" >/dev/null 2>&1
-      local rc=$?
-      set -e
+      # FUP-0796: empirical evidence (2026-06-02 diagnostic — token VERIFIED valid via
+      # FUP-0805 inbox-receipt confirmation; same dispatch_notification call rc=26 at
+      # 04:47Z + rc=0 at 04:57Z) shows the rc=26 is a transient Gmail SMTP issue (network
+      # blip, brief rate limit, mid-stream connection reset), not an auth or flag-handling
+      # defect. Single retry with 2-second backoff resilient against the transient surface
+      # without introducing a long blocking window. On both attempts failing, the existing
+      # FUP-0787 guard + FUP-0809 win11toast fallback chain still apply.
+      local rc=99
+      local attempt
+      for attempt in 1 2; do
+        set +e
+        curl --silent --show-error --max-time 30 --ssl-reqd \
+             --url "smtp://${smtp_host}:${smtp_port}" \
+             --mail-from "$smtp_user_val" \
+             --mail-rcpt "$to_addr_val" \
+             --user "${smtp_user_val}:${smtp_app_pw_val}" \
+             --upload-file "$tmp_msg" >/dev/null 2>&1
+        rc=$?
+        set -e
+        if [[ $rc -eq 0 ]]; then
+          break
+        fi
+        if [[ $attempt -eq 1 ]]; then
+          sleep 2
+        fi
+      done
       if [[ $rc -eq 0 ]]; then
-        channel_result="success"
+        if [[ $attempt -eq 1 ]]; then
+          channel_result="success"
+        else
+          channel_result="success_on_retry_${attempt}"
+        fi
       else
         channel_result="failure:rc=$rc"
       fi
@@ -95,14 +116,25 @@ dispatch_notification() {
   # Captures all primary-failure cases (gmail_smtp rc=26, slack_webhook fail, env_unset skip,
   # unknown primary). Audit log entry records both the primary attempt and the fallback
   # outcome via the augmented channel_attempted + channel_result fields.
-  if [[ "$fallback" == "win11toast" && "$channel_result" != "ok" && "$channel_result" != "success" ]]; then
+  if [[ "$fallback" == "win11toast" && "$channel_result" != "ok" && "$channel_result" != "success" && "$channel_result" != success_on_retry_* ]]; then
     local primary_attempt_summary="$channel_attempted=$channel_result"
     channel_attempted="${channel_attempted}+win11toast_fallback"
+    # FUP-NEW (2026-06-02): win11toast is a Python module (pip install win11toast), not a
+    # standalone CLI binary. Original `command -v win11toast` check failed even after
+    # `pip install win11toast` because the package exposes no PATH entry point. Invoke via
+    # `python -c` using argv-passing (avoids shell-injection on $msg with quotes/specials).
+    # Backward-compatible: if a win11toast CLI shim exists in PATH (operator-created), prefer it.
     if command -v win11toast >/dev/null 2>&1; then
       if win11toast "$msg" >/dev/null 2>&1; then
         channel_result="primary_failed[$primary_attempt_summary]+fallback:ok"
       else
         channel_result="primary_failed[$primary_attempt_summary]+fallback:fail"
+      fi
+    elif python -c "import win11toast" >/dev/null 2>&1; then
+      if python -c "import sys; from win11toast import toast; toast('CF Orchestrator', sys.argv[1])" "$msg" >/dev/null 2>&1; then
+        channel_result="primary_failed[$primary_attempt_summary]+fallback:ok_via_python_module"
+      else
+        channel_result="primary_failed[$primary_attempt_summary]+fallback:fail_via_python_module"
       fi
     else
       channel_result="primary_failed[$primary_attempt_summary]+fallback:unavailable"
