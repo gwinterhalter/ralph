@@ -11,3 +11,9 @@ progress.txt
 
 #Claude
 .claude/
+# FUP-0815: tracked-carve-out for operator-scribe slash-commands (\btw etc.)
+# The .claude/commands/ subtree contains intentional, shareable scribe slash-commands
+# (CC has zero discretion; orchestrator obeys operator intent transcribed by CC).
+# All other .claude/ contents (session state, auth tokens, etc.) remain excluded.
+!.claude/commands/
+!.claude/commands/**
