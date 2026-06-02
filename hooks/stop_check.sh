@@ -211,6 +211,16 @@ for ((i=0; i<count; i++)); do
             [[ "$open_count" -eq 0 ]] || all_pass=0
             ;;
           every_closure_cites_iteration)
+            # FUP-0821: skip the citation regex for seeds with mixed-citation registers
+            # (pre-orchestrator + orchestrator-driven closures coexist). Operator opts in via
+            # params.skip_citation_check: true. Without this, registers carrying historical
+            # RESOLVED rows that cite by §-ref / decision-register / IMP-NNNN / narrative
+            # date instead of the literal "iteration NNNN" token fail the regex even when
+            # every closure does cite SOMETHING (just not in iteration-NNNN form).
+            skip_citation="$(read_seed_field "$SEED" ".completion_predicate[$i].params.skip_citation_check" 2>/dev/null || echo "")"
+            if [[ "$skip_citation" == "true" ]]; then
+              echo "stop_check: registry_zero_open every_closure_cites_iteration SKIP-CITATION-CHECK per params.skip_citation_check (FUP-0821; mixed-citation register convention)" >&2
+            else
             missing_count=0
             while IFS= read -r line; do
               line="${line%$'\r'}"
@@ -227,6 +237,7 @@ for ((i=0; i<count; i++)); do
               fi
             done < "$register_path"
             [[ "$missing_count" -eq 0 ]] || all_pass=0
+            fi
             ;;
           *)
             # FUP-0767: predicates whose name is not one of the hardcoded sub-evaluators above
