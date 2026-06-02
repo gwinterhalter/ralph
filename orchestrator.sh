@@ -191,13 +191,46 @@ while true; do
   # "INITIATIVE_COMPLETE" string inside a gate_human escalation narrative (iter 0004:
   # "Neither INITIATIVE_COMPLETE nor a draft plan"), falsely declaring completion. A real
   # Path-A has neither plan nor gates; an escalation has gates but no plan — distinguishable.
+  # FUP-0797: defense-in-depth Consumer-confirm — re-evaluate the completion predicate
+  # via stop_check.sh BEFORE honouring the Planner's Path-A signal. A false-positive Path-A
+  # (Planner emits INITIATIVE_COMPLETE in error with no plan + no gates but registry still
+  # open) would otherwise terminate one iteration too early. Mirrors the main-loop-top
+  # stop_check.sh invocation pattern (set +e / sc_rc=$?; set -e) and the 4-branch case
+  # dispatch on the captured rc (0 confirmed / 1 contradicted / 2 budget / >=3 error).
   if [[ ! -f "$ITER_DIR/session_plan_${ITER}.md" ]] \
      && ! compgen -G "$ITER_DIR/gate_request_${ITER}_*.json" > /dev/null \
      && grep -qF 'INITIATIVE_COMPLETE' "$ITER_DIR/planner.stdout"; then
-    log "INITIATIVE_COMPLETE: Planner Path-A signal (iteration $ITER; no session_plan, no gate_request)"
-    dispatch_notification "$SEED" "$STATE_DIR" initiative_complete "$(jq -nc --arg it "$ITER" '{iteration:$it, reason:"planner_path_a_initiative_complete"}')"
-    echo "INITIATIVE_COMPLETE"
-    exit 0
+    log "Planner Path-A signal detected (iteration $ITER); running Consumer-confirm re-verification before dispatch (FUP-0797)"
+    set +e
+    "$SCRIPT_DIR/hooks/stop_check.sh" "$SEED" "$STATE_DIR"
+    cc_rc=$?
+    set -e
+    case $cc_rc in
+      0)
+        log "INITIATIVE_COMPLETE: Planner Path-A signal Consumer-confirmed (iteration $ITER; stop_check rc=0)"
+        dispatch_notification "$SEED" "$STATE_DIR" initiative_complete "$(jq -nc --arg it "$ITER" '{iteration:$it, reason:"planner_path_a_initiative_complete_consumer_confirmed"}')"
+        echo "INITIATIVE_COMPLETE"
+        exit 0
+        ;;
+      1)
+        log "BLOCKED: Planner Path-A signal NOT Consumer-confirmed (iteration $ITER; stop_check rc=1 — completion_predicate NOT all-passed)"
+        dispatch_notification "$SEED" "$STATE_DIR" gate_human "$(jq -nc --arg it "$ITER" --arg rc "$cc_rc" '{iteration:$it, reason:"planner_path_a_signal_without_consumer_confirm", stop_check_rc:$rc}')"
+        echo "BLOCKED: Path-A signal without predicate confirmation (iteration $ITER)" >&2
+        exit 0
+        ;;
+      2)
+        log "BUDGET_EXHAUSTED: Consumer-confirm stop_check returned exit 2 (iteration $ITER)"
+        dispatch_notification "$SEED" "$STATE_DIR" budget_exhausted "$(jq -nc --arg it "$ITER" '{iteration:$it, reason:"stop_check_exit_2_consumer_confirm"}')"
+        echo "BUDGET_EXHAUSTED" >&2
+        exit 2
+        ;;
+      *)
+        log "HALT: Consumer-confirm stop_check returned exit $cc_rc (malformed predicate / error per §13.2; iteration $ITER)"
+        dispatch_notification "$SEED" "$STATE_DIR" gate_human "$(jq -nc --arg it "$ITER" --arg rc "$cc_rc" '{iteration:$it, reason:"stop_check_error_consumer_confirm", stop_check_rc:$rc}')"
+        echo "HALT: STOP_CHECK_ERROR (exit $cc_rc, consumer_confirm)" >&2
+        exit 3
+        ;;
+    esac
   fi
 
   # Plan review (inner loop; bash-hook-orchestrated, §13.2)
