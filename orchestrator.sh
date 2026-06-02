@@ -309,6 +309,21 @@ while true; do
     fi
   fi
 
+  # FUP-0773: refresh work_registry_hash_at_snapshot in state_snapshot.json post-iter.
+  # The Consumer (rl-iteration-consumer) writes pending_gate / state fields but does NOT
+  # include work_registry_hash_at_snapshot. The orchestrator's §6.3 step-2 RESUME protection
+  # reads .work_registry_hash_at_snapshot + compares against current registry_hash() — HALT
+  # on mismatch (registry edited outside orchestrator). Without this write, snap_hash is
+  # always empty and the HALT is dormant. Refreshing post-each-iter activates the protection.
+  # Idempotent: jq merge adds-or-overwrites the field without touching other snapshot content.
+  # Conservative: only fires if state_snapshot.json + WORK_REGISTRY both exist (no-op on
+  # bootstrap iter-0001 before Consumer writes snapshot).
+  if [[ -f "$STATE_DIR/state_snapshot.json" && -f "$WORK_REGISTRY" ]]; then
+    cur_registry_hash="$(registry_hash "$WORK_REGISTRY")"
+    jq --arg h "$cur_registry_hash" '.work_registry_hash_at_snapshot = $h' "$STATE_DIR/state_snapshot.json" > "$STATE_DIR/state_snapshot.json.tmp" \
+      && mv "$STATE_DIR/state_snapshot.json.tmp" "$STATE_DIR/state_snapshot.json"
+  fi
+
   # Budget check
   "$SCRIPT_DIR/hooks/budget_check.sh" "$SEED" "$STATE_DIR" || { log "BUDGET_EXHAUSTED"; exit 2; }
   log "ITERATION $ITER end"
