@@ -131,7 +131,19 @@ dispatch_notification() {
         channel_result="primary_failed[$primary_attempt_summary]+fallback:fail"
       fi
     elif python -c "import win11toast" >/dev/null 2>&1; then
-      if python -c "import sys; from win11toast import toast; toast('CF Orchestrator', sys.argv[1])" "$msg" >/dev/null 2>&1; then
+      # app_id='CF Orchestrator' gives the toast a distinct AppUserModelID so Windows treats
+      # CF notifications as a first-class app: shows under "CF Orchestrator" in Action Center
+      # grouping AND lets the operator toggle banner-display ON/OFF per-CF independent of the
+      # generic Python.win11toast identity. Without app_id, banner-vs-Action-Center is yoked to
+      # whatever the default Python toast identity is set to — operator-confirmed 2026-06-02 the
+      # toast lands silently in Action Center under that identity.
+      # duration='long' = ~25 seconds on-screen (the longest standard Windows toast duration;
+      # vs. default ~3-5 seconds operator-confirmed too short to catch). Orchestrator events are
+      # infrequent (gate_human / iteration_failed / budget_exhausted / initiative_complete /
+      # fail_counts_threshold) so a longer dwell is high-value, low-cost. For longer-than-25s
+      # need, switch to scenario='reminder' (toast persists until manually dismissed; adds snooze /
+      # dismiss buttons) — reserved as upgrade path if 25s still insufficient.
+      if python -c "import sys; from win11toast import toast; toast('CF Orchestrator', sys.argv[1], app_id='CF Orchestrator', duration='long')" "$msg" >/dev/null 2>&1; then
         channel_result="primary_failed[$primary_attempt_summary]+fallback:ok_via_python_module"
       else
         channel_result="primary_failed[$primary_attempt_summary]+fallback:fail_via_python_module"
