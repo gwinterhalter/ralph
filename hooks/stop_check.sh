@@ -333,9 +333,31 @@ for ((i=0; i<count; i++)); do
           fi
           ;;
         *)
-          echo "stop_check: $kind predicate '$pred_name' (skill='$skill_name') has no marker-map entry (expected: corpus_auditor_clean, cross_reference_audit_clean, new_skills_clean, auto_build_spec_clean)" >&2
-          rm -f "$tmp_out"
-          exit 3
+          # FUP-0722: generic catch-all evaluator for predicate names not in the hardcoded
+          # marker map (corpus_auditor_clean, cross_reference_audit_clean, new_skills_clean,
+          # auto_build_spec_clean). Operator supplies the success-marker pattern via
+          # params.success_marker_pattern (grep -E regex); skill invocation uses params.skill
+          # + params.target. If either params.skill or params.success_marker_pattern is
+          # missing, preserves the prior unknown-predicate-name HALT semantics. Lets seed
+          # authors add new skill_clean / doc_review_clean predicates without requiring a
+          # stop_check.sh edit per new predicate.
+          generic_marker="$(read_seed_field "$SEED" ".completion_predicate[$i].params.success_marker_pattern" 2>/dev/null || echo "")"
+          if [[ -z "$skill_name" || "$skill_name" == "null" ]]; then
+            echo "stop_check: $kind predicate '$pred_name' has no marker-map entry AND missing params.skill (catch-all evaluator needs it)" >&2
+            rm -f "$tmp_out"
+            exit 3
+          fi
+          if [[ -z "$generic_marker" || "$generic_marker" == "null" ]]; then
+            echo "stop_check: $kind predicate '$pred_name' (skill='$skill_name') has no marker-map entry (expected: corpus_auditor_clean, cross_reference_audit_clean, new_skills_clean, auto_build_spec_clean) AND missing params.success_marker_pattern for generic catch-all evaluator" >&2
+            rm -f "$tmp_out"
+            exit 3
+          fi
+          # FUP-0745: --add-dir + -- required for slash-command resolution from ralph/ CWD.
+          claude -p --add-dir "$CLAUDE_SKILLS_DIR" -- "/$skill_name target=$target" > "$tmp_out" 2>&1 || true
+          if ! grep -qE "$generic_marker" "$tmp_out"; then
+            echo "stop_check: $kind predicate '$pred_name' (skill='$skill_name') generic-evaluator output does not match params.success_marker_pattern '$generic_marker'" >&2
+            all_pass=0
+          fi
           ;;
       esac
       rm -f "$tmp_out"
