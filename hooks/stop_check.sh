@@ -88,6 +88,34 @@ for ((i=0; i<count; i++)); do
           fi
         fi
       fi
+      # FUP-0813: descriptive-sentinel fallback — if targets_source looks like a description
+      # rather than a filename (no .md extension OR contains whitespace), treat as a sentinel
+      # for "use the sibling registry_zero_open's params.path" (reuses the empty/null fallback
+      # path at lines 67-73 above). Mirrors that fallback but triggered by heuristic shape
+      # rather than missing value. Closes the auto_build_spec_closure seed v1.5.x case where
+      # params.targets_source: "register closure entries" (descriptive string) failed both the
+      # exact and scan-newest lookup, silently blocking INITIATIVE_COMPLETE detection at iter-13.
+      if [[ -z "$register_path" || ! -f "$register_path" ]]; then
+        if [[ "$targets_source" != *.md ]] || [[ "$targets_source" == *" "* ]]; then
+          sibling_path=""
+          for ((k=0; k<count; k++)); do
+            if [[ "$(read_seed_field "$SEED" ".completion_predicate[$k].check_kind")" == "registry_zero_open" ]]; then
+              sibling_path="$(read_seed_field "$SEED" ".completion_predicate[$k].params.path")"
+              break
+            fi
+          done
+          if [[ -n "$sibling_path" && "$sibling_path" != "null" ]]; then
+            if [[ -f "$sibling_path" ]]; then
+              register_path="$sibling_path"
+            else
+              register_path="$(resolve_register_scan_newest "$workspace_root" "$sibling_path")"
+            fi
+            if [[ -n "$register_path" && -f "$register_path" ]]; then
+              echo "stop_check: artefact_exists targets_source '$targets_source' looks descriptive — fell back to sibling registry '$sibling_path' -> '$register_path'" >&2
+            fi
+          fi
+        fi
+      fi
       if [[ -z "$register_path" || ! -f "$register_path" ]]; then
         echo "stop_check: artefact_exists targets_source register '$targets_source' not found" >&2
         all_pass=0
