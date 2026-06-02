@@ -292,7 +292,13 @@ for ((i=0; i<count; i++)); do
           # audit/ within 7-day TTL before invoking claude -p (each invocation costs $1-3 LLM
           # + is stochastic). Falls through to the original claude -p path if no recent
           # audit is found OR if cached audit lacks the clean signal.
-          cached_audit="$(find "$workspace_root" -path '*/audit/Corpus_Audit*.md' -type f -mtime -7 -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)"
+          # FUP-0819 polish: scope to initiative-relevant audits via slug-derived pattern;
+          # raw `Corpus_Audit*.md` glob would match unrelated sub-projects' audit reports.
+          initiative_slug="$(read_seed_field "$SEED" '.initiative.slug' 2>/dev/null || echo "")"
+          # Convert slug to title-case approximation (auto_build_spec → Auto_Build_Spec) so we
+          # match audit files using either lowercase slug or title-case naming.
+          initiative_title_pattern="$(echo "$initiative_slug" | sed 's/\b\(.\)/\u\1/g')"
+          cached_audit="$(find "$workspace_root" \( -path "*/audit/Corpus_Audit*${initiative_title_pattern}*.md" -o -path "*/audit/Corpus_Audit*${initiative_slug}*.md" \) -type f -mtime -7 -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)"
           if [[ -n "$cached_audit" && -f "$cached_audit" ]]; then
             # Clean signal per cf-corpus-auditor v1.7 output format: zero attributable
             # Layer-1 / Layer-2 findings ("Layer 1 findings attributable...: 0 🔴 / 0 🟡 / 0 🟢").
@@ -320,7 +326,11 @@ for ((i=0; i<count; i++)); do
         cross_reference_audit_clean)
           # FUP-0819: cache-first — look for existing Cross_Reference_Audit*.md report
           # under workspace audit/ within 7-day TTL before invoking claude -p.
-          cached_audit="$(find "$workspace_root" -path '*/audit/Cross_Reference_Audit*.md' -type f -mtime -7 -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)"
+          # Scoped to initiative-relevant audits via slug-derived pattern (same approach
+          # as corpus_auditor_clean above).
+          initiative_slug="$(read_seed_field "$SEED" '.initiative.slug' 2>/dev/null || echo "")"
+          initiative_title_pattern="$(echo "$initiative_slug" | sed 's/\b\(.\)/\u\1/g')"
+          cached_audit="$(find "$workspace_root" \( -path "*/audit/Cross_Reference_Audit*${initiative_title_pattern}*.md" -o -path "*/audit/Cross_Reference_Audit*${initiative_slug}*.md" \) -type f -mtime -7 -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)"
           if [[ -n "$cached_audit" && -f "$cached_audit" ]]; then
             # Clean signal per cf-cross-reference-audit v1.7 output format: presence of
             # "🟢 clean" markers (per-row severity) or "0 severe attributable" summary.
