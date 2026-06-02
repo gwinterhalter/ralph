@@ -86,12 +86,26 @@ dispatch_notification() {
       fi
       rm -f "$tmp_msg"
     fi
-  elif [[ "$fallback" == "win11toast" ]]; then
-    channel_attempted="win11toast"
+  fi
+  # FUP-0809: belt-and-braces fallback restructured from elif-on-primary-chain to sequential
+  # post-primary check. The original elif structure prevented win11toast fallback from firing
+  # whenever the primary chain attempted ANYTHING (whether the attempt succeeded or failed),
+  # because the elif required no preceding primary clause to match. Now fires sequentially
+  # when the primary did NOT succeed: channel_result not in {ok, success} → try fallback.
+  # Captures all primary-failure cases (gmail_smtp rc=26, slack_webhook fail, env_unset skip,
+  # unknown primary). Audit log entry records both the primary attempt and the fallback
+  # outcome via the augmented channel_attempted + channel_result fields.
+  if [[ "$fallback" == "win11toast" && "$channel_result" != "ok" && "$channel_result" != "success" ]]; then
+    local primary_attempt_summary="$channel_attempted=$channel_result"
+    channel_attempted="${channel_attempted}+win11toast_fallback"
     if command -v win11toast >/dev/null 2>&1; then
-      if win11toast "$msg" >/dev/null 2>&1; then channel_result="ok"; else channel_result="fail"; fi
+      if win11toast "$msg" >/dev/null 2>&1; then
+        channel_result="primary_failed[$primary_attempt_summary]+fallback:ok"
+      else
+        channel_result="primary_failed[$primary_attempt_summary]+fallback:fail"
+      fi
     else
-      channel_result="unavailable"
+      channel_result="primary_failed[$primary_attempt_summary]+fallback:unavailable"
     fi
   fi
   # UNCONDITIONAL audit append — runs regardless of channel attempt / success (FR-009).
