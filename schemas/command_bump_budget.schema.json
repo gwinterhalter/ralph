@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gwinterhalter/ralph/schemas/command_bump_budget.schema.json",
+  "title": "command_bump_budget",
+  "description": "Schema for bump_budget command-JSON files written to $STATE_DIR/commands/ by the operator. Polled between iterations by orchestrator.sh main loop via lib/command_dispatch.sh (FUP-0815). Effect: writes $STATE_DIR/budget_override.json which run_claude_json reads on its next pre-call check, using max($BUDGET_CAP, $override) as the effective cap. Runtime control, not a Phase-Z cost gate. additionalProperties:true mirrors the FUP-0734 / FUP-0749 precedent on gate_request.schema.json.",
+  "type": "object",
+  "required": ["command_type", "command_id", "issued_by", "issued_at", "new_cap_usd"],
+  "properties": {
+    "command_type": {
+      "type": "string",
+      "const": "bump_budget",
+      "description": "Discriminator. MUST be the literal string 'bump_budget'."
+    },
+    "command_id": {
+      "type": "string",
+      "description": "Stable identifier for this command instance. Convention: bump_budget_<iso8601_utc>."
+    },
+    "issued_by": {
+      "type": "string",
+      "description": "Identifier of the caller. Convention: 'operator-cc-scribe' for scribe-originated."
+    },
+    "issued_at": {
+      "type": "string",
+      "description": "ISO-8601 UTC timestamp of command issuance."
+    },
+    "new_cap_usd": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Requested new budget cap in USD. Effective cap is max(seed.budget.tokens_usd, $new_cap_usd) — bumps NEVER reduce the seed-declared cap below its original value."
+    },
+    "reason": {
+      "type": "string",
+      "description": "Optional free-form rationale for the budget bump (informational; not consumed by dispatch logic)."
+    }
+  },
+  "additionalProperties": true
+}

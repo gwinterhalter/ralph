@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gwinterhalter/ralph/schemas/command_query_register_state.schema.json",
+  "title": "command_query_register_state",
+  "description": "Schema for query_register_state command-JSON files written to $STATE_DIR/commands/ by the operator. Polled between iterations by orchestrator.sh main loop via lib/command_dispatch.sh (FUP-0815). READ-ONLY: produces a register-vs-predicates snapshot to commands/<command_id>.response.json (gap counts by status; current iteration; budget cap + spend + override; pending_gate state). Touches NO substrate. additionalProperties:true mirrors the FUP-0734 / FUP-0749 precedent on gate_request.schema.json.",
+  "type": "object",
+  "required": ["command_type", "command_id", "issued_by", "issued_at"],
+  "properties": {
+    "command_type": {
+      "type": "string",
+      "const": "query_register_state",
+      "description": "Discriminator. MUST be the literal string 'query_register_state'."
+    },
+    "command_id": {
+      "type": "string",
+      "description": "Stable identifier for this command instance. Convention: query_register_state_<iso8601_utc>."
+    },
+    "issued_by": {
+      "type": "string",
+      "description": "Identifier of the caller. Convention: 'operator-cc-scribe' for scribe-originated."
+    },
+    "issued_at": {
+      "type": "string",
+      "description": "ISO-8601 UTC timestamp of command issuance."
+    },
+    "include_fields": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Optional projection filter — list of snapshot fields to include in the response. If omitted, all default fields are returned. Recognised values: registry_summary, iteration_index, budget, pending_gate, last_role_call_output_ref."
+    }
+  },
+  "additionalProperties": true
+}

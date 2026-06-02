@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gwinterhalter/ralph/schemas/command_pause.schema.json",
+  "title": "command_pause",
+  "description": "Schema for pause command-JSON files written to $STATE_DIR/commands/ by the operator (via the \\btw scribe slash-command or directly). Polled between iterations by orchestrator.sh main loop via lib/command_dispatch.sh (FUP-0815). Pause is honored at the next iter-boundary AFTER the current iteration completes — it NEVER interrupts an in-flight Consumer-confirm cycle (FUP-0797 BINDING). additionalProperties:true mirrors the FUP-0734 / FUP-0749 precedent on gate_request.schema.json — do NOT re-tighten without re-verifying against current scribe emission shape.",
+  "type": "object",
+  "required": ["command_type", "command_id", "issued_by", "issued_at"],
+  "properties": {
+    "command_type": {
+      "type": "string",
+      "const": "pause",
+      "description": "Discriminator. MUST be the literal string 'pause'."
+    },
+    "command_id": {
+      "type": "string",
+      "description": "Stable identifier for this command instance. Convention: pause_<iso8601_utc> (e.g., pause_2026-06-02T22-15-00Z). Used as the basename for the response.json sibling (e.g., pause_2026-06-02T22-15-00Z.response.json) and for the archived copy under commands/.processed/."
+    },
+    "issued_by": {
+      "type": "string",
+      "description": "Identifier of the caller. Convention: 'operator-cc-scribe' for scribe-originated; 'operator-direct' for direct CLI authoring; free-form otherwise."
+    },
+    "issued_at": {
+      "type": "string",
+      "description": "ISO-8601 UTC timestamp of command issuance (e.g., 2026-06-02T22:15:00Z)."
+    },
+    "reason": {
+      "type": "string",
+      "description": "Optional free-form rationale for the pause (informational; not consumed by dispatch logic)."
+    }
+  },
+  "additionalProperties": true
+}

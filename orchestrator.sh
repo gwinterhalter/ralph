@@ -26,6 +26,10 @@ source "$SCRIPT_DIR/lib/notify.sh"
 # FUP-0798: per-iteration workstreams-row UPSERT for operator-awareness during long-running
 # headless RL runs. No-op when seed.heartbeat.workstream_id is absent or env vars unset.
 source "$SCRIPT_DIR/lib/heartbeat.sh"
+# shellcheck source=lib/command_dispatch.sh
+# FUP-0815: operator-command channel — state_dir/commands/ watch dir, polled at iter boundaries.
+# Dispatches pause / bump_budget / query_register_state via case in command_dispatch_run.
+source "$SCRIPT_DIR/lib/command_dispatch.sh"
 
 SEED="${1:?usage: orchestrator.sh <seed_path>}"
 
@@ -58,7 +62,13 @@ run_claude_json() {
   [[ -n "$rm_val" ]] && role_model_flag="--model $rm_val"
   [[ -f "$RUNNING_SPEND_FILE" ]] || echo '{"total_spend_usd": 0.0}' > "$RUNNING_SPEND_FILE"
   current_spend="$(jq -r '.total_spend_usd' "$RUNNING_SPEND_FILE")"
-  remaining_budget="$(jq -rn --argjson cap "$BUDGET_CAP" --argjson cur "$current_spend" '$cap - $cur')"
+  # FUP-0815: effective_cap = max($BUDGET_CAP, $budget_override) — operator bumps via
+  # \btw bump <usd> write $STATE_DIR/budget_override.json; never reduce below seed cap.
+  local effective_cap="$BUDGET_CAP"
+  if [[ -f "$STATE_DIR/budget_override.json" ]]; then
+    effective_cap="$(jq -rn --argjson seed "$BUDGET_CAP" --argjson ovr "$(jq -r '.budget_cap_usd' "$STATE_DIR/budget_override.json")" '[$seed, $ovr] | max')"
+  fi
+  remaining_budget="$(jq -rn --argjson cap "$effective_cap" --argjson cur "$current_spend" '$cap - $cur')"
   if awk "BEGIN { exit !($remaining_budget <= 0) }"; then
     log "HALT: BUDGET_EXHAUSTED before next claude -p (spend=$current_spend cap=$BUDGET_CAP)"
     dispatch_notification "$SEED" "$STATE_DIR" budget_exhausted "$(jq -nc --arg sp "$current_spend" --arg cap "$BUDGET_CAP" '{iteration:"", reason:"run_claude_json_pre_call", spend:$sp, cap:$cap}')"
@@ -352,4 +362,16 @@ while true; do
   # FUP-0798: heartbeat at iteration close so the workstreams row final state reflects the last
   # completed iteration's outcome (not just "begin"; pairs with iter-begin call above).
   heartbeat_workstream "$SEED" "$STATE_DIR" "$ITER" "close"
+
+  # FUP-0815: poll operator-command channel between iterations (after Consumer close + heartbeat,
+  # before next iter's stop_check). Dispatches pause / bump_budget / query_register_state.
+  command_dispatch_run "$STATE_DIR" "$SEED" "$ITER"
+  # Pause-honor: command_dispatch may have written pause_requested.flag; clean-exit if so.
+  if [[ -f "$STATE_DIR/pause_requested.flag" ]]; then
+    log "PAUSE_REQUESTED: operator pause command honored at iter $ITER boundary"
+    dispatch_notification "$SEED" "$STATE_DIR" pause_honored "$(jq -nc --arg it "$ITER" '{iteration:$it, reason:"command_dispatch_pause"}')"
+    rm -f "$STATE_DIR/pause_requested.flag"
+    echo "PAUSED at iter $ITER boundary (operator command)"
+    exit 0
+  fi
 done
