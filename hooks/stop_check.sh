@@ -297,7 +297,7 @@ for ((i=0; i<count; i++)); do
           initiative_slug="$(read_seed_field "$SEED" '.initiative.slug' 2>/dev/null || echo "")"
           # Convert slug to title-case approximation (auto_build_spec → Auto_Build_Spec) so we
           # match audit files using either lowercase slug or title-case naming.
-          initiative_title_pattern="$(echo "$initiative_slug" | sed 's/\b\(.\)/\u\1/g')"
+          initiative_title_pattern="$(echo "$initiative_slug" | awk -F'_' 'BEGIN{OFS="_"} { for(i=1;i<=NF;i++) $i = toupper(substr($i,1,1)) substr($i,2); print }')"
           cached_audit="$(find "$workspace_root" \( -path "*/audit/Corpus_Audit*${initiative_title_pattern}*.md" -o -path "*/audit/Corpus_Audit*${initiative_slug}*.md" \) -type f -mtime -7 -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)"
           if [[ -n "$cached_audit" && -f "$cached_audit" ]]; then
             # Clean signal per cf-corpus-auditor v1.7 output format: zero attributable
@@ -329,7 +329,7 @@ for ((i=0; i<count; i++)); do
           # Scoped to initiative-relevant audits via slug-derived pattern (same approach
           # as corpus_auditor_clean above).
           initiative_slug="$(read_seed_field "$SEED" '.initiative.slug' 2>/dev/null || echo "")"
-          initiative_title_pattern="$(echo "$initiative_slug" | sed 's/\b\(.\)/\u\1/g')"
+          initiative_title_pattern="$(echo "$initiative_slug" | awk -F'_' 'BEGIN{OFS="_"} { for(i=1;i<=NF;i++) $i = toupper(substr($i,1,1)) substr($i,2); print }')"
           cached_audit="$(find "$workspace_root" \( -path "*/audit/Cross_Reference_Audit*${initiative_title_pattern}*.md" -o -path "*/audit/Cross_Reference_Audit*${initiative_slug}*.md" \) -type f -mtime -7 -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)"
           if [[ -n "$cached_audit" && -f "$cached_audit" ]]; then
             # Clean signal per cf-cross-reference-audit v1.7 output format: presence of
@@ -385,7 +385,12 @@ for ((i=0; i<count; i++)); do
           # FUP-0819: cache-first — look for existing cf-doc-reviewer fix2 report under
           # workspace audit/ matching the target doc + within 7-day TTL. Common naming
           # convention: <target_stem>_v*_fix2_<date>.md (e.g. Auto_Build_Spec_v1.39_fix2_2026-05-31.md).
-          target_stem="$(basename "$target" .md)"
+          # Read params.doc as fallback when params.target absent (some seed conventions use
+          # 'doc' for doc_review_clean predicates per Initiative_Orchestrator_Spec §8 schema
+          # flexibility); ensures target_stem resolves to a meaningful identifier.
+          doc_field="$(read_seed_field "$SEED" ".completion_predicate[$i].params.doc" 2>/dev/null || echo "")"
+          effective_target="${target:-$doc_field}"
+          target_stem="$(basename "$effective_target" .md)"
           cached_audit="$(find "$workspace_root" -path "*/audit/*${target_stem}*fix2*.md" -type f -mtime -7 -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)"
           if [[ -n "$cached_audit" && -f "$cached_audit" ]]; then
             # Clean signal per cf-doc-reviewer fix2 output convention: "All findings resolved: YES"
@@ -399,7 +404,7 @@ for ((i=0; i<count; i++)); do
           else
             # No recent fix2 audit — fall through to original claude -p invocation.
             # FUP-0745: --add-dir + -- required for slash-command resolution from ralph/ CWD.
-            claude -p --add-dir "$CLAUDE_SKILLS_DIR" -- "/cf-doc-reviewer \\fix2 target=$target" > "$tmp_out" 2>&1 || true
+            claude -p --add-dir "$CLAUDE_SKILLS_DIR" -- "/cf-doc-reviewer \\fix2 target=$effective_target" > "$tmp_out" 2>&1 || true
             if ! grep -qE 'All findings resolved:\s*YES' "$tmp_out"; then
               all_pass=0
             fi
