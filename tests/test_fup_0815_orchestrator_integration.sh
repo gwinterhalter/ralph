@@ -38,18 +38,10 @@ ITER="0001"
 ITER_DIR="$STATE_DIR/iterations/$ITER"
 trap 'rm -rf "$TMPROOT"' EXIT
 
-# Env-skip: on Windows+WinGet jq the orchestrator's MSYS_NO_PATHCONV=1 (orchestrator.sh L11,
-# FUP-0740 slash-prefix preservation) breaks the WinGet jq.exe (Windows-native binary expects
-# native Windows paths, not Unix /tmp/...). The hermetic command_dispatch tests + path-discovery
-# tests + grep-verified orchestrator wiring (3.A/3.B/3.C) provide strong correctness evidence
-# under Windows. This end-to-end orchestrator-in-loop validation passes under Unix jq
-# environments (operator's main env). Skip gracefully when WinGet jq is detected.
-if jq --version 2>/dev/null | grep -q '^jq-' && \
-   command -v jq | grep -qiE 'wingt|winget|appdata.*local.*microsoft'; then
-  echo "SKIP: WinGet jq detected at $(command -v jq) — MSYS_NO_PATHCONV=1 / WinGet-jq.exe path conversion incompatibility (env-specific, NOT a FUP-0815 code defect; see test header)."
-  echo "=== test_fup_0815_orchestrator_integration.sh: SKIPPED (env) ==="
-  exit 0
-fi
+# FUP-0823 closure: orchestrator.sh run_claude_json now wraps jq file arguments with
+# `cygpath -w` when cygpath is available (mirroring lib/validate_artefact.sh L30-36
+# pattern). This makes the test runnable under Windows+WinGet jq.exe; passes through
+# unchanged on Unix-jq hosts.
 
 PASS=0; FAIL=0
 fail() { echo "FAIL: $*" >&2; FAIL=$((FAIL+1)); }
@@ -64,15 +56,13 @@ cat > "$TMPBIN/claude" <<'SHIM'
 # Writes a Planner Path-B output (a minimal session_plan + no INITIATIVE_COMPLETE signal) so the
 # orchestrator proceeds to execute_with_gates + Consumer.
 PROMPT="$*"
-ITER_DIR=""
-# Extract the second positional after `--` (the prompt usually has $STATE_DIR $ITER_DIR).
-for arg in "$@"; do
-  case "$arg" in
-    */iterations/*) ITER_DIR="$arg" ;;
-  esac
-done
-[[ -z "$ITER_DIR" ]] && ITER_DIR="."
-mkdir -p "$ITER_DIR"
+# The orchestrator passes the prompt as ONE quoted string after `--`:
+#   "/rl-initiative-planner $STATE_DIR $ITER_DIR"
+# So we extract ITER_DIR from the LAST whitespace-separated token of the LAST arg.
+LAST_ARG="${!#}"
+ITER_DIR="${LAST_ARG##* }"  # last space-separated token
+[[ "$ITER_DIR" != */iterations/* ]] && ITER_DIR="."
+mkdir -p "$ITER_DIR" 2>/dev/null || true
 
 if echo "$PROMPT" | grep -q '/rl-initiative-planner'; then
   # Write a tiny session_plan so plan_review.sh has something to inspect; no gates so execute_with_gates skips

@@ -8,8 +8,10 @@ set -euo pipefail
 # FUP-0740: disable MSYS path-conversion so slash-prefixed prompt args and K:/ paths
 # survive on Git Bash for Windows (else "/rl-initiative-planner …" → C:/Program Files/Git/…
 # and K:-drive paths get colon-split). Confirmed root cause: execution report §3 Run 1 + Diagnostic 1.
-export MSYS_NO_PATHCONV=1
-export MSYS2_ARG_CONV_EXCL='*'
+# FUP-0823: localized via env-prefix on the `claude -p` invocation in run_claude_json
+# (see L88 area), NOT exported globally — global export breaks WinGet jq.exe (Windows-native
+# binary) on /tmp/... paths. Localized form preserves FUP-0740 fix scope (claude -p only)
+# without leaking the path-conversion-disable to every other binary (jq, mv, etc.).
 # FUP-0739: skills-tree root (the dir CONTAINING .claude/skills) — passed via --add-dir so
 # `claude -p` resolves the rl-* slash commands from the ralph/ CWD (skills live in a SIBLING
 # tree, not an ancestor of ralph/). Env-overridable; portable across drive/path changes (Q1 default).
@@ -74,8 +76,13 @@ run_claude_json() {
     dispatch_notification "$SEED" "$STATE_DIR" budget_exhausted "$(jq -nc --arg sp "$current_spend" --arg cap "$BUDGET_CAP" '{iteration:"", reason:"run_claude_json_pre_call", spend:$sp, cap:$cap}')"
     echo "HALT: BUDGET_EXHAUSTED" >&2; exit 2
   fi
+  # FUP-0823: env-prefix MSYS_NO_PATHCONV=1 + MSYS2_ARG_CONV_EXCL='*' ONLY on the claude
+  # invocation (was previously exported globally at L11; broke WinGet jq.exe on /tmp/...
+  # paths everywhere). Localized form preserves FUP-0740 slash-prefix preservation scope
+  # without leaking the path-conversion-disable to jq / mv / etc.
   # shellcheck disable=SC2086
-  claude -p $role_model_flag --output-format json --max-budget-usd "$remaining_budget" --add-dir "$CLAUDE_SKILLS_DIR" -- "$@" > "$out_file"
+  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
+    claude -p $role_model_flag --output-format json --max-budget-usd "$remaining_budget" --add-dir "$CLAUDE_SKILLS_DIR" -- "$@" > "$out_file"
   call_cost="$(jq -r '.total_cost_usd // 0' "$out_file")"
   new_total="$(jq -rn --argjson cur "$current_spend" --argjson cc "$call_cost" '$cur + $cc')"
   jq --argjson nt "$new_total" '.total_spend_usd = $nt' "$RUNNING_SPEND_FILE" > "$RUNNING_SPEND_FILE.tmp" \
