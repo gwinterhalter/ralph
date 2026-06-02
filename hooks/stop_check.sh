@@ -6,6 +6,12 @@
 # Exit ≥3 — error / malformed predicate (HALT)
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# FUP-0818: default CLAUDE_SKILLS_DIR for direct invocation (outside orchestrator parent).
+# Matches orchestrator.sh line 18 export pattern. Used by skill_clean predicate evaluators
+# at lines ~286/301/319/330 via --add-dir flag on `claude -p` invocations. Without this
+# default, `set -u` aborts stop_check immediately on any skill_clean predicate when run
+# standalone (testing, verification, manual diagnostics).
+: "${CLAUDE_SKILLS_DIR:=K:/Claude Code Factory/V3/Project_Docs}"
 # shellcheck source=../lib/seed.sh
 source "$SCRIPT_DIR/../lib/seed.sh"
 
@@ -282,54 +288,111 @@ for ((i=0; i<count; i++)); do
       workspace_root="$(read_seed_field "$SEED" '.workspace_root')"
       case "$pred_name" in
         corpus_auditor_clean)
-          # FUP-0745: --add-dir + -- required for slash-command resolution from ralph/ CWD.
-          claude -p --add-dir "$CLAUDE_SKILLS_DIR" -- "/cf-corpus-auditor target=$target" > "$tmp_out" 2>&1 || true
-          # cf-corpus-auditor v1.7 emits `- Report location: {path}` into stdout (status echo);
-          # skill's own SKILL.md L210 confirms this is the declared output convention.
-          report_file="$(grep -oE '^- Report location: .+$' "$tmp_out" | sed 's/^- Report location: //' | tail -1)"
-          if [[ -z "$report_file" || ! -f "$report_file" ]]; then
-            echo "stop_check: cf-corpus-auditor did not emit '- Report location: <path>' line OR report file unreadable" >&2
-            all_pass=0
-          elif grep -qE '^\|' "$report_file"; then
-            all_pass=0
+          # FUP-0819: cache-first — look for existing Corpus_Audit*.md report under workspace
+          # audit/ within 7-day TTL before invoking claude -p (each invocation costs $1-3 LLM
+          # + is stochastic). Falls through to the original claude -p path if no recent
+          # audit is found OR if cached audit lacks the clean signal.
+          cached_audit="$(find "$workspace_root" -path '*/audit/Corpus_Audit*.md' -type f -mtime -7 2>/dev/null | sort -r | head -1)"
+          if [[ -n "$cached_audit" && -f "$cached_audit" ]]; then
+            # Clean signal per cf-corpus-auditor v1.7 output format: zero attributable
+            # Layer-1 / Layer-2 findings ("Layer 1 findings attributable...: 0 🔴 / 0 🟡 / 0 🟢").
+            if grep -qE 'Layer 1 findings attributable[^0-9]+0[^0-9]+0[^0-9]+0|Layer-1[[:space:]]+0[^0-9]+0[^0-9]+0' "$cached_audit"; then
+              echo "stop_check: corpus_auditor_clean CACHED-CLEAN via $cached_audit (FUP-0819 cache-first path)" >&2
+            else
+              echo "stop_check: corpus_auditor_clean CACHED-NOT-CLEAN via $cached_audit (FUP-0819; lacks Layer-1=0/0/0 attributable markers)" >&2
+              all_pass=0
+            fi
+          else
+            # No recent audit — fall through to original claude -p invocation.
+            # FUP-0745: --add-dir + -- required for slash-command resolution from ralph/ CWD.
+            claude -p --add-dir "$CLAUDE_SKILLS_DIR" -- "/cf-corpus-auditor target=$target" > "$tmp_out" 2>&1 || true
+            # cf-corpus-auditor v1.7 emits `- Report location: {path}` into stdout (status echo);
+            # skill's own SKILL.md L210 confirms this is the declared output convention.
+            report_file="$(grep -oE '^- Report location: .+$' "$tmp_out" | sed 's/^- Report location: //' | tail -1)"
+            if [[ -z "$report_file" || ! -f "$report_file" ]]; then
+              echo "stop_check: cf-corpus-auditor did not emit '- Report location: <path>' line OR report file unreadable" >&2
+              all_pass=0
+            elif grep -qE '^\|' "$report_file"; then
+              all_pass=0
+            fi
           fi
           ;;
         cross_reference_audit_clean)
-          # cf-cross-reference-audit v1.7 SKILL.md L122-129 Inputs require audit_type=;
-          # default to db_columns (most-commonly-referenced Tier-1 audit per skill's audit-type table).
-          # FUP-0745: --add-dir + -- required for slash-command resolution from ralph/ CWD.
-          claude -p --add-dir "$CLAUDE_SKILLS_DIR" -- "/cf-cross-reference-audit target=$target audit_type=db_columns mode=A severity_floor=severe" > "$tmp_out" 2>&1 || true
-          # Issues-file resolution: prefer explicit "Issues path:" line; else workspace-root-anchored glob
-          # under audit/. SKILL.md L139-146 documents output at <workspace>/audit/<descriptor>_Issues_<date>_v1.0.md.
-          issues_file="$(grep -oE '^Issues path: .+$' "$tmp_out" | sed 's/^Issues path: //' | tail -1)"
-          if [[ -z "$issues_file" || ! -f "$issues_file" ]]; then
-            if [[ -n "$workspace_root" && -d "$workspace_root" ]]; then
-              issues_file="$(find "$workspace_root" -path '*/audit/*_Issues_*.md' -type f -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)"
+          # FUP-0819: cache-first — look for existing Cross_Reference_Audit*.md report
+          # under workspace audit/ within 7-day TTL before invoking claude -p.
+          cached_audit="$(find "$workspace_root" -path '*/audit/Cross_Reference_Audit*.md' -type f -mtime -7 2>/dev/null | sort -r | head -1)"
+          if [[ -n "$cached_audit" && -f "$cached_audit" ]]; then
+            # Clean signal per cf-cross-reference-audit v1.7 output format: presence of
+            # "🟢 clean" markers (per-row severity) or "0 severe attributable" summary.
+            if grep -qE '🟢 clean|0 severe attributable' "$cached_audit"; then
+              echo "stop_check: cross_reference_audit_clean CACHED-CLEAN via $cached_audit (FUP-0819 cache-first path)" >&2
+            else
+              echo "stop_check: cross_reference_audit_clean CACHED-NOT-CLEAN via $cached_audit (FUP-0819; lacks 🟢-clean / 0-severe markers)" >&2
+              all_pass=0
             fi
-          fi
-          if [[ -z "$issues_file" || ! -f "$issues_file" ]]; then
-            echo "stop_check: cf-cross-reference-audit did not emit 'Issues path:' line and no recent audit/ Issues file found under workspace_root" >&2
-            all_pass=0
-          elif ! grep -qE 'Coverage summary:.*100%.*references resolved' "$issues_file" && grep -qE '^\|' "$issues_file"; then
-            all_pass=0
+          else
+            # No recent audit — fall through to original claude -p invocation.
+            # cf-cross-reference-audit v1.7 SKILL.md L122-129 Inputs require audit_type=;
+            # default to db_columns (most-commonly-referenced Tier-1 audit per skill's audit-type table).
+            # FUP-0745: --add-dir + -- required for slash-command resolution from ralph/ CWD.
+            claude -p --add-dir "$CLAUDE_SKILLS_DIR" -- "/cf-cross-reference-audit target=$target audit_type=db_columns mode=A severity_floor=severe" > "$tmp_out" 2>&1 || true
+            # Issues-file resolution: prefer explicit "Issues path:" line; else workspace-root-anchored glob
+            # under audit/. SKILL.md L139-146 documents output at <workspace>/audit/<descriptor>_Issues_<date>_v1.0.md.
+            issues_file="$(grep -oE '^Issues path: .+$' "$tmp_out" | sed 's/^Issues path: //' | tail -1)"
+            if [[ -z "$issues_file" || ! -f "$issues_file" ]]; then
+              if [[ -n "$workspace_root" && -d "$workspace_root" ]]; then
+                issues_file="$(find "$workspace_root" -path '*/audit/*_Issues_*.md' -type f -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)"
+              fi
+            fi
+            if [[ -z "$issues_file" || ! -f "$issues_file" ]]; then
+              echo "stop_check: cf-cross-reference-audit did not emit 'Issues path:' line and no recent audit/ Issues file found under workspace_root" >&2
+              all_pass=0
+            elif ! grep -qE 'Coverage summary:.*100%.*references resolved' "$issues_file" && grep -qE '^\|' "$issues_file"; then
+              all_pass=0
+            fi
           fi
           ;;
         new_skills_clean)
-          # FUP-0745: --add-dir + -- required for slash-command resolution from ralph/ CWD.
-          claude -p --add-dir "$CLAUDE_SKILLS_DIR" -- "/cf-skill-reviewer mode=A target=$target" > "$tmp_out" 2>&1 || true
-          # cf-skill-reviewer v1.9 SKILL.md L195-200 emits `## Recommended Action` header then
-          # the value (KEEP / REPAIR / REBUILD) on a separate non-blank line. Awk picks the next
-          # non-blank line after the header; grep validates KEEP.
-          recommended="$(awk '/^## Recommended Action/{getline; while(/^[[:space:]]*$/) getline; print; exit}' "$tmp_out")"
-          if ! echo "$recommended" | grep -qE '^KEEP\b'; then
-            all_pass=0
+          # FUP-0819: vacuously-clean shortcut — if seed.session_shape_catalog has no skill-
+          # authoring shape (skill_build, skill_create, etc.), the predicate is vacuously
+          # zero per the describe-not-prescribe convention; skip claude -p invocation.
+          has_skill_shape="$(read_seed_field "$SEED" '[.session_shape_catalog[] | select(.name == "skill_build" or .name == "skill_create") | .name] | length')"
+          if [[ "$has_skill_shape" == "0" ]]; then
+            echo "stop_check: new_skills_clean VACUOUSLY-CLEAN — session_shape_catalog has no skill-authoring shape (FUP-0819 shortcut)" >&2
+          else
+            # FUP-0745: --add-dir + -- required for slash-command resolution from ralph/ CWD.
+            claude -p --add-dir "$CLAUDE_SKILLS_DIR" -- "/cf-skill-reviewer mode=A target=$target" > "$tmp_out" 2>&1 || true
+            # cf-skill-reviewer v1.9 SKILL.md L195-200 emits `## Recommended Action` header then
+            # the value (KEEP / REPAIR / REBUILD) on a separate non-blank line. Awk picks the next
+            # non-blank line after the header; grep validates KEEP.
+            recommended="$(awk '/^## Recommended Action/{getline; while(/^[[:space:]]*$/) getline; print; exit}' "$tmp_out")"
+            if ! echo "$recommended" | grep -qE '^KEEP\b'; then
+              all_pass=0
+            fi
           fi
           ;;
         auto_build_spec_clean)
-          # FUP-0745: --add-dir + -- required for slash-command resolution from ralph/ CWD.
-          claude -p --add-dir "$CLAUDE_SKILLS_DIR" -- "/cf-doc-reviewer \\fix2 target=$target" > "$tmp_out" 2>&1 || true
-          if ! grep -qE 'All findings resolved:\s*YES' "$tmp_out"; then
-            all_pass=0
+          # FUP-0819: cache-first — look for existing cf-doc-reviewer fix2 report under
+          # workspace audit/ matching the target doc + within 7-day TTL. Common naming
+          # convention: <target_stem>_v*_fix2_<date>.md (e.g. Auto_Build_Spec_v1.39_fix2_2026-05-31.md).
+          target_stem="$(basename "$target" .md)"
+          cached_audit="$(find "$workspace_root" -path "*/audit/*${target_stem}*fix2*.md" -type f -mtime -7 2>/dev/null | sort -r | head -1)"
+          if [[ -n "$cached_audit" && -f "$cached_audit" ]]; then
+            # Clean signal per cf-doc-reviewer fix2 output convention: "All findings resolved: YES"
+            # (possibly with markdown bold wrapping, e.g. "All findings resolved: **YES**").
+            if grep -qE 'All findings resolved:[[:space:]]*\*?\*?YES\*?\*?' "$cached_audit"; then
+              echo "stop_check: auto_build_spec_clean CACHED-CLEAN via $cached_audit (FUP-0819 cache-first path)" >&2
+            else
+              echo "stop_check: auto_build_spec_clean CACHED-NOT-CLEAN via $cached_audit (FUP-0819; lacks 'All findings resolved: YES' marker)" >&2
+              all_pass=0
+            fi
+          else
+            # No recent fix2 audit — fall through to original claude -p invocation.
+            # FUP-0745: --add-dir + -- required for slash-command resolution from ralph/ CWD.
+            claude -p --add-dir "$CLAUDE_SKILLS_DIR" -- "/cf-doc-reviewer \\fix2 target=$target" > "$tmp_out" 2>&1 || true
+            if ! grep -qE 'All findings resolved:\s*YES' "$tmp_out"; then
+              all_pass=0
+            fi
           fi
           ;;
         *)
