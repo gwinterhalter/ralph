@@ -205,8 +205,16 @@ for req in "$ITER_DIR"/gate_request_"${ITER}"_*.json; do
   [[ "$ANSWERER_MODEL" == "null" ]] && ANSWERER_MODEL=""
   ANSWERER_MODEL_FLAG=""
   [[ -n "$ANSWERER_MODEL" ]] && ANSWERER_MODEL_FLAG="--model $ANSWERER_MODEL"
+  # FUP-0842: answerer Role Call segment — closes the v1.2-defined-but-UNWIRED answerer row.
+  # role_call before dispatch, role_complete (with the answerer segment duration_ms) after; mirrors
+  # the executor role_call/role_complete pattern below. §6.3 best-effort.
+  emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "answerer" "role_call" "" "$gate_id" "gate"
+  EVENT_ANS_T0="$(date +%s%3N 2>/dev/null || echo 0)"
   # shellcheck disable=SC2086
   claude -p $ANSWERER_MODEL_FLAG --add-dir "$CLAUDE_SKILLS_DIR" -- "/rl-operator-answerer $req" > "$answerer_stdout_file"
+  emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "answerer" "role_complete" \
+    "$(( $(date +%s%3N 2>/dev/null || echo 0) - EVENT_ANS_T0 ))" "$gate_id" "gate" \
+    "$(jq -nc --arg gid "$gate_id" '{gate_id:$gid}')"
   # FUP-NEW (path-mismatch tolerance): rl-operator-answerer occasionally writes the
   # gate_response into an `<iter_dir>/gates/` subdir instead of the canonical `<iter_dir>/`
   # root (stochastic path-confusion when the Answerer notices the state-level `gates/` dir
@@ -270,6 +278,11 @@ for req in "${deferred_human[@]}"; do
   cp "$req" "$STATE_DIR/escalations/$basename_req"
   gate_id="$(jq -r '.gate_id // empty' "$req")"
   echo "execute_with_gates: gate_human escalation for $gate_id" >&2
+  # FUP-0842: gate_escalate — a gate_human escalated to the operator (awaiting async response);
+  # distinct from gate_fire, pairs with gate_resolve(mode=operator) for §13 Q7 operator-response
+  # latency. subject_id=gate_id + subject_kind="gate" per the spec §6.2 envelope. §6.3 best-effort.
+  emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "gate" "gate_escalate" "" "$gate_id" "gate" \
+    "$(jq -nc --arg gid "$gate_id" --arg it "$ITER" '{gate_id:$gid, awaiting:"operator", iteration:$it}')"
   # §2.3: write pending_gate to state_snapshot.json (the value §6.3 step 3 consumes).
   mkdir -p "$STATE_DIR"
   if [[ -f "$STATE_DIR/state_snapshot.json" ]]; then
@@ -330,6 +343,18 @@ mv -f "$RESULT_JSON_TMP" "$RESULT_JSON"
 emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "executor" "role_complete" \
   "$(( $(date +%s%3N 2>/dev/null || echo 0) - EVENT_EX_T0 ))" "" "" \
   "$(jq -nc --arg tr "$(jq -r '.terminal_reason // empty' "$RESULT_JSON" 2>/dev/null)" '{terminal_reason:$tr}')"
+# FUP-0842: per-call cost/latency primitive (llm_call) for the executor claude --print call —
+# tokens/cost from the CLI JSON envelope; duration_ms = the executor call wall-clock (EVENT_EX_T0);
+# subject_kind="llm_call" per the spec §6.2 envelope addition. §6.3 best-effort.
+emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "executor" "llm_call" \
+  "$(( $(date +%s%3N 2>/dev/null || echo 0) - EVENT_EX_T0 ))" "" "llm_call" \
+  "$(jq -nc \
+     --arg m "$(jq -r '.modelUsage // {} | keys[0] // (.model // "")' "$RESULT_JSON" 2>/dev/null || echo "")" \
+     --argjson i "$(jq -r '.usage.input_tokens // 0' "$RESULT_JSON" 2>/dev/null || echo 0)" \
+     --argjson o "$(jq -r '.usage.output_tokens // 0' "$RESULT_JSON" 2>/dev/null || echo 0)" \
+     --argjson c "$(jq -r '.usage.cache_read_input_tokens // 0' "$RESULT_JSON" 2>/dev/null || echo 0)" \
+     --argjson cost "$(jq -r '.total_cost_usd // 0' "$RESULT_JSON" 2>/dev/null || echo 0)" \
+     '{role:"executor", model:$m, input_tokens:$i, output_tokens:$o, cache_read_tokens:$c, cost_usd:$cost}')"
 
 # Phase 4a P4-06: validate execution_result.json against schema before §10.5 fires (typo-catch).
 if ! bash "$SCRIPT_DIR/../lib/validate_artefact.sh" "$SCRIPT_DIR/../schemas/execution_result.schema.json" "$RESULT_JSON"; then

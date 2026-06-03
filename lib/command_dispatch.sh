@@ -40,6 +40,16 @@ _command_dispatch_respond_and_archive() {
   mkdir -p "$proc_dir"
   jq -nc --arg id "$cmd_id" --arg s "$status" --argjson d "$details" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     '{command_id:$id, status:$s, responded_at:$ts, details:$d}' > "$resp_file"
+  # FUP-0842: operator_command event — one per dispatched command at an iteration boundary.
+  # command_type read from the file (still present pre-mv); result = the dispatch status. state_dir
+  # derived from the commands/ path; iteration from the exported EVENT_ITER. §6.3 best-effort.
+  if command -v emit_event >/dev/null 2>&1; then
+    local oc_state oc_ctype
+    oc_state="$(dirname "$(dirname "$cmd_file")")"
+    oc_ctype="$(jq -r '.command_type // "unknown"' "$cmd_file" 2>/dev/null || echo "unknown")"
+    emit_event "$oc_state" "${EVENT_PROJECT_ID:-}" "${EVENT_SLUG:-}" "${EVENT_ITER:-0}" "orchestrator" "operator_command" "" "" "" \
+      "$(jq -nc --arg c "$oc_ctype" --arg r "$status" '{command:$c, result:$r}')"
+  fi
   mv "$cmd_file" "$proc_dir/"
 }
 

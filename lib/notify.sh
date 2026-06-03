@@ -189,4 +189,19 @@ dispatch_notification() {
          --arg att "$channel_attempted" --arg res "$channel_result" --arg ts "$ts" \
          '{event:$ev, iteration:$it, gate_id:(if $gid=="null" then null else $gid end), reason:(if $rsn=="null" then null else $rsn end), channel_attempted:$att, channel_result:$res, ts:$ts}' \
          >> "$state_dir/logs/notifications.log"
+  # FUP-0842: notification event — a dispatch_notification send completed (any channel). result
+  # normalised to the spec §6.2 success/failure enum; the rich channel_result string + parsed curl
+  # rc preserved as detail/curl_rc. Guarded on emit_event presence (this lib is also sourced by
+  # contexts that may not have events.sh). §6.3 best-effort; EVENT_PROJECT_ID/EVENT_SLUG inherited.
+  if command -v emit_event >/dev/null 2>&1; then
+    local notif_result notif_curl_rc
+    case "$channel_result" in
+      ok|success|success_on_retry_*|*fallback:ok*) notif_result="success" ;;
+      *) notif_result="failure" ;;
+    esac
+    notif_curl_rc="$(printf '%s' "$channel_result" | grep -oE 'rc=[0-9]+' | grep -oE '[0-9]+' | head -1 || true)"
+    emit_event "$state_dir" "${EVENT_PROJECT_ID:-}" "${EVENT_SLUG:-}" "$iteration" "orchestrator" "notification" "" "" "" \
+      "$(jq -nc --arg ch "$channel_attempted" --arg ty "$event" --arg res "$notif_result" --arg rc "$notif_curl_rc" --arg detail "$channel_result" \
+         '{channel:$ch, type:$ty, result:$res, http_code:"", curl_rc:$rc, detail:$detail}')"
+  fi
 }

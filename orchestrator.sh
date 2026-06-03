@@ -101,6 +101,17 @@ run_claude_json() {
     effective_cap="$(jq -rn --argjson seed "$BUDGET_CAP" --argjson ovr "$(jq -r '.budget_cap_usd' "$STATE_DIR/budget_override.json")" '[$seed, $ovr] | max')"
   fi
   remaining_budget="$(jq -rn --argjson cap "$effective_cap" --argjson cur "$current_spend" '$cap - $cur')"
+  # FUP-0842: soft-threshold budget_warning — fires once per run when remaining drops below 20% of
+  # the effective cap (but is still > 0), upstream of the hard budget_exhausted HALT below.
+  # Best-effort (§6.3); the .budget_warning_emitted flag guards the once-per-run semantics.
+  if command -v emit_event >/dev/null 2>&1 && [[ ! -f "$STATE_DIR/.budget_warning_emitted" ]] \
+     && awk "BEGIN { exit !($remaining_budget > 0 && $remaining_budget < 0.2 * $effective_cap) }"; then
+    local bw_pct
+    bw_pct="$(jq -rn --argjson cur "$current_spend" --argjson cap "$effective_cap" '(($cur / $cap) * 100) | floor' 2>/dev/null || echo 0)"
+    emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "${EVENT_ITER:-0}" "orchestrator" "budget_warning" "" "" "" \
+      "$(jq -nc --argjson sp "$current_spend" --argjson cap "$effective_cap" --argjson pct "${bw_pct:-0}" '{spend_usd:$sp, cap_usd:$cap, pct:$pct}')"
+    touch "$STATE_DIR/.budget_warning_emitted" 2>/dev/null || true
+  fi
   if awk "BEGIN { exit !($remaining_budget <= 0) }"; then
     log "HALT: BUDGET_EXHAUSTED before next claude -p (spend=$current_spend cap=$BUDGET_CAP)"
     dispatch_notification "$SEED" "$STATE_DIR" budget_exhausted "$(jq -nc --arg sp "$current_spend" --arg cap "$BUDGET_CAP" '{iteration:"", reason:"run_claude_json_pre_call", spend:$sp, cap:$cap}')"
@@ -111,6 +122,7 @@ run_claude_json() {
   # paths everywhere). Localized form preserves FUP-0740 slash-prefix preservation scope
   # without leaking the path-conversion-disable to jq / mv / etc.
   # shellcheck disable=SC2086
+  local llm_t0; llm_t0="$(date +%s%3N 2>/dev/null || echo 0)"
   MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
     claude -p $role_model_flag --permission-mode "$POSTURE_VALUE" --output-format json --max-budget-usd "$remaining_budget" --add-dir "$CLAUDE_SKILLS_DIR" -- "$@" > "$out_file"
   call_cost="$(jq -r '.total_cost_usd // 0' "$out_file")"
@@ -118,6 +130,25 @@ run_claude_json() {
   jq --argjson nt "$new_total" '.total_spend_usd = $nt' "$RUNNING_SPEND_FILE" > "$RUNNING_SPEND_FILE.tmp" \
     && mv "$RUNNING_SPEND_FILE.tmp" "$RUNNING_SPEND_FILE"
   log "claude -p call_cost=$call_cost running_total=$new_total cap=$BUDGET_CAP model=${rm_val:-<cli-default>}"
+  # FUP-0842: per-call cost/latency primitive (llm_call) — the §13 Q5/Q6 cost-per-iteration/role/model
+  # source. role inferred from the slash-command in the prompt; tokens read from the CLI JSON `usage`;
+  # duration_ms = call wall-clock; subject_kind="llm_call" per the spec §6.2 envelope addition. §6.3.
+  if command -v emit_event >/dev/null 2>&1; then
+    local llm_role="orchestrator" llm_in llm_out llm_cache llm_model
+    case "$*" in
+      *rl-initiative-planner*) llm_role="planner" ;;
+      *rl-iteration-consumer*) llm_role="consumer" ;;
+    esac
+    llm_in="$(jq -r '.usage.input_tokens // 0' "$out_file" 2>/dev/null || echo 0)"
+    llm_out="$(jq -r '.usage.output_tokens // 0' "$out_file" 2>/dev/null || echo 0)"
+    llm_cache="$(jq -r '.usage.cache_read_input_tokens // 0' "$out_file" 2>/dev/null || echo 0)"
+    llm_model="${rm_val:-}"
+    [[ -z "$llm_model" ]] && llm_model="$(jq -r '.modelUsage // {} | keys[0] // (.model // "")' "$out_file" 2>/dev/null || echo "")"
+    emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "${EVENT_ITER:-0}" "$llm_role" "llm_call" \
+      "$(( $(date +%s%3N 2>/dev/null || echo 0) - llm_t0 ))" "" "llm_call" \
+      "$(jq -nc --arg r "$llm_role" --arg m "$llm_model" --argjson i "${llm_in:-0}" --argjson o "${llm_out:-0}" --argjson c "${llm_cache:-0}" --argjson cost "${call_cost:-0}" \
+         '{role:$r, model:$m, input_tokens:$i, output_tokens:$o, cache_read_tokens:$c, cost_usd:$cost}')"
+  fi
 }
 
 # next_iteration_index — canonical algorithm (§13.1 verbatim).
@@ -144,6 +175,8 @@ if [[ -f "$STATE_DIR/state_snapshot.json" ]]; then
   cur_hash="$(registry_hash "$WORK_REGISTRY")"
   if [[ -n "$snap_hash" && "$snap_hash" != "$cur_hash" ]]; then
     log "HALT: work_registry_hash mismatch (snapshot=$snap_hash current=$cur_hash) — registry edited outside orchestrator (§6.3 step 2)"
+    emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "0" "orchestrator" "iteration_failed" "" "" "" \
+      "$(jq -nc '{reason:"registry_hash_mismatch", iteration:"0"}')"
     echo "HALT: REGISTRY_HASH_MISMATCH" >&2
     exit 3
   fi
@@ -220,6 +253,11 @@ event_run_start_resumed=false
 [[ -f "$STATE_DIR/state_snapshot.json" ]] && event_run_start_resumed=true
 emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "0" "orchestrator" "run_start" "" "" "" \
   "$(jq -nc --arg s "$(basename "$SEED")" --argjson r "$event_run_start_resumed" '{seed:$s, resumed:$r}')"
+# FUP-0842: predicate names/kinds bound once for the stop_check event payload (static across the run).
+# resolved_register is per-predicate inside stop_check.sh (scan-newest) so it is not available at this
+# tier — emitted empty per §6.3 best-effort; `result` is the load-bearing §13 Q-field.
+EVENT_PRED_NAMES="$(read_seed_field "$SEED" '[.completion_predicate[].name] | join(",")' 2>/dev/null || echo "")"
+EVENT_PRED_KINDS="$(read_seed_field "$SEED" '[.completion_predicate[].check_kind] | join(",")' 2>/dev/null || echo "")"
 while true; do
   # Phase 4b P4-03(b): capture stop_check.sh exit code and branch all 4 cases
   # (0 = COMPLETE; 1 = continue; 2 = BUDGET_EXHAUSTED; ≥3 = HALT). Previously the
@@ -228,6 +266,12 @@ while true; do
   "$SCRIPT_DIR/hooks/stop_check.sh" "$SEED" "$STATE_DIR"
   sc_rc=$?
   set -e
+  # FUP-0842: stop_check event — the completion-predicate evaluation for this loop turn. Map the
+  # hook rc to the spec §6.2 `result` string enum (0=complete/1=continue/2=budget/≥3=halt) and emit
+  # the resolved string (not the raw rc). iteration uses the last-completed ITER (0 on first turn).
+  case $sc_rc in 0) sc_result="complete";; 1) sc_result="continue";; 2) sc_result="budget";; *) sc_result="halt";; esac
+  emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "${ITER:-0}" "orchestrator" "stop_check" "" "" "" \
+    "$(jq -nc --arg p "$EVENT_PRED_NAMES" --arg k "$EVENT_PRED_KINDS" --arg r "$sc_result" '{predicate:$p, check_kind:$k, result:$r, resolved_register:""}')"
   case $sc_rc in
     0)
       log "INITIATIVE_COMPLETE: all completion_predicate[] passed"
@@ -341,6 +385,10 @@ while true; do
     "$SCRIPT_DIR/hooks/plan_review.sh" "$ITER_DIR/session_plan_${ITER}.md"
   else
     log "ITERATION $ITER Planner escalated without plan — skipping plan_review; routing gate_request(s) via execute_with_gates"
+    # FUP-0842: iteration_failed — the Planner produced no session_plan (escalated-without-plan path);
+    # the iteration did not reach a clean close. reason per the spec §6.2 enum.
+    emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "orchestrator" "iteration_failed" "" "" "" \
+      "$(jq -nc --arg it "$ITER" '{reason:"planner_no_plan", iteration:$it}')"
   fi
 
   # Phase 4b P4-03(b): capture execute_with_gates.sh exit code (0/1/2) and branch.
@@ -378,12 +426,17 @@ while true; do
              "$ITER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
              > "$STATE_DIR/escalations/iteration_${ITER}_failed.json"
       dispatch_notification "$SEED" "$STATE_DIR" iteration_failed "$(jq -nc --arg it "$ITER" '{iteration:$it, reason:"execute_with_gates_exit_1"}')"
+      # FUP-0842: iteration_failed event (failure-mode primitive, §13 Q6 failure-rate-by-reason).
+      emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "orchestrator" "iteration_failed" "" "" "" \
+        "$(jq -nc --arg it "$ITER" '{reason:"execute_with_gates_exit_1", iteration:$it}')"
       # Continue loop (do not exit) so the Planner can decide to retry / reframe.
       log "ITERATION $ITER end (FAILED, gate_human escalated)"
       continue
       ;;
     2)
       log "HALT: execute_with_gates exit 2 (read-only boundary violation per FR-017)"
+      emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "orchestrator" "iteration_failed" "" "" "" \
+        "$(jq -nc --arg it "$ITER" '{reason:"read_only_violation", iteration:$it}')"
       echo "HALT: READ_ONLY_BOUNDARY_VIOLATION (iteration $ITER)" >&2
       exit 3
       ;;
@@ -419,6 +472,8 @@ while true; do
              "$ITER" "$triggered_item" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
              > "$STATE_DIR/escalations/fail_counts_threshold_${ITER}_${triggered_item}.json"
       dispatch_notification "$SEED" "$STATE_DIR" fail_counts_threshold "$(jq -nc --arg it "$ITER" --arg item "$triggered_item" '{iteration:$it, gate_id:$item, reason:"P4_07_fail_counts_ge_3"}')"
+      emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "orchestrator" "iteration_failed" "" "" "" \
+        "$(jq -nc --arg it "$ITER" '{reason:"fail_counts_threshold", iteration:$it}')"
       echo "HALT: FAIL_COUNTS_THRESHOLD (item=$triggered_item, iteration=$ITER)" >&2
       exit 3
     fi
