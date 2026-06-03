@@ -47,6 +47,17 @@ BUDGET_CAP="$(read_seed_field "$SEED" .budget.tokens_usd)"
 # FUP-0736: read declared iteration cap (enforced in outer loop; empty/null = unbounded).
 ITER_MAX="$(read_seed_field "$SEED" .budget.iterations_max)"
 RUNNING_SPEND_FILE="$STATE_DIR/spend.json"
+# FUP-0831: planner/consumer dispatch (run_claude_json) must run headless `claude -p` under the
+# seed's permission posture — same as the Executor in execute_with_gates.sh (§--permission-mode
+# "$posture_value"). Without it the role call runs in DEFAULT mode, which in non-interactive `-p`
+# DENIES the Planner's session_plan_NNNN.md write (and the Consumer's state writes) → every
+# iteration fails at the missing plan file → MAX_ITERATIONS cap HALT. Previously masked on
+# provisioned hosts by a gitignored .claude/settings.local.json grant; surfaces on fresh clones.
+# Strip the leading "--permission-mode " prefix per FUP-0752 (seeds declare the full flag string);
+# default to "auto" when the field is absent/null (matches the Executor's effective default).
+POSTURE_VALUE="$(read_seed_field "$SEED" .permission_posture 2>/dev/null || echo "")"
+POSTURE_VALUE="${POSTURE_VALUE#--permission-mode }"
+[[ -z "$POSTURE_VALUE" || "$POSTURE_VALUE" == "null" ]] && POSTURE_VALUE="auto"
 
 # FUP-0800 Phase 2 (event log): resolve the §4.1 project_id join key + initiative slug once for
 # reuse at every emit_event call site. project_id := seed .initiative.project_id when present, else
@@ -95,7 +106,7 @@ run_claude_json() {
   # without leaking the path-conversion-disable to jq / mv / etc.
   # shellcheck disable=SC2086
   MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
-    claude -p $role_model_flag --output-format json --max-budget-usd "$remaining_budget" --add-dir "$CLAUDE_SKILLS_DIR" -- "$@" > "$out_file"
+    claude -p $role_model_flag --permission-mode "$POSTURE_VALUE" --output-format json --max-budget-usd "$remaining_budget" --add-dir "$CLAUDE_SKILLS_DIR" -- "$@" > "$out_file"
   call_cost="$(jq -r '.total_cost_usd // 0' "$out_file")"
   new_total="$(jq -rn --argjson cur "$current_spend" --argjson cc "$call_cost" '$cur + $cc')"
   jq --argjson nt "$new_total" '.total_spend_usd = $nt' "$RUNNING_SPEND_FILE" > "$RUNNING_SPEND_FILE.tmp" \
