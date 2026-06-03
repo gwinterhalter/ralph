@@ -167,6 +167,15 @@ if [[ -f "$STATE_DIR/state_snapshot.json" ]]; then
             emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$pending_iter" "consumer" "phase_complete" \
               "$(( $(date +%s%3N 2>/dev/null || echo 0) - EVENT_CN_T0 ))" "" "" \
               "$(jq -nc --argjson cs "$(jq -r '.total_spend_usd // 0' "$RUNNING_SPEND_FILE" 2>/dev/null || echo 0)" '{cumulative_spend:$cs}')"
+            # FUP-0833(b): emit iteration_end for the resumed iteration — the main-loop emit
+            # (C.5, L422) is bypassed on the §6.3 resume path, so without this the resumed
+            # iteration carries phase_complete but no iteration_end. duration_ms = wall-clock
+            # from the iteration_start marker (.iter_start mtime; spans the operator gate-wait,
+            # which is the true iteration span). Empty duration if the marker is absent.
+            _rs_t0="$(stat -c %Y "$pending_iter_dir/.iter_start" 2>/dev/null || echo 0)"
+            emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$pending_iter" "orchestrator" "iteration_end" \
+              "$([[ "$_rs_t0" != "0" ]] && echo "$(( $(date +%s%3N 2>/dev/null || echo 0) - _rs_t0 * 1000 ))" || echo "")" \
+              "" "" "$(jq -nc '{resumed:true}')"
             ;;
           1)
             log "RESUME: broker still pending after re-run — re-block"
@@ -345,6 +354,12 @@ while true; do
       if [[ -n "$pending_gate_check" && "$pending_gate_check" != "null" ]]; then
         log "ITERATION $ITER BLOCKED on gate_human — pending_gate persisted; awaiting operator gate_response"
         dispatch_notification "$SEED" "$STATE_DIR" gate_human "$(jq -nc --arg it "$ITER" '{iteration:$it, reason:"broker_block_pending_gate"}')"
+        # FUP-0833(c): emit run_end on the blocked exit so THIS invocation's run_start (C.1)
+        # is paired. Without it a blocked-then-resumed run shows 2 run_start / 1 run_end; the
+        # resume invocation emits its own run_start + the terminal run_end, so each invocation
+        # is now a balanced run_start/run_end pair.
+        emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "0" "orchestrator" "run_end" "" "" "" \
+          "$(jq -nc --arg it "$ITER" '{terminal_reason:"blocked_gate_human", iteration:$it}')"
         echo "BLOCKED: pending gate_human (iteration $ITER) — write gate_response_*.json to resume" >&2
         exit 0
       fi
@@ -433,6 +448,9 @@ while true; do
     log "PAUSE_REQUESTED: operator pause command honored at iter $ITER boundary"
     dispatch_notification "$SEED" "$STATE_DIR" pause_honored "$(jq -nc --arg it "$ITER" '{iteration:$it, reason:"command_dispatch_pause"}')"
     rm -f "$STATE_DIR/pause_requested.flag"
+    # FUP-0833(c): pair this invocation's run_start (C.1) with a run_end on the pause exit too.
+    emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "0" "orchestrator" "run_end" "" "" "" \
+      "$(jq -nc --arg it "$ITER" '{terminal_reason:"paused", iteration:$it}')"
     echo "PAUSED at iter $ITER boundary (operator command)"
     exit 0
   fi

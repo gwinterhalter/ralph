@@ -52,6 +52,19 @@ heartbeat_workstream() {
     return 0
   fi
 
+  # FUP-0834 (decision 2026-06-03): this PostgREST DB-PATCH path is SUPERSEDED by the event
+  # log's `phase_complete` event (lib/events.sh; spec §15 heartbeat-equivalent), which is the
+  # canonical cross-run staleness signal. It is also NON-FUNCTIONAL on `code_factory`
+  # (eybdbshxswutgaaylpol) — that project exposes no Supabase Data API (PostgREST returns
+  # PGRST002 `pg_pgrst_no_exposed_schemas`), consistent with the RL design contract "no raw DB
+  # connection; all RL DB access via the Supabase MCP only". The path is RETAINED (gated on a
+  # seed `.heartbeat` block, which the rl_test harness omits → skips; non-fatal on failure) for
+  # any host that DOES expose a Data API, but is not the source of truth. The local
+  # heartbeat.log append below is the functional part and the F.4 coexist invariant. If DB
+  # heartbeat is ever needed on a no-Data-API project, do it via Supabase MCP at a claude -p
+  # point ("approach 2"), never a bash PostgREST write. Full heartbeat_workstream retirement
+  # (deleting the orchestrator.sh L215/L426 calls) is deferred until events Q4 is the consumed
+  # staleness signal.
   # Build PATCH body — update last_session_label + next_session_blocker + metadata heartbeat keys.
   # metadata is jsonb; PostgREST PATCH on jsonb columns replaces the whole column, so we read +
   # merge: GET current metadata, jq-merge with new heartbeat keys, PATCH the merged value.

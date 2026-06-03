@@ -135,9 +135,18 @@ for req in "$ITER_DIR"/gate_request_"${ITER}"_*.json; do
   fi
   # FUP-0800 C.7: gate_fire — one per gate_request, upstream of all 3 resolution branches
   # (auto_resolve / gate_human / gate_dc). Capture fire time for the C.8 gate_resolve latency.
+  # FUP-0833(a): suppress a duplicate gate_fire on the §6.3 resume leg. On resume,
+  # execute_with_gates re-processes the still-present gate_request, but the operator
+  # gate_response already exists from the first invocation — a second gate_fire would
+  # double-count. Fire only on first encounter (no resolution file yet). auto_resolve /
+  # gate_dc write their responses LATER in this same pass, so the file is correctly absent
+  # here on a genuine first encounter; only the gate_human resume case finds it present.
   EVENT_GATE_T0="$(date +%s%3N 2>/dev/null || echo 0)"
-  emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "gate" "gate_fire" "" "$gate_id" "gate" \
-    "$(jq -nc --arg gid "$gate_id" --arg cls "$cls" --arg cl "$(jq -r '.cluster // empty' "$req" 2>/dev/null)" '{gate_id:$gid, cls:$cls, cluster:$cl}')"
+  _gf_suffix="$(basename "$req" .json)"; _gf_suffix="${_gf_suffix#gate_request_}"
+  if [[ ! -f "$ITER_DIR/gate_response_${_gf_suffix}.json" ]]; then
+    emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "gate" "gate_fire" "" "$gate_id" "gate" \
+      "$(jq -nc --arg gid "$gate_id" --arg cls "$cls" --arg cl "$(jq -r '.cluster // empty' "$req" 2>/dev/null)" '{gate_id:$gid, cls:$cls, cluster:$cl}')"
+  fi
   if [[ -n "$auto_resolve_opt" ]]; then
     req_suffix="$(basename "$req" .json)"; req_suffix="${req_suffix#gate_request_}"
     resp_file="$ITER_DIR/gate_response_${req_suffix}.json"

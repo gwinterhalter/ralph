@@ -1,11 +1,11 @@
 # Ralph Status Query Contract
 
-**Version:** 1.0
-**Date:** 2026-06-02
+**Version:** 1.1
+**Date:** 2026-06-03
 **Authority:** Comprehensive_Event_Log_Spec v1.1 §16 (status endpoint) + §13 Q1/Q4 (query patterns / index set).
-**Status:** Reference contract — the iPhone Trigger Service `GET /ralph/status` endpoint is **not yet built**
-(probed absent 2026-06-02). This document specifies the two read paths the endpoint MUST implement when it
-is built. Tracked as a Phase Z follow-up (status-endpoint build).
+**Status:** Reference contract. **Path 1 (live) IS NOW IMPLEMENTED as `status.sh`** (FUP-0835, 2026-06-03) — a
+dependency-free local reader over `logs/events.jsonl`. The HTTP `GET /ralph/status` endpoint (iPhone Trigger
+Service) and Path 2 (historical Supabase query) remain future work.
 
 ---
 
@@ -18,8 +18,9 @@ enriches the answer from the synced `events` table when available.
 
 ## Path 1 — Live (local NDJSON tail; never blocks on Supabase)
 
-Source: `<state_dir>/events.ndjson` (the local-first event log written synchronously by `lib/events.sh`
-`emit_event`; spec §7.1). Read the **tail** (last N lines, e.g. `tail -n 200`) and derive:
+Source: `<state_dir>/logs/events.jsonl` (the local-first append-only event log written by `lib/events.sh`
+`emit_event`; FUP-0800 local-append design — NOT the pre-redesign `events.ndjson` name). Implemented by
+`status.sh <state_dir>`. Read the **tail** (last N lines, e.g. `tail -n 200`) and derive:
 
 | Field | Derivation |
 |---|---|
@@ -34,7 +35,7 @@ iteration". It MUST be served even if Supabase is down (spec §16 never-block ru
 Example (jq over the tail):
 
 ```bash
-tail -n 200 "$STATE_DIR/events.ndjson" | jq -s '
+tail -n 200 "$STATE_DIR/logs/events.jsonl" | jq -s '
   { current_iteration_index: (map(.iteration_index) | max),
     last_event: (last | {event_type, ts_utc}),
     last_phase_complete: (map(select(.event_type=="phase_complete")) | last
@@ -42,6 +43,12 @@ tail -n 200 "$STATE_DIR/events.ndjson" | jq -s '
 ```
 
 ## Path 2 — Historical (Supabase `events`; enrichment only)
+
+> **Status (FUP-0800 local-append design):** the bash→Supabase sync (`events_sync` / PostgREST) was **removed**
+> — the runtime no longer writes the `events` table, so Path 2 is currently **N/A** (and `code_factory` exposes
+> no Data API anyway → PGRST002). If historical enrichment is wanted later, mirror the local log to Postgres via
+> the Supabase MCP at a `claude -p` point ("approach 2"; see the events-table disposition, FUP-0836) and serve
+> the queries below from there. The query shape + index contract is retained as the build spec.
 
 Source: the synced `public.events` table. Two queries, both served by the v1.1 index set (§13/§14.2). The
 endpoint reaches Supabase via PostgREST (same surface as `lib/heartbeat.sh` / `lib/events.sh events_sync`) or
@@ -87,5 +94,13 @@ PostgREST form:
 
 - `project_id` on `events` is a **logical join key** (NOT NULL `text`, no FK; matches `projects.project_id`).
   Q1/Q4 scope by `project_id` then `initiative_slug` so the index is fully used.
-- The endpoint itself is out of scope for the event-log Phase 2 implementation (no service exists yet); this
-  contract is the build spec for the future `GET /ralph/status` implementer.
+- The HTTP endpoint itself is out of scope for the event-log Phase 2 implementation (no service exists yet);
+  this contract is the build spec for the future `GET /ralph/status` implementer. Path 1 is now served locally
+  by `status.sh`.
+
+## Change History
+
+| Version | Date | Summary |
+|---|---|---|
+| 1.1 | 2026-06-03 | FUP-0835: Path 1 (live) implemented as `status.sh` (reads `logs/events.jsonl`). Corrected the source path `events.ndjson` → `logs/events.jsonl` (FUP-0800 local-append). Added Path 2 N/A note (bash→Supabase sync removed; deferred to approach-2 per FUP-0836). HTTP endpoint + Path 2 remain future work. |
+| 1.0 | 2026-06-02 | Initial contract (two read paths; endpoint unbuilt). |

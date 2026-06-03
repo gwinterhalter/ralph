@@ -34,16 +34,32 @@ else
   SCHEMA_NATIVE="$SCHEMA"
   INSTANCE_NATIVE="$INSTANCE"
 fi
+# FUP-0832: a bare `command -v python` is INSUFFICIENT on Windows — it matches the Microsoft
+# Store App-Execution-Alias shim (…\WindowsApps\python.exe), which prints "Python was not
+# found" and exits non-zero instead of running. That made the validator take the python
+# branch, the shim fail, and the caller (execute_with_gates §P4-06) misread exit-1 as
+# "schema-invalid" → a spurious gate_human HALT. Resolve a python that ACTUALLY runs AND has
+# jsonschema; otherwise fall through to the exit-2 (no-validator) path so the caller does not
+# misclassify a missing tool as an invalid instance. (ajv-cli is still the preferred fast path.)
+resolve_python_with_jsonschema() {
+  local b
+  for b in python python3 py; do
+    command -v "$b" >/dev/null 2>&1 || continue
+    if "$b" -c "import jsonschema" >/dev/null 2>&1; then echo "$b"; return 0; fi
+  done
+  return 1
+}
+PYBIN=""
 if command -v ajv >/dev/null 2>&1; then
   ajv validate -s "$SCHEMA_NATIVE" -d "$INSTANCE_NATIVE" --spec=draft2020 --strict=false
-elif command -v python >/dev/null 2>&1; then
+elif PYBIN="$(resolve_python_with_jsonschema)"; then
   # FUP-0747: explicit encoding='utf-8' — Python on Windows defaults open() to the
   # locale encoding (cp1252 on US-EN), but JSON is UTF-8 by spec (RFC 8259), and the
   # ralph execution_result_NNNN.json carries em-dashes / smart-quotes / etc. from LLM
   # narrative output that aren't cp1252-decodable (byte 0x8f and friends). Without
   # encoding='utf-8' the validator hits UnicodeDecodeError mid-file.
-  python -c "import sys,json,jsonschema; jsonschema.validate(instance=json.load(open(sys.argv[2], encoding='utf-8')), schema=json.load(open(sys.argv[1], encoding='utf-8')))" "$SCHEMA_NATIVE" "$INSTANCE_NATIVE"
+  "$PYBIN" -c "import sys,json,jsonschema; jsonschema.validate(instance=json.load(open(sys.argv[2], encoding='utf-8')), schema=json.load(open(sys.argv[1], encoding='utf-8')))" "$SCHEMA_NATIVE" "$INSTANCE_NATIVE"
 else
-  echo "validate_artefact: neither ajv nor python+jsonschema available on PATH" >&2
+  echo "validate_artefact: neither ajv-cli nor a working python+jsonschema available on PATH (a bare Windows Store python shim does not count) — cannot validate $INSTANCE against $SCHEMA" >&2
   exit 2
 fi
