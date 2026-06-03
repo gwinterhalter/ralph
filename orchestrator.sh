@@ -68,6 +68,12 @@ EVENT_SLUG="$(read_seed_field "$SEED" .initiative.slug 2>/dev/null || echo "")"
 EVENT_PROJECT_ID="$(read_seed_field "$SEED" .initiative.project_id 2>/dev/null || echo "")"
 [[ -z "$EVENT_PROJECT_ID" || "$EVENT_PROJECT_ID" == "null" ]] && EVENT_PROJECT_ID="$EVENT_SLUG"
 export EVENT_PROJECT_ID EVENT_SLUG
+# FUP-0838: export the sink + events CLI so child `claude -p` audit-skill dispatches reach the
+# in-run event sink (§8.2 audit-target timing). EVENT_ITER is refreshed at each iteration_start
+# (below) so an audit skill running inside an iteration stamps the correct iteration_index; absent
+# these exports the skills' emit hooks no-op (standalone safety, §6.3).
+export RL_STATE_DIR="$STATE_DIR"
+export RL_EVENTS_BIN="$SCRIPT_DIR/lib/events.sh"
 
 log() { mkdir -p "$STATE_DIR/logs"; printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$STATE_DIR/logs/orchestrator.log"; }
 
@@ -247,6 +253,9 @@ while true; do
       ;;
   esac
   ITER=$(next_iteration_index "$STATE_DIR")
+  # FUP-0838: refresh the exported iteration index so child `claude -p` audit dispatches in this
+  # iteration stamp the correct iteration_index on their audit_target_* events.
+  export EVENT_ITER="$ITER"
   if [[ -n "$ITER_MAX" && "$ITER_MAX" != "null" ]] && (( 10#$ITER > ITER_MAX )); then
     log "HALT: MAX_ITERATIONS_EXCEEDED (iter=$ITER max=$ITER_MAX)"
     emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "orchestrator" "run_end" "" "" "" "$(jq -nc '{terminal_reason:"max_iterations_exceeded"}')"

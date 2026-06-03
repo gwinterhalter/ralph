@@ -103,3 +103,44 @@ emit_event() {
   ) 2>/dev/null || true
   return 0
 }
+
+# --- CLI dispatch (FUP-0838) ----------------------------------------------------------------
+# Dual-mode: `source lib/events.sh` keeps exposing emit_event() (the guard below is false when
+# sourced); invoking the file as a script reaches the audit-target timing emitters used by the
+# cf-*-audit skills. The skills call this thin CLI so the §4.1 envelope + §10 redaction live in
+# ONE place (emit_event) with no per-skill duplication. Spec authority: Comprehensive_Event_Log_Spec
+# §8.2 (audit-target timing, role `audit`, event_types audit_target_enter/audit_target_exit) +
+# §6.3 (best-effort, never aborts). Sink + context are resolved from the orchestrator-exported env;
+# when RL_STATE_DIR is absent (a standalone, non-orchestrated audit) the CLI is a silent no-op so
+# the same skill body works in-run AND standalone.
+#
+# Usage:
+#   bash lib/events.sh audit_enter <target_id> <target_kind> [payload_json]
+#   bash lib/events.sh audit_exit  <target_id> <target_kind> <duration_ms> [payload_json]
+# Env (orchestrator-exported, see orchestrator.sh): RL_STATE_DIR, EVENT_PROJECT_ID, EVENT_SLUG,
+#   EVENT_ITER. RL_STATE_DIR unset OR logs/ not writable -> exit 0 (no-op).
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  # Standalone-safe no-op: no sink context -> nothing to emit.
+  [[ -z "${RL_STATE_DIR:-}" ]] && exit 0
+  mkdir -p "$RL_STATE_DIR/logs" 2>/dev/null || true
+  [[ -w "$RL_STATE_DIR/logs" ]] || exit 0
+
+  _ev_cmd="${1:-}"
+  case "$_ev_cmd" in
+    audit_enter)
+      # audit_enter <target_id> <target_kind> [payload_json]
+      emit_event "$RL_STATE_DIR" "${EVENT_PROJECT_ID:-}" "${EVENT_SLUG:-}" "${EVENT_ITER:-0}" \
+                 audit audit_target_enter "" "${2:-}" "${3:-audit_target}" "${4:-}"
+      ;;
+    audit_exit)
+      # audit_exit <target_id> <target_kind> <duration_ms> [payload_json]
+      emit_event "$RL_STATE_DIR" "${EVENT_PROJECT_ID:-}" "${EVENT_SLUG:-}" "${EVENT_ITER:-0}" \
+                 audit audit_target_exit "${4:-}" "${2:-}" "${3:-audit_target}" "${5:-}"
+      ;;
+    *)
+      # Unknown subcommand: stay non-fatal (spec §6.3) — never abort an audit skill.
+      exit 0
+      ;;
+  esac
+  exit 0
+fi
