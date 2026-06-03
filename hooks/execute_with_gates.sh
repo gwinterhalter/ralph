@@ -10,6 +10,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../lib/seed.sh"
 # shellcheck source=../lib/notify.sh
 source "$SCRIPT_DIR/../lib/notify.sh"
+# shellcheck source=../lib/events.sh
+# FUP-0800 Phase 2: event-log emit helper (gate-broker + executor emits, Comprehensive_Event_Log_Spec v1.1).
+source "$SCRIPT_DIR/../lib/events.sh"
 
 SEED="${1:?usage: execute_with_gates.sh <seed_path> <iter_dir>}"
 ITER_DIR="${2:?usage: execute_with_gates.sh <seed_path> <iter_dir>}"
@@ -18,6 +21,17 @@ PLAN_PATH="$ITER_DIR/session_plan_${ITER}.md"
 RESULT_JSON="$ITER_DIR/execution_result_${ITER}.json"
 MCP_CONFIG="$ITER_DIR/mcp_config.json"
 STATE_DIR="$(dirname "$(dirname "$ITER_DIR")")"
+# FUP-0800 C.0: bind the §4.1 project_id join key + slug (prefer orchestrator-exported values;
+# fall back to seed-derived for standalone invocation). Reused at every emit_event call site.
+EVENT_PROJECT_ID="${EVENT_PROJECT_ID:-}"
+EVENT_SLUG="${EVENT_SLUG:-}"
+if [[ -z "$EVENT_SLUG" || "$EVENT_SLUG" == "null" ]]; then
+  EVENT_SLUG="$(read_seed_field "$SEED" .initiative.slug 2>/dev/null || echo "")"
+fi
+if [[ -z "$EVENT_PROJECT_ID" || "$EVENT_PROJECT_ID" == "null" ]]; then
+  EVENT_PROJECT_ID="$(read_seed_field "$SEED" .initiative.project_id 2>/dev/null || echo "")"
+  [[ -z "$EVENT_PROJECT_ID" || "$EVENT_PROJECT_ID" == "null" ]] && EVENT_PROJECT_ID="$EVENT_SLUG"
+fi
 
 # Phase 4a P4-01: generate mcp_config.json from seed.mcp_servers[] merged with optional
 # per-iteration plan_block. Frontmatter extraction mirrors lib/seed.sh:21 awk delimiter logic
@@ -119,6 +133,11 @@ for req in "$ITER_DIR"/gate_request_"${ITER}"_*.json; do
     auto_resolve_opt="$(read_seed_field "$SEED" ".gate_policy.pre_classification[$matched_pc_idx].auto_resolve" 2>/dev/null || echo "")"
     [[ "$auto_resolve_opt" == "null" ]] && auto_resolve_opt=""
   fi
+  # FUP-0800 C.7: gate_fire — one per gate_request, upstream of all 3 resolution branches
+  # (auto_resolve / gate_human / gate_dc). Capture fire time for the C.8 gate_resolve latency.
+  EVENT_GATE_T0="$(date +%s%3N 2>/dev/null || echo 0)"
+  emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "gate" "gate_fire" "" "$gate_id" "gate" \
+    "$(jq -nc --arg gid "$gate_id" --arg cls "$cls" --arg cl "$(jq -r '.cluster // empty' "$req" 2>/dev/null)" '{gate_id:$gid, cls:$cls, cluster:$cl}')"
   if [[ -n "$auto_resolve_opt" ]]; then
     req_suffix="$(basename "$req" .json)"; req_suffix="${req_suffix#gate_request_}"
     resp_file="$ITER_DIR/gate_response_${req_suffix}.json"
@@ -132,6 +151,10 @@ for req in "$ITER_DIR"/gate_request_"${ITER}"_*.json; do
     jq -nc --arg ts "$auto_ts" --arg it "$ITER" --arg gid "$gate_id" --arg opt "$auto_resolve_opt" --arg idx "$matched_pc_idx" --arg pat "$pat" \
        '{ts:$ts, iter:$it, gate_id:$gid, matched_pattern:$pat, matched_pc_idx:$idx, auto_resolved_option:$opt}' \
        >> "$STATE_DIR/logs/auto_resolve.log"
+    # FUP-0800 C.8: gate_resolve (inline, via auto_resolve) — latency from the C.7 fire capture.
+    emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "gate" "gate_resolve" \
+      "$(( $(date +%s%3N 2>/dev/null || echo 0) - EVENT_GATE_T0 ))" "$gate_id" "gate" \
+      "$(jq -nc --arg gid "$gate_id" --arg opt "$auto_resolve_opt" '{gate_id:$gid, mode:"inline", via:"auto_resolve", option:$opt}')"
     continue
   fi
   if [[ "$cls" == "gate_human" ]]; then
@@ -198,6 +221,11 @@ for req in "$ITER_DIR"/gate_request_"${ITER}"_*.json; do
     dispatch_notification "$SEED" "$STATE_DIR" gate_human \
       "$(jq -nc --arg it "$ITER" --arg gid "$gate_id" '{iteration:$it, gate_id:$gid, reason:"answerer_demote"}')"
     deferred_human+=("$req")
+  else
+    # FUP-0800 C.8: gate_resolve (inline, via answerer) — gate_dc resolved without demotion.
+    emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "gate" "gate_resolve" \
+      "$(( $(date +%s%3N 2>/dev/null || echo 0) - EVENT_GATE_T0 ))" "$gate_id" "gate" \
+      "$(jq -nc --arg gid "$gate_id" '{gate_id:$gid, mode:"inline", via:"answerer"}')"
   fi
 done
 shopt -u nullglob
@@ -214,6 +242,10 @@ for req in "${deferred_human[@]}"; do
     # Operator already wrote the answer — resume entry. Inline (the answer is consumed
     # by the next role call's plan reading) and proceed, no re-escalation.
     echo "execute_with_gates: gate_human ${req_suffix} already resolved by operator gate_response — inlined, proceeding" >&2
+    # FUP-0800 C.8: gate_resolve (operator) — resolved via async operator gate_response.
+    emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "gate" "gate_resolve" "" \
+      "$(jq -r '.gate_id // empty' "$req" 2>/dev/null)" "gate" \
+      "$(jq -nc --arg gid "$(jq -r '.gate_id // empty' "$req" 2>/dev/null)" '{gate_id:$gid, mode:"operator"}')"
     continue
   fi
   # Response absent — escalate: cp to escalations/, write pending_gate, mark blocked.
@@ -267,6 +299,9 @@ posture_value="${PERMISSION_POSTURE#--permission-mode }"
 # content — same orchestrator-owns-its-output-files invariant the FUP-0756 fix applied to the
 # Consumer-written state files.
 RESULT_JSON_TMP="$ITER_DIR/.execution_result_${ITER}.cli.json"
+# FUP-0800 C.9: executor role_call + role_complete (duration across the claude --print call).
+emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "executor" "role_call"
+EVENT_EX_T0="$(date +%s%3N 2>/dev/null || echo 0)"
 # shellcheck disable=SC2086
 claude --print --output-format json \
        --permission-mode "$posture_value" \
@@ -275,6 +310,9 @@ claude --print --output-format json \
        --max-budget-usd "$PER_CALL_CAP" --max-turns "$MAX_TURNS" \
        < "$PLAN_PATH" > "$RESULT_JSON_TMP"
 mv -f "$RESULT_JSON_TMP" "$RESULT_JSON"
+emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "executor" "role_complete" \
+  "$(( $(date +%s%3N 2>/dev/null || echo 0) - EVENT_EX_T0 ))" "" "" \
+  "$(jq -nc --arg tr "$(jq -r '.terminal_reason // empty' "$RESULT_JSON" 2>/dev/null)" '{terminal_reason:$tr}')"
 
 # Phase 4a P4-06: validate execution_result.json against schema before §10.5 fires (typo-catch).
 if ! bash "$SCRIPT_DIR/../lib/validate_artefact.sh" "$SCRIPT_DIR/../schemas/execution_result.schema.json" "$RESULT_JSON"; then

@@ -32,6 +32,9 @@ source "$SCRIPT_DIR/lib/heartbeat.sh"
 # FUP-0815: operator-command channel — state_dir/commands/ watch dir, polled at iter boundaries.
 # Dispatches pause / bump_budget / query_register_state via case in command_dispatch_run.
 source "$SCRIPT_DIR/lib/command_dispatch.sh"
+# shellcheck source=lib/events.sh
+# FUP-0800 Phase 2: local-first NDJSON event log + idempotent Supabase sync (Comprehensive_Event_Log_Spec v1.1).
+source "$SCRIPT_DIR/lib/events.sh"
 
 SEED="${1:?usage: orchestrator.sh <seed_path>}"
 
@@ -44,6 +47,16 @@ BUDGET_CAP="$(read_seed_field "$SEED" .budget.tokens_usd)"
 # FUP-0736: read declared iteration cap (enforced in outer loop; empty/null = unbounded).
 ITER_MAX="$(read_seed_field "$SEED" .budget.iterations_max)"
 RUNNING_SPEND_FILE="$STATE_DIR/spend.json"
+
+# FUP-0800 Phase 2 (event log): resolve the §4.1 project_id join key + initiative slug once for
+# reuse at every emit_event call site. project_id := seed .initiative.project_id when present, else
+# the initiative slug (matches projects.project_id for single-project initiatives), else the
+# WORKSPACE_ROOT basename. Slug := .initiative.slug.
+EVENT_SLUG="$(read_seed_field "$SEED" .initiative.slug 2>/dev/null || echo "")"
+[[ -z "$EVENT_SLUG" || "$EVENT_SLUG" == "null" ]] && EVENT_SLUG="$(basename "$WORKSPACE_ROOT")"
+EVENT_PROJECT_ID="$(read_seed_field "$SEED" .initiative.project_id 2>/dev/null || echo "")"
+[[ -z "$EVENT_PROJECT_ID" || "$EVENT_PROJECT_ID" == "null" ]] && EVENT_PROJECT_ID="$EVENT_SLUG"
+export EVENT_PROJECT_ID EVENT_SLUG
 
 log() { mkdir -p "$STATE_DIR/logs"; printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$STATE_DIR/logs/orchestrator.log"; }
 
@@ -136,8 +149,13 @@ if [[ -f "$STATE_DIR/state_snapshot.json" ]]; then
             log "RESUME: broker resolved + Executor ran — clearing pending_gate, running Consumer for $pending_iter"
             jq 'del(.pending_gate)' "$STATE_DIR/state_snapshot.json" > "$STATE_DIR/state_snapshot.json.tmp" \
               && mv "$STATE_DIR/state_snapshot.json.tmp" "$STATE_DIR/state_snapshot.json"
+            emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$pending_iter" "consumer" "role_call"
+            EVENT_CN_T0="$(date +%s%3N 2>/dev/null || echo 0)"
             ROLE_MODEL="$(read_seed_field "$SEED" .consumer_model 2>/dev/null || echo "")" \
               run_claude_json "$pending_iter_dir/consumer.json" "/rl-iteration-consumer $STATE_DIR $pending_iter_dir"
+            emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$pending_iter" "consumer" "phase_complete" \
+              "$(( $(date +%s%3N 2>/dev/null || echo 0) - EVENT_CN_T0 ))" "" "" \
+              "$(jq -nc --argjson cs "$(jq -r '.total_spend_usd // 0' "$RUNNING_SPEND_FILE" 2>/dev/null || echo 0)" '{cumulative_spend:$cs}')"
             ;;
           1)
             log "RESUME: broker still pending after re-run — re-block"
@@ -171,6 +189,11 @@ else
 fi
 
 # Main role-call loop (§13.1 verbatim body).
+# FUP-0800 C.1: run_start — fires once on both bootstrap and resume paths that reach the loop.
+event_run_start_resumed=false
+[[ -f "$STATE_DIR/state_snapshot.json" ]] && event_run_start_resumed=true
+emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "0" "orchestrator" "run_start" "" "" "" \
+  "$(jq -nc --arg s "$(basename "$SEED")" --argjson r "$event_run_start_resumed" '{seed:$s, resumed:$r}')"
 while true; do
   # Phase 4b P4-03(b): capture stop_check.sh exit code and branch all 4 cases
   # (0 = COMPLETE; 1 = continue; 2 = BUDGET_EXHAUSTED; ≥3 = HALT). Previously the
@@ -183,6 +206,7 @@ while true; do
     0)
       log "INITIATIVE_COMPLETE: all completion_predicate[] passed"
       dispatch_notification "$SEED" "$STATE_DIR" initiative_complete "$(jq -nc '{iteration:"", reason:"completion_predicate_all_passed"}')"
+      emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "0" "orchestrator" "run_end" "" "" "" "$(jq -nc '{terminal_reason:"initiative_complete"}')"
       echo "INITIATIVE_COMPLETE"
       exit 0
       ;;
@@ -192,6 +216,7 @@ while true; do
     2)
       log "BUDGET_EXHAUSTED: stop_check returned exit 2"
       dispatch_notification "$SEED" "$STATE_DIR" budget_exhausted "$(jq -nc '{iteration:"", reason:"stop_check_exit_2"}')"
+      emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "0" "orchestrator" "run_end" "" "" "" "$(jq -nc '{terminal_reason:"budget_exhausted"}')"
       echo "BUDGET_EXHAUSTED" >&2
       exit 2
       ;;
@@ -204,23 +229,32 @@ while true; do
   ITER=$(next_iteration_index "$STATE_DIR")
   if [[ -n "$ITER_MAX" && "$ITER_MAX" != "null" ]] && (( 10#$ITER > ITER_MAX )); then
     log "HALT: MAX_ITERATIONS_EXCEEDED (iter=$ITER max=$ITER_MAX)"
+    emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "orchestrator" "run_end" "" "" "" "$(jq -nc '{terminal_reason:"max_iterations_exceeded"}')"
     echo "HALT: MAX_ITERATIONS_EXCEEDED" >&2
     exit 6
   fi
   ITER_DIR="$STATE_DIR/iterations/$ITER"
   mkdir -p "$ITER_DIR"
   log "ITERATION $ITER begin"
+  # FUP-0800 C.2: iteration_start (capture iter start for the C.5 iteration_end duration).
+  EVENT_ITER_T0="$(date +%s%3N 2>/dev/null || echo 0)"
+  emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "orchestrator" "iteration_start"
   # FUP-0798: heartbeat UPSERT to workstreams row (operator-awareness for long-running runs).
   # Resilient + non-fatal: no-op when seed.heartbeat.workstream_id absent or env vars unset.
   heartbeat_workstream "$SEED" "$STATE_DIR" "$ITER" "begin"
 
   # Planner Role Call (FUP-0720: --output-format json + --max-budget-usd via run_claude_json)
   # FUP-0721 (seed schema 1.2): optional planner_model override; CLI default when seed omits.
+  # FUP-0800 C.3: planner role_call + role_complete (duration measured across the call, §8.4).
+  emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "planner" "role_call"
+  EVENT_PL_T0="$(date +%s%3N 2>/dev/null || echo 0)"
   ROLE_MODEL="$(read_seed_field "$SEED" .planner_model 2>/dev/null || echo "")" \
     run_claude_json "$ITER_DIR/planner.json" "/rl-initiative-planner $STATE_DIR $ITER_DIR" \
       2> "$ITER_DIR/planner.stderr"
   # Extract markdown result for any downstream consumer expecting the textual emission:
   jq -r '.result // empty' "$ITER_DIR/planner.json" > "$ITER_DIR/planner.stdout"
+  emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "planner" "role_complete" \
+    "$(( $(date +%s%3N 2>/dev/null || echo 0) - EVENT_PL_T0 ))"
 
   # FUP-0768: Planner Path-A (Spec §10.3) — Planner emits INITIATIVE_COMPLETE and writes NO
   # session_plan; terminate clean rather than running plan_review.sh on a missing file.
@@ -246,6 +280,7 @@ while true; do
       0)
         log "INITIATIVE_COMPLETE: Planner Path-A signal Consumer-confirmed (iteration $ITER; stop_check rc=0)"
         dispatch_notification "$SEED" "$STATE_DIR" initiative_complete "$(jq -nc --arg it "$ITER" '{iteration:$it, reason:"planner_path_a_initiative_complete_consumer_confirmed"}')"
+        emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "orchestrator" "run_end" "" "" "" "$(jq -nc '{terminal_reason:"initiative_complete", via:"planner_path_a"}')"
         echo "INITIATIVE_COMPLETE"
         exit 0
         ;;
@@ -326,8 +361,14 @@ while true; do
 
   # Consumer Role Call (FUP-0720: --output-format json + --max-budget-usd via run_claude_json)
   # FUP-0721 (seed schema 1.2): optional consumer_model override; CLI default when seed omits.
+  # FUP-0800 C.4: consumer role_call + phase_complete (the §15 heartbeat-equivalent; once per iteration).
+  emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "consumer" "role_call"
+  EVENT_CN_T0="$(date +%s%3N 2>/dev/null || echo 0)"
   ROLE_MODEL="$(read_seed_field "$SEED" .consumer_model 2>/dev/null || echo "")" \
     run_claude_json "$ITER_DIR/consumer.json" "/rl-iteration-consumer $STATE_DIR $ITER_DIR"
+  emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "consumer" "phase_complete" \
+    "$(( $(date +%s%3N 2>/dev/null || echo 0) - EVENT_CN_T0 ))" "" "" \
+    "$(jq -nc --argjson cs "$(jq -r '.total_spend_usd // 0' "$RUNNING_SPEND_FILE" 2>/dev/null || echo 0)" '{cumulative_spend:$cs}')"
 
   # Phase 4b P4-07: fail_counts ≥3 deterministic guard (additive to FR-013 Planner
   # self-escalation). The Consumer maintains $STATE_DIR/fail_counts.json (per §5.4 /
@@ -366,6 +407,9 @@ while true; do
   # Budget check
   "$SCRIPT_DIR/hooks/budget_check.sh" "$SEED" "$STATE_DIR" || { log "BUDGET_EXHAUSTED"; exit 2; }
   log "ITERATION $ITER end"
+  # FUP-0800 C.5: iteration_end (duration from the C.2 iteration_start capture).
+  emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "orchestrator" "iteration_end" \
+    "$(( $(date +%s%3N 2>/dev/null || echo 0) - ${EVENT_ITER_T0:-0} ))"
   # FUP-0798: heartbeat at iteration close so the workstreams row final state reflects the last
   # completed iteration's outcome (not just "begin"; pairs with iter-begin call above).
   heartbeat_workstream "$SEED" "$STATE_DIR" "$ITER" "close"
