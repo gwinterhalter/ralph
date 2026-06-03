@@ -30,6 +30,22 @@ dispatch_notification() {
   primary="$(read_seed_field "$seed_path" '.notification_channel.primary' 2>/dev/null || echo "")"
   primary_env="$(read_seed_field "$seed_path" '.notification_channel.primary_env_var' 2>/dev/null || echo "")"
   fallback="$(read_seed_field "$seed_path" '.notification_channel.fallback' 2>/dev/null || echo "")"
+  # FUP-0827: back-compat for the legacy SCALAR-STRING notification_channel form
+  # (e.g. "gmail_smtp:default"). Older seeds (schema 1.4) declare notification_channel as a
+  # "<type>:<config>" string rather than the map form (.primary / .primary_smtp_user / ...).
+  # Without this, .notification_channel.primary resolves empty → channel_attempted stays
+  # "none" and channel_result "no_channel" → notifications were silently never delivered.
+  # When the map form is absent but a clean scalar token is present, derive <type> as the
+  # primary channel and default the fallback to win11toast. The gmail_smtp branch below then
+  # sources its SMTP routing from F_GMAIL_SMTP_* env vars (host/port defaulted).
+  local channel_scalar=""
+  if [[ -z "$primary" || "$primary" == "null" ]]; then
+    channel_scalar="$(read_seed_field "$seed_path" '.notification_channel' 2>/dev/null || echo "")"
+    if [[ "$channel_scalar" =~ ^[a-z_]+(:[a-z0-9_]+)?$ ]]; then
+      primary="${channel_scalar%%:*}"
+      [[ -z "$fallback" || "$fallback" == "null" ]] && fallback="win11toast"
+    fi
+  fi
   msg="ralph-loop event=$event iteration=$iteration gate_id=$gate_id"
   channel_attempted="none"
   channel_result="no_channel"
@@ -56,10 +72,16 @@ dispatch_notification() {
     channel_attempted="gmail_smtp"
     local smtp_user_val to_addr_val smtp_app_pw_env smtp_host smtp_port
     smtp_user_val="$(read_seed_field "$seed_path" '.notification_channel.primary_smtp_user' 2>/dev/null || echo "")"
+    [[ -z "$smtp_user_val" || "$smtp_user_val" == "null" ]] && smtp_user_val="${F_GMAIL_SMTP_USER:-}"
     to_addr_val="$(read_seed_field "$seed_path" '.notification_channel.primary_to_address' 2>/dev/null || echo "")"
+    [[ -z "$to_addr_val" || "$to_addr_val" == "null" ]] && to_addr_val="${F_GMAIL_SMTP_TO:-}"
     smtp_app_pw_env="$(read_seed_field "$seed_path" '.notification_channel.primary_env_vars.smtp_app_password' 2>/dev/null || echo "")"
+    # FUP-0827: scalar-string form supplies no env-var name → default to the F_GMAIL_SMTP_APP_PASSWORD convention.
+    [[ -z "$smtp_app_pw_env" || "$smtp_app_pw_env" == "null" ]] && smtp_app_pw_env="F_GMAIL_SMTP_APP_PASSWORD"
     smtp_host="$(read_seed_field "$seed_path" '.notification_channel.primary_smtp_host' 2>/dev/null || echo "")"
+    [[ -z "$smtp_host" || "$smtp_host" == "null" ]] && smtp_host="${F_GMAIL_SMTP_HOST:-smtp.gmail.com}"
     smtp_port="$(read_seed_field "$seed_path" '.notification_channel.primary_smtp_port' 2>/dev/null || echo "")"
+    [[ -z "$smtp_port" || "$smtp_port" == "null" ]] && smtp_port="${F_GMAIL_SMTP_PORT:-587}"
     local smtp_app_pw_val="${!smtp_app_pw_env:-}"
     if [[ -z "$smtp_user_val" || -z "$smtp_app_pw_val" || -z "$to_addr_val" || -z "$smtp_host" || -z "$smtp_port" ]]; then
       channel_result="skipped:env_unset"

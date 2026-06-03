@@ -35,11 +35,17 @@ resolve_register_scan_newest() {
     bn="${f##*/}"
     v="${bn#${base}_v}"
     v="${v%.md}"
-    [[ "$v" =~ ^[0-9]+(\.[0-9]+)*$ ]] || continue
+    # FUP-0828: accept underscore-version filenames (_vN_M) in addition to dot-version
+    # (_vN.M). Without the '_' alternative the regex rejected e.g. 1_0, so an
+    # underscore-versioned register resolved to "not found" → registry_zero_open never
+    # drained → run capped out. Underscore-version filenames are common across the corpus.
+    [[ "$v" =~ ^[0-9]+([._][0-9]+)*$ ]] || continue
+    # Normalise '_' → '.' so `sort -V` orders 1_0 / 1_1 correctly alongside 1.0 / 1.1.
+    local v_cmp="${v//_/.}"
     if [[ -z "$best_v" ]]; then
-      best_v="$v"; best="$f"
-    elif [[ "$(printf '%s\n%s\n' "$best_v" "$v" | sort -V | tail -1)" == "$v" ]]; then
-      best_v="$v"; best="$f"
+      best_v="$v_cmp"; best="$f"
+    elif [[ "$(printf '%s\n%s\n' "$best_v" "$v_cmp" | sort -V | tail -1)" == "$v_cmp" ]]; then
+      best_v="$v_cmp"; best="$f"
     fi
   done < <(find "$root" "$SCRIPT_DIR/.." -type f -name "${base}_v*.md" 2>/dev/null)
   echo "$best"
@@ -262,28 +268,53 @@ for ((i=0; i<count; i++)); do
               exit 3
             fi
             col_idx=-1
+            prio_idx=-1
+            header_parsed=0
+            use_priority_fallback=0
             unmet_count=0
             while IFS= read -r line; do
               line="${line%$'\r'}"
               [[ "$line" == \|* ]] || continue
               [[ "$line" =~ ^\|[[:space:]]*-+ ]] && continue
               IFS='|' read -ra cells <<< "$line"
-              if [[ "$col_idx" -lt 0 ]]; then
+              if [[ "$header_parsed" -eq 0 ]]; then
                 for idx in "${!cells[@]}"; do
                   hdr="${cells[$idx]}"
                   hdr="${hdr#"${hdr%%[![:space:]]*}"}"; hdr="${hdr%"${hdr##*[![:space:]]}"}"
-                  if [[ "$hdr" == "$filter_col" ]]; then col_idx="$idx"; break; fi
+                  if [[ "$hdr" == "$filter_col" ]]; then col_idx="$idx"; fi
+                  if [[ "$hdr" == "Priority" ]]; then prio_idx="$idx"; fi
                 done
+                header_parsed=1
+                # FUP-0829: when the params.filter column is absent from the header but a
+                # Priority column exists, fall back to Priority-based open counting
+                # (zero_open_gaps semantics: **P1**/**P2**/**P3** = open) instead of exit 3.
+                # Maps the common "status != closed" idiom onto Auto_Build_Gap_Register-style
+                # Priority registers that carry no literal status column. exit 3 is retained
+                # only when there is also no Priority column to fall back to.
                 if [[ "$col_idx" -lt 0 ]]; then
-                  echo "stop_check: registry_zero_open params.filter column '$filter_col' not found in register header ($register_path)" >&2
-                  exit 3
+                  if [[ "$prio_idx" -ge 0 ]]; then
+                    use_priority_fallback=1
+                    echo "stop_check: registry_zero_open params.filter column '$filter_col' not in header — falling back to Priority open-count (zero_open_gaps semantics) per FUP-0829 ($register_path)" >&2
+                  else
+                    echo "stop_check: registry_zero_open params.filter column '$filter_col' not found in register header and no Priority column to fall back to ($register_path)" >&2
+                    exit 3
+                  fi
                 fi
                 continue
               fi
-              [[ ${#cells[@]} -gt "$col_idx" ]] || continue
-              cell="${cells[$col_idx]}"
-              cell="${cell#"${cell%%[![:space:]]*}"}"; cell="${cell%"${cell##*[![:space:]]}"}"
-              [[ "$cell" != "$filter_val" ]] && unmet_count=$((unmet_count+1))
+              if [[ "$use_priority_fallback" -eq 1 ]]; then
+                [[ ${#cells[@]} -gt "$prio_idx" ]] || continue
+                prio="${cells[$prio_idx]}"
+                prio="${prio#"${prio%%[![:space:]]*}"}"; prio="${prio%"${prio##*[![:space:]]}"}"
+                if [[ "$prio" == "**P1**" || "$prio" == "**P2**" || "$prio" == "**P3**" ]]; then
+                  unmet_count=$((unmet_count+1))
+                fi
+              else
+                [[ ${#cells[@]} -gt "$col_idx" ]] || continue
+                cell="${cells[$col_idx]}"
+                cell="${cell#"${cell%%[![:space:]]*}"}"; cell="${cell%"${cell##*[![:space:]]}"}"
+                [[ "$cell" != "$filter_val" ]] && unmet_count=$((unmet_count+1))
+              fi
             done < "$register_path"
             [[ "$unmet_count" -eq 0 ]] || all_pass=0
             ;;
