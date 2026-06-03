@@ -60,7 +60,15 @@ generate_mcp_config() {
   if [[ -n "$dropped" ]]; then
     echo "generate_mcp_config: WARN — dropped bare-name mcp_servers entries (schema-violation, expected {name,command,args,env}): $dropped" >&2
   fi
-  merged="$(echo "$seed_block $plan_block" | jq -s 'add | map(select(type == "object" and has("name"))) | map({(.name): {command, args, env}}) | add // {} | {"mcpServers": .}')"
+  # FUP-0841: inject the SUPABASE_ACCESS_TOKEN env reference into any supabase MCP server's env so
+  # the generated mcp_config.json SELF-DOCUMENTS the auth dependency. Previously supabase servers
+  # carried `env: {}` and authenticated only by IMPLICIT inheritance of SUPABASE_ACCESS_TOKEN from
+  # the claude process env — correct when the launching shell exports it, but fragile/undocumented
+  # (a run without the export brings the supabase MCP up silently unauthenticated; no schema/validate
+  # failure catches it). Uses ${VAR} interpolation (claude expands it from its env at MCP launch) so
+  # the secret is NEVER written to the on-disk config. A seed's own explicit supabase env wins (right
+  # side of the + merge). Detection = any arg matching `mcp-server-supabase`.
+  merged="$(echo "$seed_block $plan_block" | jq -s 'add | map(select(type == "object" and has("name"))) | map({(.name): {command, args, env: (if ((.args // []) | map(select(type=="string") | test("mcp-server-supabase")) | any) then ({"SUPABASE_ACCESS_TOKEN": "${SUPABASE_ACCESS_TOKEN}"} + (.env // {})) else (.env // {}) end)}}) | add // {} | {"mcpServers": .}')"
   mkdir -p "$iter_dir"
   echo "$merged" > "$iter_dir/mcp_config.json"
   echo "generate_mcp_config: wrote $iter_dir/mcp_config.json" >&2
