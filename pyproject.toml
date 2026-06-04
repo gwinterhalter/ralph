@@ -1,0 +1,18 @@
+[tool.pytest.ini_options]
+minversion = "7.0"
+# Collect only the Python supervisor tests; the inherited *.sh framework
+# tests in tests/ are NOT pytest and must not be collected.
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+# Repo root only. supervisor/ is a PACKAGE (has __init__.py) — import it as
+# `supervisor.<module>`. Do NOT also put supervisor/ on the path; that creates a
+# dual import model (bare `import foo` vs `import supervisor.foo`) that collides
+# under --import-mode=importlib once real modules land.
+pythonpath = ["."]
+addopts = "-ra -q --strict-markers --import-mode=importlib"
+markers = [
+    "integration: integration_checkpoint-shape tests (C1-C5), slower, may touch the branch DB",
+    "unit: fast component_build-shape unit tests",
+]
