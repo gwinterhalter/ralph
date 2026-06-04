@@ -476,6 +476,21 @@ while true; do
         "$(jq -nc --arg it "$ITER" '{reason:"fail_counts_threshold", iteration:$it}')"
       echo "HALT: FAIL_COUNTS_THRESHOLD (item=$triggered_item, iteration=$ITER)" >&2
       exit 3
+    else
+      # FUP-0844: recoverable Consumer-side inline-verification failure. An item failed THIS
+      # iteration (Consumer incremented fail_counts via the inline_per_session_plan closure check)
+      # but stayed below the ≥3 HALT threshold, so the gap stays open and retries on the normal
+      # iteration_end path. FUP-0842 wired iteration_failed ONLY to the ≥3 HALT + other
+      # orchestrator-level branches (budget/no-plan/execute_with_gates exit-1/read-only), so the
+      # recoverable failure was invisible to events.jsonl and the spec v1.3 §13 Q6
+      # failure-rate-by-reason analytics. Emit one iteration_failed per item whose most-recent
+      # failure is this iteration (numeric compare tolerates the 0006-vs-6 zero-pad mismatch).
+      while IFS=$'\t' read -r _fc_item _fc_count _fc_reason; do
+        [[ -z "$_fc_item" ]] && continue
+        emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "orchestrator" "iteration_failed" "" "" "" \
+          "$(jq -nc --arg it "$ITER" --arg item "$_fc_item" --argjson c "${_fc_count:-0}" --arg r "$_fc_reason" \
+             '{reason:"inline_closure_verification_failed", iteration:$it, item_id:$item, fail_count:$c, detail:$r}')"
+      done < <(jq -r --arg it "$ITER" 'map(select((.last_failure_iteration!=null) and ((.last_failure_iteration|tonumber?)==($it|tonumber?)) and (.count<3))) | .[] | [.item_id,(.count|tostring),(.last_reason//"")] | @tsv' "$FAIL_COUNTS_FILE" 2>/dev/null)
     fi
   fi
 
