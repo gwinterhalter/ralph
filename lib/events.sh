@@ -117,6 +117,7 @@ emit_event() {
 # Usage:
 #   bash lib/events.sh audit_enter <target_id> <target_kind> [payload_json]
 #   bash lib/events.sh audit_exit  <target_id> <target_kind> <duration_ms> [payload_json]
+#   bash lib/events.sh correction_attempt <attempt> <level> <item_id>   (FUP-0843; spec v1.3 §6.2)
 # Env (orchestrator-exported, see orchestrator.sh): RL_STATE_DIR, EVENT_PROJECT_ID, EVENT_SLUG,
 #   EVENT_ITER. RL_STATE_DIR unset OR logs/ not writable -> exit 0 (no-op).
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
@@ -136,6 +137,18 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       # audit_exit <target_id> <target_kind> <duration_ms> [payload_json]
       emit_event "$RL_STATE_DIR" "${EVENT_PROJECT_ID:-}" "${EVENT_SLUG:-}" "${EVENT_ITER:-0}" \
                  audit audit_target_exit "${4:-}" "${2:-}" "${3:-audit_target}" "${5:-}"
+      ;;
+    correction_attempt)
+      # correction_attempt <attempt> <level> <item_id>
+      # Executor-side L1–L4 correction-loop retry primitive (FUP-0843; spec v1.3 §6.2 —
+      # role=executor, payload {attempt, level, item_id}). The cf-correction-agent skill calls
+      # this once per patch-escalation attempt so §13 Q8 loop-churn (revise_round +
+      # correction_attempt) counts the correction half. Best-effort, never aborts a correction
+      # (§6.3); standalone (RL_STATE_DIR unset) → no-op via the guard above.
+      emit_event "$RL_STATE_DIR" "${EVENT_PROJECT_ID:-}" "${EVENT_SLUG:-}" "${EVENT_ITER:-0}" \
+                 executor correction_attempt "" "${4:-}" correction \
+                 "$(jq -nc --arg a "${2:-}" --arg l "${3:-}" --arg item "${4:-}" \
+                    '{attempt:($a|tonumber? // $a), level:$l, item_id:$item}' 2>/dev/null || printf '{}')"
       ;;
     *)
       # Unknown subcommand: stay non-fatal (spec §6.3) — never abort an audit skill.
