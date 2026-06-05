@@ -45,7 +45,7 @@ from supervisor.admission import RunRecord, admit_candidate, discover_candidates
 from supervisor.ports import RegistryRow
 from supervisor.registry import Registry
 from supervisor.run_lifecycle import reconcile_run_complete, resolve_run_terminal
-from supervisor.safety_gates import KillSwitch
+from supervisor.safety_gates import READ_ONLY_CORPUS_PATH, KillSwitch
 from supervisor.seed_validation import SeedReviewValidator
 from supervisor.spawn import OrchestratorSpawnPort
 
@@ -61,7 +61,12 @@ REGISTER_PATH = OLTEST_C2_ROOT / "OLTest_C2_Register_v1.0.md"
 STATE_DIR = OLTEST_C2_ROOT / "state"
 RALPH_DEV = Path(r"K:\Claude Code Factory\V3\Ralph-dev")
 ORCHESTRATOR = RALPH_DEV / "orchestrator.sh"
-READ_ONLY_CORPUS = r"K:\Claude Code Factory\V3\Project_Docs\Project_Docs_Current\\"
+# FR-034 read-only-corpus token. OLB-06's ``lists_read_only_corpus`` matches each
+# declared read-only path against the bare ``READ_ONLY_CORPUS_PATH`` ("Project_Docs_Current\")
+# via ancestor-or-equal; an absolute corpus path is NOT an ancestor of the bare token, so the
+# Blast-Radius Scope must declare the corpus in exactly the form the closed OLB-06 invariant
+# recognises. Use the production constant so the constructed scope conforms (and never drifts).
+READ_ONLY_CORPUS = READ_ONLY_CORPUS_PATH
 
 DB_URL_ENV = "OL_SUPERVISOR_DB_URL"
 LIVE_OPT_IN_ENV = "OLB_C2_LIVE"
