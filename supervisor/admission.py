@@ -430,7 +430,12 @@ def admit_and_spawn(
     # Run row written BEFORE the running transition + spawn: any spawn failure from here
     # on leaves a reconcilable Run row (FR-021 / §6.3 ordering).
     registry_port.record_run(
-        project_id, {"status": _RUN_STATUS_RUNNING, "spawned_at": spawned_at}
+        project_id,
+        {
+            "seed_path": seed_path,
+            "status": _RUN_STATUS_RUNNING,
+            "spawned_at": spawned_at,
+        },
     )
     # admitted -> running.
     registry_port.set_lifecycle_state(project_id, _STATE_RUNNING)

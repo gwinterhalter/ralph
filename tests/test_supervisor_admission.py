@@ -456,6 +456,30 @@ def test_fr021_success_project_running_run_row_spawned_at() -> None:
 
 
 @pytest.mark.unit
+def test_fr021_record_run_forwards_seed_path() -> None:
+    """FR-021 spawn-row completeness: the pre-spawn Run row carries the candidate's
+    ``seed_path`` (Spec v1.3 §5.4 — the ``seed_path`` column is NOT NULL in the production
+    ``ralph_runs`` shape). Regression for the iter-0017 first-live-C2 NotNullViolation:
+    the Run mapping omitted ``seed_path`` so the concrete INSERT violated the constraint."""
+    port = _RecordingRegistryPort()
+    candidate = _candidate()
+    result = admit_and_spawn(
+        candidate,
+        registry_port=port,
+        spawn_port=_FakeSpawnPort(should_fail=False),
+        blast_radius_scope=_COMPLIANT_SCOPE,
+        clock=_fixed_clock,
+    )
+
+    assert isinstance(result, RunRecord)
+    # The pre-spawn Run row forwards the candidate's seed_path alongside status/spawned_at.
+    recorded_run = port.runs_recorded[0][1]
+    assert recorded_run["seed_path"] == candidate["seed_path"]
+    assert recorded_run["status"] == "running"
+    assert recorded_run["spawned_at"] == FIXED_SPAWNED_AT
+
+
+@pytest.mark.unit
 def test_fr021_spawn_failure_regateable_and_run_reconciled_failed() -> None:
     """FR-021 spawn-failure: the Project is left re-gateable (NOT ``running``) and the Run
     row is reconciled to ``failed`` — so no ``running`` Project lacks a reconcilable Run
