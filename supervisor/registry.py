@@ -104,8 +104,10 @@ class Registry:
     """Concrete psycopg-backed :class:`~supervisor.ports.RegistryPort`.
 
     Reads the extended ``projects`` table and writes ``projects`` lifecycle state
-    and ``ralph_runs`` rows. The sole write surface for both registries (§5.5,
-    NFR-006); the supervision cycle host issues no write of its own.
+    and ``ralph_runs`` rows. The sole *runtime* write surface for both registries
+    (§5.5, NFR-006), conforming to the cf-ralph-run-tracker discipline (the §5.5
+    sole write authority for ``ralph_runs``); the supervision cycle host issues
+    no write of its own.
     """
 
     def __init__(self, connection: DBConnection) -> None:
