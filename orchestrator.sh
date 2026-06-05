@@ -429,6 +429,45 @@ while true; do
       # FUP-0842: iteration_failed event (failure-mode primitive, §13 Q6 failure-rate-by-reason).
       emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "orchestrator" "iteration_failed" "" "" "" \
         "$(jq -nc --arg it "$ITER" '{reason:"execute_with_gates_exit_1", iteration:$it}')"
+      # FUP-0851: the Consumer (which owns fail_counts increments, FR-012) does NOT run on an
+      # execute_with_gates failure, and the loop previously `continue`d straight to the top —
+      # skipping BOTH the P4-07 >=3 fail-count escalation AND the end-of-loop command_dispatch
+      # (so a deterministically-failing item looped to MAX_ITERATIONS and an operator `pause`
+      # command was never honored — it had to be hard-killed). Increment the failed target's
+      # fail_count here, escalate gate_human at >=3, then poll the operator command channel so a
+      # pause is honored even on a failed iteration.
+      ewg_item="$(awk -F': *' '/^target_item_id:/{v=$2; gsub(/[[:space:]"]/,"",v); print v; exit}' "$ITER_DIR/session_plan_${ITER}.md" 2>/dev/null || echo "")"
+      if [[ -n "$ewg_item" ]]; then
+        EWG_FC="$STATE_DIR/fail_counts.json"; [[ -f "$EWG_FC" ]] || echo '[]' > "$EWG_FC"
+        jq --arg i "$ewg_item" --arg it "$ITER" \
+           'if any(.[]?; .item_id==$i) then map(if .item_id==$i then .count+=1|.last_failure_iteration=$it|.last_reason="execute_with_gates_exit_1" else . end) else .+[{item_id:$i,count:1,last_failure_iteration:$it,last_reason:"execute_with_gates_exit_1"}] end' \
+           "$EWG_FC" > "$EWG_FC.tmp" && mv "$EWG_FC.tmp" "$EWG_FC"
+        ewg_n="$(jq -r --arg i "$ewg_item" 'map(select(.item_id==$i))|.[0].count//0' "$EWG_FC")"
+        log "ITERATION $ITER fail_count[$ewg_item]=$ewg_n (execute_with_gates exit 1)"
+        if (( ewg_n >= 3 )); then
+          log "HALT: fail_counts >=3 for item_id=$ewg_item (execute_with_gates exit-1 path; gate_human escalated)"
+          printf '{"iteration":"%s","classification":"gate_human","reason":"fail_counts_threshold","item_id":"%s","ts":"%s"}\n' \
+                 "$ITER" "$ewg_item" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                 > "$STATE_DIR/escalations/fail_counts_threshold_${ITER}_${ewg_item}.json"
+          dispatch_notification "$SEED" "$STATE_DIR" fail_counts_threshold "$(jq -nc --arg it "$ITER" --arg item "$ewg_item" '{iteration:$it, gate_id:$item, reason:"P4_07_fail_counts_ge_3_via_ewg_exit1"}')"
+          emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "orchestrator" "iteration_failed" "" "" "" \
+            "$(jq -nc --arg it "$ITER" '{reason:"fail_counts_threshold", iteration:$it}')"
+          echo "HALT: FAIL_COUNTS_THRESHOLD (item=$ewg_item, iteration=$ITER)" >&2
+          exit 3
+        fi
+      fi
+      # FUP-0851: poll the operator command channel before continuing so `pause` is honored
+      # even when every iteration fails at execute_with_gates (mirrors the end-of-loop block).
+      command_dispatch_run "$STATE_DIR" "$SEED" "$ITER"
+      if [[ -f "$STATE_DIR/pause_requested.flag" ]]; then
+        log "PAUSE_REQUESTED: operator pause honored at iter $ITER boundary (post-failure path)"
+        dispatch_notification "$SEED" "$STATE_DIR" pause_honored "$(jq -nc --arg it "$ITER" '{iteration:$it, reason:"command_dispatch_pause_post_failure"}')"
+        rm -f "$STATE_DIR/pause_requested.flag"
+        emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "0" "orchestrator" "run_end" "" "" "" \
+          "$(jq -nc --arg it "$ITER" '{terminal_reason:"paused", iteration:$it}')"
+        echo "PAUSED at iter $ITER boundary (operator command)"
+        exit 0
+      fi
       # Continue loop (do not exit) so the Planner can decide to retry / reframe.
       log "ITERATION $ITER end (FAILED, gate_human escalated)"
       continue
