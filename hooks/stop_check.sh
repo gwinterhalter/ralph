@@ -267,55 +267,69 @@ for ((i=0; i<count; i++)); do
               echo "stop_check: registry_zero_open params.filter '$pred_filter' has no column name (expected '<column> != <value>')" >&2
               exit 3
             fi
-            col_idx=-1
-            prio_idx=-1
-            header_parsed=0
-            use_priority_fallback=0
-            unmet_count=0
-            while IFS= read -r line; do
-              line="${line%$'\r'}"
-              [[ "$line" == \|* ]] || continue
-              [[ "$line" =~ ^\|[[:space:]]*-+ ]] && continue
-              IFS='|' read -ra cells <<< "$line"
-              if [[ "$header_parsed" -eq 0 ]]; then
-                for idx in "${!cells[@]}"; do
-                  hdr="${cells[$idx]}"
-                  hdr="${hdr#"${hdr%%[![:space:]]*}"}"; hdr="${hdr%"${hdr##*[![:space:]]}"}"
-                  if [[ "$hdr" == "$filter_col" ]]; then col_idx="$idx"; fi
-                  if [[ "$hdr" == "Priority" ]]; then prio_idx="$idx"; fi
+            # FUP-0848: TABLE-AWARE register scan. The prior evaluator assumed the work table was
+            # the FIRST markdown table in the file and counted cells across ALL subsequent | rows.
+            # That breaks on a register carrying a Preconditions and/or Change-History table around
+            # the work table (ol-build register: Preconditions table is first → filter_col 'Status'
+            # never found → exit 3; a trailing Change-History table would also inflate the `!=` count).
+            # Now: enumerate every markdown table (a | header row immediately followed by a |---|
+            # separator), pick the FIRST table whose header carries filter_col (Status semantics);
+            # if none carries it but one carries Priority, use that (FUP-0829 Priority fallback);
+            # count ONLY the chosen table's data rows, stopping at the table's end. exit 3 only when
+            # no table carries either column.
+            mapfile -t _reg_lines < "$register_path"
+            _reg_n=${#_reg_lines[@]}
+            _hdr_idxs=()
+            for ((_i=0; _i<_reg_n; _i++)); do
+              _l="${_reg_lines[$_i]%$'\r'}"
+              [[ "$_l" == \|* ]] || continue
+              [[ "$_l" =~ ^\|[[:space:]]*:?-+ ]] && continue
+              (( _i+1 < _reg_n )) || continue
+              _nx="${_reg_lines[$((_i+1))]%$'\r'}"
+              [[ "$_nx" =~ ^\|[[:space:]]*:?-+ ]] && _hdr_idxs+=("$_i")
+            done
+            col_idx=-1; prio_idx=-1; chosen_hdr=-1; use_priority_fallback=0; unmet_count=0
+            # Pass 1: first table whose header carries filter_col.
+            for _hi in "${_hdr_idxs[@]}"; do
+              IFS='|' read -ra _hc <<< "${_reg_lines[$_hi]%$'\r'}"
+              for _idx in "${!_hc[@]}"; do
+                _h="${_hc[$_idx]}"; _h="${_h#"${_h%%[![:space:]]*}"}"; _h="${_h%"${_h##*[![:space:]]}"}"
+                [[ "$_h" == "$filter_col" ]] && { chosen_hdr=$_hi; col_idx=$_idx; break; }
+              done
+              [[ "$chosen_hdr" -ge 0 ]] && break
+            done
+            # Pass 2 (FUP-0829): no table carries filter_col — first table carrying Priority.
+            if [[ "$chosen_hdr" -lt 0 ]]; then
+              for _hi in "${_hdr_idxs[@]}"; do
+                IFS='|' read -ra _hc <<< "${_reg_lines[$_hi]%$'\r'}"
+                for _idx in "${!_hc[@]}"; do
+                  _h="${_hc[$_idx]}"; _h="${_h#"${_h%%[![:space:]]*}"}"; _h="${_h%"${_h##*[![:space:]]}"}"
+                  [[ "$_h" == "Priority" ]] && { chosen_hdr=$_hi; prio_idx=$_idx; use_priority_fallback=1; break; }
                 done
-                header_parsed=1
-                # FUP-0829: when the params.filter column is absent from the header but a
-                # Priority column exists, fall back to Priority-based open counting
-                # (zero_open_gaps semantics: **P1**/**P2**/**P3** = open) instead of exit 3.
-                # Maps the common "status != closed" idiom onto Auto_Build_Gap_Register-style
-                # Priority registers that carry no literal status column. exit 3 is retained
-                # only when there is also no Priority column to fall back to.
-                if [[ "$col_idx" -lt 0 ]]; then
-                  if [[ "$prio_idx" -ge 0 ]]; then
-                    use_priority_fallback=1
-                    echo "stop_check: registry_zero_open params.filter column '$filter_col' not in header — falling back to Priority open-count (zero_open_gaps semantics) per FUP-0829 ($register_path)" >&2
-                  else
-                    echo "stop_check: registry_zero_open params.filter column '$filter_col' not found in register header and no Priority column to fall back to ($register_path)" >&2
-                    exit 3
-                  fi
-                fi
-                continue
-              fi
+                [[ "$chosen_hdr" -ge 0 ]] && break
+              done
+              [[ "$chosen_hdr" -ge 0 ]] && echo "stop_check: registry_zero_open params.filter column '$filter_col' not in any table header — falling back to Priority open-count (zero_open_gaps semantics) per FUP-0829 ($register_path)" >&2
+            fi
+            if [[ "$chosen_hdr" -lt 0 ]]; then
+              echo "stop_check: registry_zero_open params.filter column '$filter_col' not found in any register table header and no Priority column to fall back to ($register_path)" >&2
+              exit 3
+            fi
+            # Count ONLY the chosen table's data rows (header+2 .. first non-| line).
+            for ((_j=chosen_hdr+2; _j<_reg_n; _j++)); do
+              _r="${_reg_lines[$_j]%$'\r'}"
+              [[ "$_r" == \|* ]] || break
+              [[ "$_r" =~ ^\|[[:space:]]*:?-+ ]] && continue
+              IFS='|' read -ra _dc <<< "$_r"
               if [[ "$use_priority_fallback" -eq 1 ]]; then
-                [[ ${#cells[@]} -gt "$prio_idx" ]] || continue
-                prio="${cells[$prio_idx]}"
-                prio="${prio#"${prio%%[![:space:]]*}"}"; prio="${prio%"${prio##*[![:space:]]}"}"
-                if [[ "$prio" == "**P1**" || "$prio" == "**P2**" || "$prio" == "**P3**" ]]; then
-                  unmet_count=$((unmet_count+1))
-                fi
+                [[ ${#_dc[@]} -gt "$prio_idx" ]] || continue
+                _v="${_dc[$prio_idx]}"; _v="${_v#"${_v%%[![:space:]]*}"}"; _v="${_v%"${_v##*[![:space:]]}"}"
+                [[ "$_v" == "**P1**" || "$_v" == "**P2**" || "$_v" == "**P3**" ]] && unmet_count=$((unmet_count+1))
               else
-                [[ ${#cells[@]} -gt "$col_idx" ]] || continue
-                cell="${cells[$col_idx]}"
-                cell="${cell#"${cell%%[![:space:]]*}"}"; cell="${cell%"${cell##*[![:space:]]}"}"
-                [[ "$cell" != "$filter_val" ]] && unmet_count=$((unmet_count+1))
+                [[ ${#_dc[@]} -gt "$col_idx" ]] || continue
+                _v="${_dc[$col_idx]}"; _v="${_v#"${_v%%[![:space:]]*}"}"; _v="${_v%"${_v##*[![:space:]]}"}"
+                [[ "$_v" != "$filter_val" ]] && unmet_count=$((unmet_count+1))
               fi
-            done < "$register_path"
+            done
             [[ "$unmet_count" -eq 0 ]] || all_pass=0
             ;;
         esac
