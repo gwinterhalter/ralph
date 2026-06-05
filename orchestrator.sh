@@ -75,6 +75,25 @@ export EVENT_PROJECT_ID EVENT_SLUG
 export RL_STATE_DIR="$STATE_DIR"
 export RL_EVENTS_BIN="$SCRIPT_DIR/lib/events.sh"
 
+# Single-instance guard (incident 2026-06-05: on Windows, killing a background-launched orchestrator
+# via a task-manager STOP did NOT kill the detached orchestrator.sh + its claude children, so
+# stop->relaunch cycles spawned CONCURRENT orchestrators racing the SAME state dir — interleaving
+# iterations, corrupting partial iter dirs, and double-spending live spawns). Refuse to start if a
+# LIVE orchestrator already holds the per-state-dir lock. A stale lock (holder no longer alive — e.g.
+# after a hard kill -9 where the EXIT trap could not run) is reclaimed after the kill -0 liveness check.
+mkdir -p "$STATE_DIR"
+ORCH_LOCK="$STATE_DIR/orchestrator.lock"
+if [[ -f "$ORCH_LOCK" ]]; then
+  _lock_pid="$(cat "$ORCH_LOCK" 2>/dev/null || echo "")"
+  if [[ -n "$_lock_pid" ]] && kill -0 "$_lock_pid" 2>/dev/null; then
+    echo "HALT: another orchestrator (pid $_lock_pid) already holds $ORCH_LOCK — refusing to start a concurrent instance on the same state dir" >&2
+    exit 7
+  fi
+  echo "orchestrator: reclaiming stale single-instance lock (recorded holder '${_lock_pid:-?}' not alive)" >&2
+fi
+echo "$$" > "$ORCH_LOCK"
+trap 'rm -f "$ORCH_LOCK"' EXIT
+
 log() { mkdir -p "$STATE_DIR/logs"; printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$STATE_DIR/logs/orchestrator.log"; }
 
 # run_claude_json — wraps `claude -p` with --output-format json + --max-budget-usd;
