@@ -327,6 +327,23 @@ EXECUTOR_MODEL="$(read_seed_field "$SEED" .executor_model 2>/dev/null || echo ""
 [[ "$EXECUTOR_MODEL" == "null" ]] && EXECUTOR_MODEL=""
 EXECUTOR_MODEL_FLAG=""
 [[ -n "$EXECUTOR_MODEL" ]] && EXECUTOR_MODEL_FLAG="--model $EXECUTOR_MODEL"
+# OLB-08 C2 (operator gate_response_0015_0000 = option A): optional NARROW allow-rule for the
+# checkpoint live-spawn. The seed may declare executor_allowed_tools as a YAML list of Claude Code
+# permission patterns (e.g. "Bash(OLB_C2_LIVE=1 python -m pytest tests/test_c2_single_project_e2e.py:*)").
+# When present they are passed as --allowedTools so the integration_checkpoint Executor's
+# operator-sanctioned orchestrator.sh spawn is pre-approved under --permission-mode auto (per the
+# permission decision-order: an allow-rule match resolves immediately, ahead of the auto-mode
+# classifier). Narrow by construction — ONLY the declared patterns are pre-approved; the posture is
+# otherwise unchanged, and absent the field this is a no-op (every pre-OLB-08 seed unaffected).
+EXEC_ALLOW=()
+_eat_valid=()
+_eat_fm="$(awk '/^---[[:space:]]*$/{c++; next} c==1{print} c==2{exit}' "$SEED")"
+while IFS= read -r _eat_p; do [[ -n "$_eat_p" && "$_eat_p" != "null" ]] && _eat_valid+=("$_eat_p"); done \
+  < <(printf '%s\n' "$_eat_fm" | yq -r '.executor_allowed_tools[]' 2>/dev/null || true)
+if (( ${#_eat_valid[@]} > 0 )); then
+  EXEC_ALLOW=(--allowedTools "${_eat_valid[@]}")
+  echo "execute_with_gates: executor_allowed_tools active — ${#_eat_valid[@]} narrow Bash pattern(s) pre-approved via --allowedTools (OLB-08 C2 spawn consent, gate_response_0015_0000=A)" >&2
+fi
 # FUP-0752: seed convention is to declare permission_posture as the FULL flag string
 # (e.g. "--permission-mode auto"), but `claude --permission-mode <value>` wants just the
 # VALUE. Strip the leading `--permission-mode ` prefix when present (liberal accept of
@@ -349,6 +366,7 @@ EVENT_EX_T0="$(date +%s%3N 2>/dev/null || echo 0)"
 claude --print --output-format json \
        --permission-mode "$posture_value" \
        $EXECUTOR_MODEL_FLAG \
+       "${EXEC_ALLOW[@]}" \
        --strict-mcp-config --mcp-config "$MCP_CONFIG" \
        --max-budget-usd "$PER_CALL_CAP" --max-turns "$MAX_TURNS" \
        < "$PLAN_PATH" > "$RESULT_JSON_TMP"
