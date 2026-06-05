@@ -1,3 +1,17 @@
+[project]
+name = "ralph-supervisor"
+version = "0.0.0"
+description = "Ralph Loop Outer Loop Supervisor (ol-build)"
+requires-python = ">=3.12"
+dependencies = [
+    # OLB-02 (gate olb02-registry-db-access option A): the concrete Project
+    # Registry layer (supervisor/registry.py) reaches the code_factory Postgres on
+    # the disposable branch via a direct psycopg driver. Imported lazily inside
+    # Registry.from_env so the import of registry.py and the whole unit suite stay
+    # hermetic/DB-free; the live branch is wired only at C2/OLB-08.
+    "psycopg[binary]>=3.1",
+]
+
 [tool.pytest.ini_options]
 minversion = "7.0"
 # Collect only the Python supervisor tests; the inherited *.sh framework
