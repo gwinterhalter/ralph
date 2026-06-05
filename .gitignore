@@ -9,6 +9,12 @@ progress.txt
 # OS files
 .DS_Store
 
+# Python test artifacts (pytest scaffold under tests/; regenerated every cf-pytest run —
+# must stay untracked so per-iteration clean-tree/commit discipline isn't tripped)
+__pycache__/
+*.pyc
+.pytest_cache/
+
 #Claude
 # Exclude .claude/ CONTENTS (not the dir itself — required for the negation below to
 # reach inside; `.claude/` with trailing slash would block negations).
