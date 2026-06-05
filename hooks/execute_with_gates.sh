@@ -263,10 +263,23 @@ for req in "${deferred_human[@]}"; do
   basename_req="$(basename "$req")"
   req_suffix="$(basename "$req" .json)"; req_suffix="${req_suffix#gate_request_}"
   resp_file="$ITER_DIR/gate_response_${req_suffix}.json"
-  if [[ -f "$resp_file" ]]; then
-    # Operator already wrote the answer — resume entry. Inline (the answer is consumed
-    # by the next role call's plan reading) and proceed, no re-escalation.
-    echo "execute_with_gates: gate_human ${req_suffix} already resolved by operator gate_response — inlined, proceeding" >&2
+  # FUP-0852: a deferred gate_human is RESOLVED only if a WELL-FORMED, FR-008-complete gate_response
+  # exists AND the Answerer did not self-escalate (no gate_escalation_${suffix}*.md). Previously this
+  # gated on FILE EXISTENCE alone — so a malformed/invalid Answerer response (the very condition that
+  # triggered the pass-1 demotion) was re-admitted as "resolved" and the gate was silently BYPASSED
+  # instead of blocking for the operator. Mirror the pass-1 validity check + require no escalation artefact.
+  resp_resolved=0
+  if [[ -f "$resp_file" ]] \
+     && jq -e '((.selected_option // null) != null or (.custom_text // null) != null) and ((.reasoning // "") | length > 0) and ((.confidence // null) | type == "number")' "$resp_file" >/dev/null 2>&1 \
+     && ! compgen -G "$ITER_DIR/gate_escalation_${req_suffix}*.md" >/dev/null 2>&1; then
+    resp_resolved=1
+  elif [[ -f "$resp_file" ]]; then
+    echo "execute_with_gates: gate_human ${req_suffix} gate_response present but INVALID/incomplete or accompanied by a self-escalation — NOT treating as resolved; escalating to operator (FUP-0852)" >&2
+  fi
+  if [[ "$resp_resolved" -eq 1 ]]; then
+    # Valid answer (async operator response, or a valid prior resolution) — inline (the answer is
+    # consumed by the next role call's plan reading) and proceed, no re-escalation.
+    echo "execute_with_gates: gate_human ${req_suffix} resolved by valid gate_response — inlined, proceeding" >&2
     # FUP-0800 C.8: gate_resolve (operator) — resolved via async operator gate_response.
     emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "gate" "gate_resolve" "" \
       "$(jq -r '.gate_id // empty' "$req" 2>/dev/null)" "gate" \
