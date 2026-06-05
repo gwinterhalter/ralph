@@ -26,6 +26,7 @@ parallel fake. Every other primitive is pure and needs no port.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from decimal import Decimal
 
 import pytest
 
@@ -97,6 +98,21 @@ class _RecordingRegistryPort:
 
     def update_run_status(self, project_id: str, status: str) -> None:
         self.calls.append("update_run_status")
+
+    def reconcile_run(
+        self,
+        project_id: str,
+        status: str,
+        *,
+        terminated_at: str,
+        terminal_cost_usd: Decimal,
+    ) -> None:
+        self.calls.append("reconcile_run")
+
+    def set_run_orchestrator_pid(
+        self, project_id: str, orchestrator_pid: int
+    ) -> None:
+        self.calls.append("set_run_orchestrator_pid")
 
 
 def _scope(

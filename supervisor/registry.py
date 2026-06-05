@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Sequence
+from decimal import Decimal
 from typing import TYPE_CHECKING, Protocol, cast
 
 from supervisor import transitions
@@ -208,16 +209,68 @@ class Registry:
         Validates ``status`` against the §5.4 CHECK set before the UPDATE, and
         targets only the Project's currently-``running`` Run row.
         """
-        if status not in RUN_STATUSES:
-            raise ValueError(
-                f"illegal ralph_runs status {status!r} "
-                f"(Spec v1.3 §5.4); legal: {sorted(RUN_STATUSES)}"
-            )
+        self._assert_run_status_legal(status)
         self._execute_write(
             "UPDATE ralph_runs SET status = %s, updated_at = now() "
             "WHERE project_slug = %s AND status = 'running'",
             (status, project_id),
         )
+
+    def reconcile_run(
+        self,
+        project_id: str,
+        status: str,
+        *,
+        terminated_at: str,
+        terminal_cost_usd: Decimal,
+    ) -> None:
+        """Terminal reconciliation of the active Run for a Project
+        (Spec v1.3 §5.4 FR-011 + FR-014).
+
+        Persists the terminal ``status``, the ``terminated_at`` boundary, and the
+        summed ``terminal_cost_usd`` in one UPDATE. Validates ``status`` against
+        the §5.4 CHECK set before the write (same guard as
+        :meth:`update_run_status`), and targets only the Project's
+        currently-``running`` Run row. ``terminal_cost_usd`` is bound as a
+        ``Decimal`` so psycopg adapts it to NUMERIC with no float rounding
+        (NFR-007 exact-decimal money). The column names (``terminated_at`` /
+        ``terminal_cost_usd``) are SQL literals here, never caller keys, and all
+        values are parameterised — no injection vector.
+        """
+        self._assert_run_status_legal(status)
+        self._execute_write(
+            "UPDATE ralph_runs SET status = %s, terminated_at = %s, "
+            "terminal_cost_usd = %s, updated_at = now() "
+            "WHERE project_slug = %s AND status = 'running'",
+            (status, terminated_at, terminal_cost_usd, project_id),
+        )
+
+    def set_run_orchestrator_pid(
+        self, project_id: str, orchestrator_pid: int
+    ) -> None:
+        """Persist the spawned orchestrator pid on the active Run row after a
+        successful spawn (Spec v1.3 §5.4 FR-009 / §6.3 active boundary).
+
+        Targets only the Project's currently-``running`` Run row; the pid is
+        parameterised and the column name is a SQL literal (no injection vector).
+        Routed through :meth:`_execute_write` so it commits like every other
+        write path.
+        """
+        self._execute_write(
+            "UPDATE ralph_runs SET orchestrator_pid = %s, updated_at = now() "
+            "WHERE project_slug = %s AND status = 'running'",
+            (orchestrator_pid, project_id),
+        )
+
+    @staticmethod
+    def _assert_run_status_legal(status: str) -> None:
+        """Reject an out-of-§5.4-CHECK-set Run status before any write — the one
+        guard shared by :meth:`update_run_status` and :meth:`reconcile_run`."""
+        if status not in RUN_STATUSES:
+            raise ValueError(
+                f"illegal ralph_runs status {status!r} "
+                f"(Spec v1.3 §5.4); legal: {sorted(RUN_STATUSES)}"
+            )
 
     def _execute_write(self, sql: str, params: Sequence[object]) -> None:
         """Execute a single parameterised write and commit it. The one place the

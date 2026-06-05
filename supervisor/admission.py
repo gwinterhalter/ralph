@@ -448,6 +448,14 @@ def admit_and_spawn(
         registry_port.set_lifecycle_state(project_id, _STATE_FAILED)
         return ReconciledFailure(project_id=project_id, detail=result.detail)
 
+    # FR-009 — persist the spawned orchestrator pid on the Run row now that the
+    # spawn cleared (the §6.3 active boundary, paired with spawned_at). Strictly
+    # additive after the spawn; the FR-021 pre-spawn record_run ordering above is
+    # untouched. Skipped when the SpawnPort returns no pid (None) so a pid-less
+    # success never issues a null-pid write.
+    if result.orchestrator_pid is not None:
+        registry_port.set_run_orchestrator_pid(project_id, result.orchestrator_pid)
+
     return RunRecord(
         project_id=project_id,
         spawned_at=spawned_at,

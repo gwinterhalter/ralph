@@ -12,6 +12,7 @@ Resolved per gate ``olb01-registry-port-seam`` (option A).
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from decimal import Decimal
 from typing import Protocol, runtime_checkable
 
 # A Registry row is a read-only column->value mapping. The concrete row model
@@ -57,4 +58,28 @@ class RegistryPort(Protocol):
     def update_run_status(self, project_id: str, status: str) -> None:
         """Reconcile a Run Registry row to a terminal status (Spec §5.4
         FR-011). OLB-02 implements; the OLB-01 skeleton never calls."""
+        ...
+
+    def reconcile_run(
+        self,
+        project_id: str,
+        status: str,
+        *,
+        terminated_at: str,
+        terminal_cost_usd: Decimal,
+    ) -> None:
+        """Terminal reconciliation of a Run Registry row carrying the §5.4
+        terminal fields (Spec §5.4 FR-011 ``terminated_at`` + FR-014 summed
+        ``terminal_cost_usd`` as an exact ``Decimal`` per NFR-007). Extends the
+        status-only :meth:`update_run_status` so the §5.4 terminal reconcile has
+        a persistence home. OLB-02 implements; the live reconcile call-site
+        (§5.4 / §14 teardown) is OLB-08."""
+        ...
+
+    def set_run_orchestrator_pid(
+        self, project_id: str, orchestrator_pid: int
+    ) -> None:
+        """Persist the spawned orchestrator pid on a Run Registry row after a
+        successful spawn (Spec §5.4 FR-009 / §6.3 active boundary). OLB-02
+        implements; the admission post-spawn call-site wires it (OLB-08a)."""
         ...

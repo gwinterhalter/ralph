@@ -22,6 +22,7 @@ asserted against the actual shipped pipeline, not a parallel re-implementation:
 from __future__ import annotations
 
 from collections.abc import Sequence
+from decimal import Decimal
 
 import pytest
 
@@ -85,6 +86,8 @@ class _RecordingRegistryPort:
         self.lifecycle_writes: list[tuple[str, str]] = []
         self.runs_recorded: list[tuple[str, RegistryRow]] = []
         self.run_status_updates: list[tuple[str, str]] = []
+        self.pid_writes: list[tuple[str, int]] = []
+        self.run_reconciles: list[tuple[str, str, str, Decimal]] = []
 
     def read_candidates(self) -> Sequence[RegistryRow]:
         self.calls.append("read_candidates")
@@ -105,6 +108,25 @@ class _RecordingRegistryPort:
     def update_run_status(self, project_id: str, status: str) -> None:
         self.calls.append("update_run_status")
         self.run_status_updates.append((project_id, status))
+
+    def reconcile_run(
+        self,
+        project_id: str,
+        status: str,
+        *,
+        terminated_at: str,
+        terminal_cost_usd: Decimal,
+    ) -> None:
+        self.calls.append("reconcile_run")
+        self.run_reconciles.append(
+            (project_id, status, terminated_at, terminal_cost_usd)
+        )
+
+    def set_run_orchestrator_pid(
+        self, project_id: str, orchestrator_pid: int
+    ) -> None:
+        self.calls.append("set_run_orchestrator_pid")
+        self.pid_writes.append((project_id, orchestrator_pid))
 
 
 class _FakeSeedValidator:

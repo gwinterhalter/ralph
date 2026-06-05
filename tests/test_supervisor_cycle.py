@@ -7,6 +7,8 @@ and neither returns a value nor raises.
 """
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
 
 from supervisor.cycle import SupervisionCycle
@@ -41,6 +43,21 @@ class _ZeroRowRegistry:
 
     def update_run_status(self, project_id: str, status: str) -> None:
         self.writes.append("update_run_status")
+
+    def reconcile_run(
+        self,
+        project_id: str,
+        status: str,
+        *,
+        terminated_at: str,
+        terminal_cost_usd: Decimal,
+    ) -> None:
+        self.writes.append("reconcile_run")
+
+    def set_run_orchestrator_pid(
+        self, project_id: str, orchestrator_pid: int
+    ) -> None:
+        self.writes.append("set_run_orchestrator_pid")
 
 
 @pytest.fixture

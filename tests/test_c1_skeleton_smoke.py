@@ -36,6 +36,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from datetime import datetime
+from decimal import Decimal
 
 import pytest
 
@@ -53,7 +54,15 @@ EXPECTED_ORDER = ["reconcile", "admit", "schedule", "attend", "guard", "learn"]
 # The RegistryPort read / write method split (Spec v1.3 §5.5). The write-nothing
 # probe asserts every recorded call is a read and none of the writes ever fires.
 READ_METHODS = frozenset({"read_candidates", "read_running"})
-WRITE_METHODS = frozenset({"set_lifecycle_state", "record_run", "update_run_status"})
+WRITE_METHODS = frozenset(
+    {
+        "set_lifecycle_state",
+        "record_run",
+        "update_run_status",
+        "reconcile_run",
+        "set_run_orchestrator_pid",
+    }
+)
 
 # A fixed build instant so the FR-061 freshness assertion is deterministic.
 NOW = datetime(2026, 6, 5, 12, 30, 0)
@@ -90,6 +99,21 @@ class _RecordingZeroRegistry:
 
     def update_run_status(self, project_id: str, status: str) -> None:
         self.calls.append("update_run_status")
+
+    def reconcile_run(
+        self,
+        project_id: str,
+        status: str,
+        *,
+        terminated_at: str,
+        terminal_cost_usd: Decimal,
+    ) -> None:
+        self.calls.append("reconcile_run")
+
+    def set_run_orchestrator_pid(
+        self, project_id: str, orchestrator_pid: int
+    ) -> None:
+        self.calls.append("set_run_orchestrator_pid")
 
 
 @pytest.fixture
