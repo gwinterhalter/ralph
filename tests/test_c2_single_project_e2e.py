@@ -70,10 +70,16 @@ READ_ONLY_CORPUS = READ_ONLY_CORPUS_PATH
 
 DB_URL_ENV = "OL_SUPERVISOR_DB_URL"
 LIVE_OPT_IN_ENV = "OLB_C2_LIVE"
-# Bounded wait for the drain (seed hang_timeout_seconds: 600, plus headroom for
-# MCP-server startup); the orchestrator is killed + the run reported incomplete
-# if it overruns.
-SPAWN_TIMEOUT_S = 900.0
+# Bounded wait for the drain. The live oltest_c2 drain is a real iterations_max:2
+# orchestrator.sh whose inner ``claude -p`` role calls (planner/executor/consumer)
+# have variable per-call latency plus MCP-server startup, so the wait must clear the
+# seed's own hang budget (hang_timeout_seconds: 1800) with headroom rather than the
+# inner-loop hang_timeout: 600. A first live drain completed in ~674s; a second was
+# still draining (only partial spend) at the old 900s ceiling and was killed mid-run —
+# i.e. 900s was marginal, not a pipeline defect. Sized to the 1800s seed hang budget so
+# a slow-but-healthy drain reaches INITIATIVE_COMPLETE; the orchestrator is still killed
+# + the run reported incomplete if it genuinely overruns.
+SPAWN_TIMEOUT_S = 1800.0
 
 _DSN = os.environ.get(DB_URL_ENV, "")
 _OPT_IN = os.environ.get(LIVE_OPT_IN_ENV, "") not in ("", "0", "false", "False")

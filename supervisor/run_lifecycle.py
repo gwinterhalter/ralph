@@ -21,7 +21,7 @@ import json
 import subprocess  # nosec B404
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Callable
 
@@ -37,6 +37,14 @@ LIFECYCLE_COMPLETE = "complete"
 SPEND_FILE_NAME = "spend.json"
 #: The orchestrator append-only log carrying the INITIATIVE_COMPLETE line (§13.1).
 ORCHESTRATOR_LOG_REL: tuple[str, ...] = ("logs", "orchestrator.log")
+#: The persisted money grain for the run cost — the canonical
+#: ``ralph_runs.terminal_cost_usd numeric(10,4)`` scale (Ralph_Runs_Table_Migration v1.0,
+#: a closed table read but never reshaped per Spec v1.3 §4.2). The summed ledger cost is
+#: quantized to this grain so the in-memory terminal cost equals the value
+#: ``reconcile_run`` persists and reads back — NFR-007 exact ``Decimal`` AT the storage
+#: scale, with no float and no round-trip drift. Postgres rounds a numeric cast half away
+#: from zero, so ROUND_HALF_UP matches the DB.
+TERMINAL_COST_SCALE = Decimal("0.0001")
 
 
 def _utc_now_iso() -> str:
@@ -80,14 +88,17 @@ def read_terminal_cost(state_dir: Path) -> Decimal:
     NFR-007); ``Decimal('0')`` when the ledger is absent.
 
     Parsed with ``parse_float=Decimal`` so the money value is taken from the JSON
-    literal with no intermediate float rounding.
+    literal with no intermediate float rounding, then quantized to the persisted
+    ``numeric(10,4)`` money grain (``TERMINAL_COST_SCALE``) so the returned cost equals
+    what ``reconcile_run`` stores + reads back (NFR-007; no round-trip drift).
     """
     spend_file = state_dir / SPEND_FILE_NAME
     if not spend_file.is_file():
-        return Decimal("0")
+        return Decimal("0").quantize(TERMINAL_COST_SCALE)
     data = json.loads(spend_file.read_text(encoding="utf-8"), parse_float=Decimal)
     raw = data.get("total_spend_usd", 0)
-    return raw if isinstance(raw, Decimal) else Decimal(str(raw))
+    cost = raw if isinstance(raw, Decimal) else Decimal(str(raw))
+    return cost.quantize(TERMINAL_COST_SCALE, rounding=ROUND_HALF_UP)
 
 
 def detect_initiative_complete(
@@ -182,6 +193,7 @@ __all__ = [
     "LIFECYCLE_COMPLETE",
     "SPEND_FILE_NAME",
     "ORCHESTRATOR_LOG_REL",
+    "TERMINAL_COST_SCALE",
     "RunTerminal",
     "wait_for_orchestrator",
     "read_terminal_cost",
