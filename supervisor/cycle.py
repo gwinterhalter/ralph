@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 from supervisor.cycle_wiring import (
     run_attend_step,
     run_guard_step,
+    run_learn_step,
     run_reconcile_step,
     run_schedule_step,
 )
@@ -35,6 +36,7 @@ if TYPE_CHECKING:
     from supervisor.cycle_wiring import (
         AttendConfig,
         GuardConfig,
+        LearnConfig,
         ReconcileConfig,
         ScheduleConfig,
     )
@@ -59,6 +61,7 @@ class SupervisionCycle:
         attend_config: AttendConfig | None = None,
         guard_config: GuardConfig | None = None,
         reconcile_config: ReconcileConfig | None = None,
+        learn_config: LearnConfig | None = None,
     ) -> None:
         self._registry = registry
         # OLB-11 / OLB-14 additive collaborators (gates olb11-c3-cycle-wiring-scope /
@@ -70,6 +73,7 @@ class SupervisionCycle:
         self._attend_config = attend_config
         self._guard_config = guard_config
         self._reconcile_config = reconcile_config
+        self._learn_config = learn_config
 
     def run_once(self) -> None:
         """Execute one supervision cycle: the six §4.4 steps, in order.
@@ -102,7 +106,16 @@ class SupervisionCycle:
             run_reconcile_step(self._registry, self._reconcile_config)
 
     def _admit(self) -> None:
-        """§4.4(2) Admit — gate Candidates, admit-and-spawn the passers. No-op stub."""
+        """§4.4(2) Admit — gate Candidates, admit-and-spawn the passers.
+
+        In the OLB-11 wiring the FR-015–021 Admission Pipeline is performed
+        ATOMICALLY inside the Schedule step's dispatch (``run_schedule_step`` selects
+        the next Candidate and calls ``admit_candidate`` — the only Candidate→running
+        path, enforcing the FR-016 seed-validity / FR-019 ceiling / FR-020
+        blast-radius preconditions). So this hook is an intentional structural
+        pass-through in this architecture, NOT an un-implemented gap — splitting a
+        second standalone admit-scan here would double-process the same Candidates.
+        """
 
     def _schedule(self) -> None:
         """§4.4(3) Schedule — select the next Project to Dispatch (OLB-11).
@@ -140,4 +153,12 @@ class SupervisionCycle:
             run_guard_step(self._registry, self._guard_config)
 
     def _learn(self) -> None:
-        """§4.4(6) Learn — periodically invoke the Run-Auditor. No-op stub."""
+        """§4.4(6) Learn — periodically invoke the Run-Auditor (D1; FR-049–053).
+
+        When a :class:`~supervisor.cycle_wiring.LearnConfig` is configured, runs the
+        OLB-15 read-only cross-run audit over the supplied completed/failed Runs and
+        hands the findings-only report to the sink (no registry write — FR-053).
+        Unconfigured (or with no Runs to audit), it is the OLB-01 no-op.
+        """
+        if self._learn_config is not None:
+            run_learn_step(self._learn_config)

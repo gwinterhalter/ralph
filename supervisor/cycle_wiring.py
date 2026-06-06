@@ -80,6 +80,12 @@ from supervisor.reconcile import (
     ReconcileAction,
     derive_reconcile_actions,
 )
+from supervisor.run_auditor import (
+    AuditConfig,
+    RunAuditReport,
+    run_audit_pass,
+)
+from supervisor.run_auditor import RunRecord as AuditRunRecord
 from supervisor.cost_circuit_breaker import (
     BreakerConfig,
     BreakerTrip,
@@ -833,6 +839,39 @@ def run_kill_switch_halt(
     )
 
 
+@dataclass(frozen=True)
+class LearnConfig:
+    """The §4.4 step-6 Learn collaborators (Spec v1.3 §12 FR-049–053 / D1).
+
+    ``runs_source`` supplies the ``complete`` / ``failed`` :class:`RunRecord`s the
+    cross-run audit reads (the production source reads the accumulated completed-Run
+    corpus + Run Registry; default = no runs → the step is a no-op). ``audit_config``
+    carries the FR-051/052 thresholds + the FR-049 cadence; ``report_sink`` receives
+    the findings-only :class:`RunAuditReport` (default = drop; production logs/persists
+    it). The Run-Auditor is strictly read-only (FR-053) — this step issues no registry
+    write.
+    """
+
+    runs_source: Callable[[], "Sequence[AuditRunRecord]"]
+    audit_config: AuditConfig = field(default_factory=AuditConfig)
+    report_sink: Callable[["RunAuditReport"], None] = lambda _report: None
+
+
+def run_learn_step(config: LearnConfig) -> "RunAuditReport | None":
+    """Compose the §4.4 step-6 Learn for one pass (D1; FR-049).
+
+    Reads the supplied Runs, runs the read-only cross-run audit, and hands the
+    findings-only report to the sink. A zero-run pass is a genuine no-op (returns
+    None) — no audit, no write. The Run-Auditor never mutates the substrate (FR-053).
+    """
+    runs = list(config.runs_source())
+    if not runs:
+        return None
+    report = run_audit_pass(runs, config=config.audit_config)
+    config.report_sink(report)
+    return report
+
+
 __all__ = [
     "RoundStateStore",
     "AttentionStateStore",
@@ -843,10 +882,12 @@ __all__ = [
     "StallSignal",
     "KillSwitchConfig",
     "KillSwitchOutcome",
+    "LearnConfig",
     "to_project_records",
     "to_attention_escalation",
     "run_schedule_step",
     "run_attend_step",
     "run_guard_step",
     "run_kill_switch_halt",
+    "run_learn_step",
 ]
