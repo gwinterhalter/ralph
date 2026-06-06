@@ -54,7 +54,10 @@ dispatch_notification() {
   # (fully reversible; code retained). Email (gmail_smtp) is primary per seed v1.3.
   if [[ "$primary" == "slack_webhook" && "${CF_ORCHESTRATOR_ENABLE_SLACK:-0}" == "1" && -n "$primary_env" && "$primary_env" != "null" && -n "${!primary_env:-}" ]]; then
     channel_attempted="slack_webhook"
-    if curl -fsS -X POST -H 'Content-Type: application/json' \
+    # FUP-0858: hard-timebox the webhook POST — a notification must never block the
+    # orchestrator (especially the pause/run_end exit path). --connect-timeout caps the
+    # TCP connect, --max-time the whole request.
+    if curl -fsS --connect-timeout 5 --max-time 15 -X POST -H 'Content-Type: application/json' \
             --data "$(jq -nc --arg t "$msg" '{text:$t}')" \
             "${!primary_env}" >/dev/null 2>&1; then
       channel_result="ok"
@@ -150,13 +153,26 @@ dispatch_notification() {
   if [[ "$fallback" == "win11toast" && "$channel_result" != "ok" && "$channel_result" != "success" && "$channel_result" != success_on_retry_* ]]; then
     local primary_attempt_summary="$channel_attempted=$channel_result"
     channel_attempted="${channel_attempted}+win11toast_fallback"
+    # FUP-0858: a desktop toast must NEVER block the loop. `win11toast.toast(duration='long')`
+    # blocks the calling shell (~25s on-screen) and, in a headless / sandbox / CI context with
+    # no interactive desktop, the Action-Center call can hang indefinitely — which wedged the
+    # orchestrator's pause-exit path (orchestrator.sh:604). Two guards: (a) skip entirely when
+    # headless / explicitly disabled (a toast is useless with no desktop anyway), and (b) hard
+    # `timeout` the toast call so it self-kills instead of hanging. `timeout` is coreutils
+    # (present in Git-for-Windows); when absent, `_to` is empty and the call runs unwrapped.
+    local _toast_timeout="${RALPH_TOAST_TIMEOUT_SECONDS:-10}"
+    local _to=""
+    command -v timeout >/dev/null 2>&1 && _to="timeout $_toast_timeout"
     # FUP-NEW (2026-06-02): win11toast is a Python module (pip install win11toast), not a
     # standalone CLI binary. Original `command -v win11toast` check failed even after
     # `pip install win11toast` because the package exposes no PATH entry point. Invoke via
     # `python -c` using argv-passing (avoids shell-injection on $msg with quotes/specials).
     # Backward-compatible: if a win11toast CLI shim exists in PATH (operator-created), prefer it.
-    if command -v win11toast >/dev/null 2>&1; then
-      if win11toast "$msg" >/dev/null 2>&1; then
+    if [[ "${RALPH_DISABLE_DESKTOP_TOAST:-0}" == "1" ]]; then
+      channel_result="primary_failed[$primary_attempt_summary]+fallback:skipped_headless"
+    elif command -v win11toast >/dev/null 2>&1; then
+      # shellcheck disable=SC2086
+      if $_to win11toast "$msg" >/dev/null 2>&1; then
         channel_result="primary_failed[$primary_attempt_summary]+fallback:ok"
       else
         channel_result="primary_failed[$primary_attempt_summary]+fallback:fail"
@@ -174,7 +190,8 @@ dispatch_notification() {
       # fail_counts_threshold) so a longer dwell is high-value, low-cost. For longer-than-25s
       # need, switch to scenario='reminder' (toast persists until manually dismissed; adds snooze /
       # dismiss buttons) — reserved as upgrade path if 25s still insufficient.
-      if python -c "import sys; from win11toast import toast; toast('CF Orchestrator', sys.argv[1], app_id='CF Orchestrator', duration='long')" "$msg" >/dev/null 2>&1; then
+      # shellcheck disable=SC2086
+      if $_to python -c "import sys; from win11toast import toast; toast('CF Orchestrator', sys.argv[1], app_id='CF Orchestrator', duration='long')" "$msg" >/dev/null 2>&1; then
         channel_result="primary_failed[$primary_attempt_summary]+fallback:ok_via_python_module"
       else
         channel_result="primary_failed[$primary_attempt_summary]+fallback:fail_via_python_module"
