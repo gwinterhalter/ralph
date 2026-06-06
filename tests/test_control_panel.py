@@ -55,13 +55,14 @@ def test_summarize_events_counts_cost_and_failures() -> None:
         {"event_type": "iteration_begin"},
         {"event_type": "llm_call", "cost_usd": "2.50"},
         {"subject_kind": "llm_call", "detail": {"cost_usd": 1.25}},
+        {"event_type": "llm_call", "payload": {"cost_usd": 1.94}},  # live events.jsonl shape
         {"event_type": "iteration_failed"},
         {"event_type": "halt"},
     ]
     m = summarize_events(events)
-    assert m.total == 5
-    assert m.by_type["llm_call"] == 2
-    assert m.total_cost_usd == Decimal("3.75")
+    assert m.total == 6
+    assert m.by_type["llm_call"] == 3
+    assert m.total_cost_usd == Decimal("5.69")
     assert m.failures == 2  # iteration_failed + halt
 
 

@@ -88,11 +88,15 @@ def _event_type(event: dict[str, object]) -> str:
 
 
 def _event_cost(event: dict[str, object]) -> Decimal:
+    # cost_usd may sit at the top level, or nested under `payload` (the live
+    # events.jsonl llm_call shape) or `detail` (synthetic/test shape).
     raw = event.get("cost_usd")
     if raw is None:
-        detail = event.get("detail")
-        if isinstance(detail, dict):
-            raw = detail.get("cost_usd")
+        for nested_key in ("payload", "detail"):
+            nested = event.get(nested_key)
+            if isinstance(nested, dict) and nested.get("cost_usd") is not None:
+                raw = nested.get("cost_usd")
+                break
     if raw is None:
         return Decimal("0")
     try:
