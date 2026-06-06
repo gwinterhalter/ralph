@@ -16,6 +16,7 @@ from supervisor.candidate_enrichment import (
     default_candidate_enricher,
     enrich_candidate_from_seed,
     make_seed_candidate_enricher,
+    open_work_counts_for,
 )
 
 pytestmark = pytest.mark.unit
@@ -145,6 +146,23 @@ def test_factory_binds_workspace_root(tmp_path: Path) -> None:
     enricher = make_seed_candidate_enricher(ws)
     out = enricher({"project_id": "demo_proj", "folder_path": "Sub_Projects/demo-proj"})
     assert out["open_item_count"] == 3
+
+
+def test_open_work_counts_for_live_source(tmp_path: Path) -> None:
+    ws, _ = _make_workspace(tmp_path)  # demo-proj registry has 3 open rows
+    rows = [
+        {"project_id": "demo_proj", "folder_path": "Sub_Projects/demo-proj"},
+        {"project_id": "ghost", "folder_path": "Sub_Projects/does-not-exist"},  # omitted
+        {"folder_path": "Sub_Projects/demo-proj"},  # no project_id → skipped
+    ]
+    counts = open_work_counts_for(rows, workspace_root=ws)
+    assert counts == {"demo_proj": 3}  # only the resolvable project; FR-024 source
+
+
+def test_open_work_counts_for_no_root_is_empty(tmp_path: Path) -> None:
+    assert open_work_counts_for(
+        [{"project_id": "p", "folder_path": "x"}], workspace_root=None
+    ) == {}
 
 
 def test_default_enricher_reads_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

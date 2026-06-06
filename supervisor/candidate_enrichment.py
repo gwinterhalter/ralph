@@ -218,6 +218,51 @@ def enrich_candidate_from_seed(
     return merged
 
 
+def open_work_counts_for(
+    rows: "Sequence[RegistryRow]",
+    *,
+    workspace_root: str | os.PathLike[str] | None = None,
+    seed_glob: str = _SEED_GLOB,
+) -> dict[str, int]:
+    """Live FR-024 open-work-count source: project_id -> open registry rows (D2).
+
+    For each project row (carrying ``project_id`` + ``folder_path``), locates its
+    seed and counts the ``Status == open`` rows in that seed's ``work_registry`` —
+    the same count the orchestrator's ``stop_check`` uses. The result feeds the
+    scheduler's FR-024 closest-to-done bias and the §13 status surface, replacing the
+    supplied-parameter placeholder with a live read. Fault-tolerant: a project whose
+    workspace/seed/registry cannot be resolved is simply omitted (the consumer treats
+    a missing project as 0), and the function never raises.
+    """
+    root = _resolve_workspace_root(workspace_root)
+    counts: dict[str, int] = {}
+    if root is None:
+        return counts
+    for row in rows:
+        project_id = row.get("project_id")
+        folder = row.get("folder_path")
+        if not isinstance(project_id, str) or not project_id:
+            continue
+        if not isinstance(folder, str) or not folder:
+            continue
+        folder_path = Path(folder)
+        if not folder_path.is_absolute():
+            folder_path = root / folder_path
+        seed_file = _newest_match(folder_path, seed_glob)
+        if seed_file is None:
+            continue
+        try:
+            front = _parse_frontmatter(
+                seed_file.read_text(encoding="utf-8", errors="replace")
+            )
+        except OSError:
+            continue
+        count = _open_item_count(front, root)
+        if count is not None:
+            counts[project_id] = count
+    return counts
+
+
 def make_seed_candidate_enricher(
     workspace_root: str | os.PathLike[str] | None = None,
     *,
@@ -252,6 +297,7 @@ def default_candidate_enricher(row: RegistryRow) -> RegistryRow:
 __all__ = [
     "WORKSPACE_ROOT_ENV",
     "enrich_candidate_from_seed",
+    "open_work_counts_for",
     "make_seed_candidate_enricher",
     "default_candidate_enricher",
 ]
