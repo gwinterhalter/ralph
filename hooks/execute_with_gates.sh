@@ -350,6 +350,23 @@ fi
 # either form). Without this, claude rejects `--permission-mode "--permission-mode auto"`
 # with "Allowed choices are acceptEdits, auto, bypassPermissions, default, dontAsk, plan."
 posture_value="${PERMISSION_POSTURE#--permission-mode }"
+# OLB-08+ (operator decision 2026-06-05): per-shape permission posture for integration_checkpoint.
+# A C2/C3/C4 checkpoint's live drain legitimately spawns a real orchestrator.sh -> nested `claude -p`
+# AND does post-completion housekeeping (e.g. `rm -rf` of the nested oltest state). Under
+# --permission-mode auto the classifier denies these and a narrow --allowedTools rule is brittle
+# (each command variant re-denies — e.g. the OLB-08 close was blocked only by a post-completion `rm`
+# cleanup denial after the deliverable had already succeeded). For the bounded, oltest-capped
+# integration_checkpoint iterations ONLY, use the seed's checkpoint_permission_posture
+# (bypassPermissions): the classifier is off for that one iteration, but the orchestrator's
+# read-only-paths scan + budget cap + §10.5 post-exec gate remain enforced. Non-checkpoint
+# iterations keep the seed's default permission_posture (auto). No-op when the seed omits the field.
+_plan_shape="$(awk -F': *' '/^shape:/{v=$2; gsub(/[[:space:]"]/,"",v); print v; exit}' "$PLAN_PATH" 2>/dev/null || echo "")"
+CKPT_POSTURE="$(read_seed_field "$SEED" .checkpoint_permission_posture 2>/dev/null || echo "")"
+[[ "$CKPT_POSTURE" == "null" ]] && CKPT_POSTURE=""
+if [[ "$_plan_shape" == "integration_checkpoint" && -n "$CKPT_POSTURE" ]]; then
+  posture_value="${CKPT_POSTURE#--permission-mode }"
+  echo "execute_with_gates: integration_checkpoint shape — overriding permission posture to '$posture_value' per seed.checkpoint_permission_posture (OLB-08+ checkpoint spawn+housekeeping consent; read-only-scan + budget + §10.5 gate still enforced)" >&2
+fi
 # FUP-0764: capture the CLI's authoritative JSON envelope to a collision-proof dotfile temp,
 # then atomically mv it into place. The executed agent can itself write a file named
 # execution_result_${ITER}.json as a side effect (observed on the §6.3 resume leg: an Executor
