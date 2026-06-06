@@ -12,18 +12,22 @@ signature.
 OLB-11 (C3 fleet scheduling) fills the step-3 Schedule and step-4 Attend hooks
 through the additive collaborator bundles in ``supervisor/cycle_wiring.py``
 (gate ``olb11-c3-cycle-wiring-scope`` option A — additive, no signature
-reshaped). The collaborators carry defaults of ``None``, so a cycle constructed
-without them stays the OLB-01 mechanical no-op (every hook runs, no registry
-write is issued); the remaining four hooks await their owning components.
+reshaped). OLB-14 (C4 anomaly drills) additively fills the step-5 Guard hook the
+same way (gate ``olb14-c4-guard-wiring-scope`` option A): the OLB-12 Cost
+Circuit-Breaker + OLB-13 Repair-Auto-OK Policy + OLB-06 FR-038 trip composed
+behind an unchanged ``_guard()`` signature. The collaborators carry defaults of
+``None``, so a cycle constructed without them stays the OLB-01 mechanical no-op
+(every hook runs, no registry write is issued); the step-6 Learn hook awaits its
+owning component (OLB-15).
 """
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from supervisor.cycle_wiring import run_attend_step, run_schedule_step
+from supervisor.cycle_wiring import run_attend_step, run_guard_step, run_schedule_step
 
 if TYPE_CHECKING:
-    from supervisor.cycle_wiring import AttendConfig, ScheduleConfig
+    from supervisor.cycle_wiring import AttendConfig, GuardConfig, ScheduleConfig
     from supervisor.ports import RegistryPort
 
 
@@ -43,14 +47,17 @@ class SupervisionCycle:
         *,
         schedule_config: ScheduleConfig | None = None,
         attend_config: AttendConfig | None = None,
+        guard_config: GuardConfig | None = None,
     ) -> None:
         self._registry = registry
-        # OLB-11 additive collaborators (gate olb11-c3-cycle-wiring-scope option A).
-        # Defaulted to None so existing OLB-01/OLB-05 call sites — SupervisionCycle(
-        # registry) — and their RegistryPort doubles stay valid: a None config leaves
-        # that hook the OLB-01 mechanical no-op.
+        # OLB-11 / OLB-14 additive collaborators (gates olb11-c3-cycle-wiring-scope /
+        # olb14-c4-guard-wiring-scope, both option A). Defaulted to None so existing
+        # OLB-01/OLB-05/OLB-11 call sites — SupervisionCycle(registry[, schedule_config=
+        # ..., attend_config=...]) — and their RegistryPort doubles stay valid: a None
+        # config leaves that hook the OLB-01 mechanical no-op.
         self._schedule_config = schedule_config
         self._attend_config = attend_config
+        self._guard_config = guard_config
 
     def run_once(self) -> None:
         """Execute one supervision cycle: the six §4.4 steps, in order.
@@ -98,7 +105,18 @@ class SupervisionCycle:
             run_attend_step(self._registry, self._attend_config)
 
     def _guard(self) -> None:
-        """§4.4(5) Guard — enforce safety-gates continuously. No-op stub."""
+        """§4.4(5) Guard — enforce safety-gates continuously (OLB-14).
+
+        When a :class:`~supervisor.cycle_wiring.GuardConfig` is configured, runs the
+        OLB-12 Cost Circuit-Breaker over the running fleet (FR-039, per-Project FR-043
+        isolation) and the OLB-13 Repair-Auto-OK Policy over detected stalls (FR-044/
+        045/046): a reversible, in-scope, confidence-met repair is granted autonomously
+        (FR-045, the Run continues) and every other anomaly is tripped to
+        ``paused_safety`` with a top-tier escalation through the OLB-06 FR-038 seam
+        (never a kill, the no-silent-kill invariant). Unconfigured, it is the OLB-01 no-op.
+        """
+        if self._guard_config is not None:
+            run_guard_step(self._registry, self._guard_config)
 
     def _learn(self) -> None:
         """§4.4(6) Learn — periodically invoke the Run-Auditor. No-op stub."""

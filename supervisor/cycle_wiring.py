@@ -10,6 +10,16 @@ Admission Pipeline (``supervisor/admission.py``), the OLB-06 Safety-Gates floor
 (option A — additive fill of the empty hooks behind unchanged signatures, the
 §6-permitted additive case, OLB-08a precedent).
 
+The C4 anomaly-drills checkpoint (Spec v1.3 §9/§10/§11) additively extends the same
+module to fill the third empty hook — ``SupervisionCycle._guard()`` — composing the
+already-built, closed OLB-12 Cost Circuit-Breaker
+(``supervisor/cost_circuit_breaker.py``), the OLB-13 Repair-Auto-OK Policy
+(``supervisor/repair_policy.py``), and the OLB-06 Safety-Gates floor's FR-038 trip
+(``supervisor/safety_gates.py``), routing the resulting top-tier escalations through
+the OLB-10 attention intake. Resolved per gate ``olb14-c4-guard-wiring-scope``
+(option A — additive fill of the empty hook behind unchanged signatures, the same
+§6-permitted additive case as the OLB-11 schedule/attend fill).
+
 This module is the additive home for the wiring's supporting pieces so the cycle
 host stays the visible composition site while the reusable / persisted parts live
 here:
@@ -55,6 +65,7 @@ from supervisor.admission import (
     admit_candidate,
 )
 from supervisor.attention import (
+    ESCALATION_KIND_SAFETY_GATE,
     AttentionState,
     Escalation,
     NotificationPlan,
@@ -62,7 +73,26 @@ from supervisor.attention import (
     intake_escalation,
     plan_notifications,
 )
-from supervisor.safety_gates import DEFAULT_CONCURRENCY_CEILING, KillSwitch
+from supervisor.cost_circuit_breaker import (
+    BreakerConfig,
+    BreakerTrip,
+    IterationObservation,
+    evaluate_fleet,
+)
+from supervisor.repair_policy import (
+    DEFAULT_CONFIDENCE_THRESHOLD,
+    AutoRepairAuditRecord,
+    RepairAction,
+    RepairKind,
+    build_audit_record,
+    evaluate_repair,
+)
+from supervisor.safety_gates import (
+    DEFAULT_CONCURRENCY_CEILING,
+    KillSwitch,
+    SafetyEscalation,
+    trip_to_paused_safety,
+)
 from supervisor.scheduler import (
     ADMITTED_STATE,
     RUNNING_STATE,
@@ -386,12 +416,228 @@ def run_attend_step(registry: RegistryPort, config: AttendConfig) -> Notificatio
     )
 
 
+# --- §4.4 step-5 Guard composition (OLB-14 / Spec v1.3 §9 / §10 / §11) --------
+
+
+@dataclass(frozen=True)
+class StallSignal:
+    """A detected stall for one running Project's Run (the Guard step's §11 input).
+
+    Carries the candidate-repair ``kind`` discriminating the §11.3 repair class, the
+    ``triggering_anomaly`` descriptor threaded into the :class:`RepairAction`, the
+    ``confidence`` the Answerer attached, and the read-only-probed ``in_scope`` /
+    ``safety_gate_refuses`` predicates the §11 policy consults (FR-045/048). The live
+    source — a Run past ``hang_timeout`` with no ``orchestrator_pid`` progress — is the
+    OLB-16 surface; the C4 anomaly drill supplies it deterministically (gate
+    ``olb14-c4-anomaly-drill-substrate-and-fault-fidelity`` = A).
+    """
+
+    repair_kind: RepairKind
+    triggering_anomaly: str
+    confidence: float
+    in_scope: bool = True
+    safety_gate_refuses: bool = False
+
+
+@dataclass(frozen=True)
+class GuardConfig:
+    """The §4.4 step-5 Guard collaborators (Spec v1.3 §9 / §10 / §11).
+
+    Bundles what ``_guard`` composes: the FR-039 ``breaker_config`` thresholds and the
+    ``spend_histories`` source the OLB-12 Cost Circuit-Breaker evaluates (per-Project,
+    FR-043 isolation); the ``stall_signals`` source + ``confidence_threshold`` the
+    OLB-13 Repair-Auto-OK Policy decides on (FR-044/045/046); the persisted
+    :class:`AttentionStateStore` the FR-038 top-tier trip escalations are intaken into
+    (FR-028/029); the injected ``clock`` (no wall-clock read inside the pure layers);
+    and the ``project_filter`` scoping the running read. All carry build-time defaults,
+    so a caller overrides only what it exercises; a Guard with no ``breaker_config`` and
+    no stall signals is a complete no-op pass (the OLB-01 mechanical behaviour).
+    """
+
+    breaker_config: BreakerConfig | None = None
+    spend_histories: Callable[[], Mapping[str, Sequence[IterationObservation]]] = field(
+        default_factory=lambda: (lambda: {})
+    )
+    stall_signals: Callable[[], Mapping[str, StallSignal]] = field(
+        default_factory=lambda: (lambda: {})
+    )
+    confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD
+    attention_store: AttentionStateStore = field(default_factory=AttentionStateStore)
+    clock: Callable[[], datetime] = field(
+        default_factory=lambda: (lambda: datetime.now().astimezone())
+    )
+    project_filter: Callable[[RegistryRow], bool] = field(
+        default_factory=lambda: (lambda row: True)
+    )
+
+
+@dataclass(frozen=True)
+class GuardOutcome:
+    """The decisions one :func:`run_guard_step` pass reached (Spec v1.3 §9 / §10 / §11).
+
+    ``paused_projects`` are the Projects tripped to ``paused_safety`` this pass (FR-038 —
+    never killed); ``breaker_trips`` the FR-039 Cost Circuit-Breaker trips applied;
+    ``granted_repairs`` the FR-045 autonomously-granted reversible repairs (each Run
+    continued, no trip); ``escalations`` the top-tier :class:`Escalation`\\ s intaken into
+    the attention queue (FR-028/029). Returned for the checkpoint to assert against; the
+    authoritative evidence is the live ``projects.lifecycle_state`` rows the trips wrote.
+    """
+
+    paused_projects: tuple[str, ...]
+    breaker_trips: tuple[BreakerTrip, ...]
+    granted_repairs: tuple[AutoRepairAuditRecord, ...]
+    escalations: tuple[Escalation, ...]
+
+
+def to_attention_escalation(
+    safety_escalation: SafetyEscalation, *, raised_at: datetime
+) -> Escalation:
+    """Adapt an OLB-06 :class:`SafetyEscalation` into an OLB-10 :class:`Escalation`.
+
+    The FR-038 trip returns a ``safety_gates.SafetyEscalation`` (``tier == "top_tier"``,
+    ``lifecycle_state == "paused_safety"``); the §8 FR-028 intake consumes the
+    ``attention.Escalation`` shape. This bridges them as a ``safety_gate``-kind
+    escalation (one of :data:`~supervisor.attention.TOP_TIER_KINDS`, so it sorts top-tier
+    and bypasses batching + Quiet Hours, FR-029) carrying no suggested option — a safety
+    trip is the hard floor, not a one-confirm gate. ``raised_at`` is supplied (no
+    wall-clock read here).
+    """
+    return Escalation(
+        project_id=safety_escalation.project_id,
+        gate_id=f"safety:{safety_escalation.project_id}",
+        kind=ESCALATION_KIND_SAFETY_GATE,
+        reversible=False,
+        suggested_option=None,
+        confidence=1.0,
+        raised_at=raised_at,
+    )
+
+
+def _trip_and_intake(
+    registry: RegistryPort,
+    state: AttentionState,
+    project_id: str,
+    reason: str,
+    raised_at: datetime,
+) -> tuple[AttentionState, Escalation]:
+    """Apply the single §9 FR-038 trip + FR-028 intake for one anomalous Project.
+
+    Moves the Project to ``paused_safety`` through the OLB-06
+    :func:`~supervisor.safety_gates.trip_to_paused_safety` write seam (the only
+    substrate write the Guard performs — never a kill, never a terminal status), adapts
+    the returned top-tier escalation, and intakes it into ``state`` (FR-028 — Attention
+    Debt +1, queued). Returns the new :class:`AttentionState` and the intaken escalation.
+    """
+    safety_escalation = trip_to_paused_safety(registry, project_id, reason)
+    escalation = to_attention_escalation(safety_escalation, raised_at=raised_at)
+    return intake_escalation(state, escalation), escalation
+
+
+def run_guard_step(registry: RegistryPort, config: GuardConfig) -> GuardOutcome:
+    """Compose the OLB-12 breaker + OLB-13 repair policy + OLB-06 trip for one Guard pass.
+
+    Reads the running fleet through the OLB-02 seam (scoped by ``config.project_filter``)
+    and, in §9.3-precedence order:
+
+    * **§10 Cost Circuit-Breaker (FR-039/043)** — evaluates each running Project's supplied
+      spend history independently (:func:`~supervisor.cost_circuit_breaker.evaluate_fleet`);
+      every trip moves that Project to ``paused_safety`` + a top-tier escalation (FR-038),
+      and a clean sibling is left untouched (FR-043 isolation).
+    * **§11 Repair-Auto-OK Policy (FR-044/045/046)** — for each still-running Project
+      carrying a :class:`StallSignal`, classifies the candidate repair and decides
+      grant-vs-escalate (:func:`~supervisor.repair_policy.evaluate_repair`): a reversible,
+      in-scope, confidence-met repair the safety floor clears is granted autonomously
+      (FR-045 — the Run continues, no trip, an FR-047 audit record is built); any other
+      class (irreversible / out-of-scope / below-threshold / safety-refused) is escalated
+      — the Project is tripped to ``paused_safety`` + a top-tier escalation (FR-046/038),
+      never auto-executed.
+
+    A Project already tripped by the breaker is never re-tripped by the repair arm (the
+    illegal ``paused_safety -> paused_safety`` self-edge is structurally avoided, §5.3).
+    No trip ever kills a Run or writes a terminal status — every trip is a pause pending
+    operator decision (FR-038, the no-silent-kill invariant). Returns the
+    :class:`GuardOutcome`; persists the updated attention state.
+    """
+    running = [row for row in registry.read_running() if config.project_filter(row)]
+    running_ids = [str(row["project_id"]) for row in running]
+    state = config.attention_store.load()
+    paused: list[str] = []
+    breaker_trips: list[BreakerTrip] = []
+    granted: list[AutoRepairAuditRecord] = []
+    escalations: list[Escalation] = []
+
+    # --- §10 Cost Circuit-Breaker over the running fleet (FR-039 / FR-043) ---
+    if config.breaker_config is not None:
+        histories = {
+            project_id: history
+            for project_id, history in config.spend_histories().items()
+            if project_id in running_ids
+        }
+        fleet_trips = evaluate_fleet(histories, config.breaker_config)
+        for project_id in running_ids:
+            trip = fleet_trips.get(project_id)
+            if trip is not None and trip.tripped:
+                breaker_trips.append(trip)
+                state, escalation = _trip_and_intake(
+                    registry, state, project_id, trip.detail, config.clock()
+                )
+                paused.append(project_id)
+                escalations.append(escalation)
+
+    # --- §11 Repair-Auto-OK Policy over the detected stalls (FR-044/045/046) ---
+    signals = config.stall_signals()
+    for project_id in running_ids:
+        if project_id in paused:
+            continue  # already tripped by the breaker — never double-trip (§5.3)
+        signal = signals.get(project_id)
+        if signal is None:
+            continue
+        action = RepairAction(
+            kind=signal.repair_kind,
+            project_id=project_id,
+            triggering_anomaly=signal.triggering_anomaly,
+            confidence=signal.confidence,
+        )
+        decision = evaluate_repair(
+            action,
+            confidence_threshold=config.confidence_threshold,
+            in_scope=signal.in_scope,
+            safety_gate_refuses=signal.safety_gate_refuses,
+        )
+        if decision.grant:
+            # FR-045 autonomous reversible repair — the Run continues; record the FR-047
+            # audit trail for the unattended action. No trip, no escalation.
+            granted.append(build_audit_record(action, decision))
+        else:
+            # FR-046 — irreversible / out-of-scope / below-threshold / safety-refused:
+            # escalate, never auto-execute. The stall is a safety condition, so the
+            # Project is tripped to paused_safety with a top-tier escalation (FR-038).
+            state, escalation = _trip_and_intake(
+                registry, state, project_id, decision.rationale, config.clock()
+            )
+            paused.append(project_id)
+            escalations.append(escalation)
+
+    config.attention_store.save(state)
+    return GuardOutcome(
+        paused_projects=tuple(paused),
+        breaker_trips=tuple(breaker_trips),
+        granted_repairs=tuple(granted),
+        escalations=tuple(escalations),
+    )
+
+
 __all__ = [
     "RoundStateStore",
     "AttentionStateStore",
     "ScheduleConfig",
     "AttendConfig",
+    "GuardConfig",
+    "GuardOutcome",
+    "StallSignal",
     "to_project_records",
+    "to_attention_escalation",
     "run_schedule_step",
     "run_attend_step",
+    "run_guard_step",
 ]
