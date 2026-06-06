@@ -516,6 +516,24 @@ while true; do
     "$(( $(date +%s%3N 2>/dev/null || echo 0) - EVENT_CN_T0 ))" "" "" \
     "$(jq -nc --argjson cs "$(jq -r '.total_spend_usd // 0' "$RUNNING_SPEND_FILE" 2>/dev/null || echo 0)" '{cumulative_spend:$cs}')"
 
+  # T3#7: opt-in adversarial second-opinion on a checkpoint close. The hook self-skips
+  # unless the seed sets `adversarial_verify_on_checkpoint_close: true` AND this iteration
+  # is an integration_checkpoint that produced a report — so default-off is a complete
+  # no-op. A refutation (exit 3) has the hook write a gate_human escalation; the
+  # orchestrator logs + notifies but does NOT abort the loop (the operator reviews the
+  # flagged close). The if/else captures the exit code without tripping `set -e`.
+  if [[ -f "$SCRIPT_DIR/hooks/adversarial_verify.sh" ]]; then
+    if bash "$SCRIPT_DIR/hooks/adversarial_verify.sh" "$SEED" "$ITER_DIR"; then
+      :
+    else
+      _av_rc=$?
+      if [[ "$_av_rc" -eq 3 ]]; then
+        log "ADVERSARIAL_REFUTATION: the T3#7 second-opinion pass refuted the iteration $ITER close — gate_human escalation written; operator review required"
+        dispatch_notification "$SEED" "$STATE_DIR" gate_human "$(jq -nc --arg it "$ITER" '{iteration:$it, reason:"adversarial_refutation"}')" || true
+      fi
+    fi
+  fi
+
   # Phase 4b P4-07: fail_counts ≥3 deterministic guard (additive to FR-013 Planner
   # self-escalation). The Consumer maintains $STATE_DIR/fail_counts.json (per §5.4 /
   # FR-012) — a JSON array of {item_id, count, last_failure_iteration, last_reason}.
