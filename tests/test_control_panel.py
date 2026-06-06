@@ -8,15 +8,35 @@ from pathlib import Path
 
 import pytest
 
+from datetime import datetime, timedelta, timezone
+
 from supervisor.control_panel import (
     EventMetrics,
     read_events,
     render_metrics,
+    run_status_panel,
     summarize_events,
     write_command,
 )
+from supervisor.full_status_surface import FullFleetSnapshot
 
 pytestmark = pytest.mark.unit
+
+
+def _snapshot(as_of: datetime) -> FullFleetSnapshot:
+    return FullFleetSnapshot(
+        rows=(),
+        counts_by_lifecycle_state={},
+        total_attention_debt=0,
+        total_open_work_count=0,
+        total_cumulative_cost_usd=Decimal("0"),
+        running_count=0,
+        stalled_count=0,
+        concurrency_ceiling=2,
+        headroom=2,
+        as_of=as_of,
+        refresh_interval=timedelta(seconds=30),
+    )
 
 
 def test_write_pause_command_is_schema_conformant(tmp_path: Path) -> None:
@@ -89,3 +109,29 @@ def test_render_metrics_is_stringy() -> None:
     out = render_metrics(summarize_events([{"event_type": "x", "cost_usd": "1.0"}]))
     assert "events: 1" in out
     assert "x: 1" in out
+
+
+def test_run_status_panel_once_renders_a_single_snapshot() -> None:
+    t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    emitted: list[str] = []
+    slept: list[float] = []
+    rc = run_status_panel(
+        lambda: _snapshot(t0),
+        once=True,
+        emit=emitted.append,
+        sleep=slept.append,
+        now=lambda: t0,
+    )
+    assert rc == 0
+    assert len(emitted) == 1  # one render
+    assert "Full Fleet Status" in emitted[0]  # the OLB-16 surface header
+    assert slept == []  # `once` never sleeps
+
+
+def test_run_status_panel_rejects_nonpositive_interval() -> None:
+    # The RefreshScheduler bound must be positive (FR-061); the panel surfaces that.
+    t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    with pytest.raises(ValueError, match="interval"):
+        run_status_panel(
+            lambda: _snapshot(t0), once=True, interval_seconds=0.0, emit=lambda _s: None
+        )

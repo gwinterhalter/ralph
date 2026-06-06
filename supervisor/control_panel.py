@@ -17,9 +17,17 @@ OLB-16 surface.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+
+from supervisor.full_status_surface import (
+    FullFleetSnapshot,
+    RefreshScheduler,
+    run_status_loop,
+)
 
 #: The operator command types the orchestrator's command_dispatch consumes.
 COMMAND_TYPES: frozenset[str] = frozenset(
@@ -152,11 +160,43 @@ def render_metrics(metrics: EventMetrics) -> str:
     return "\n".join(lines)
 
 
+def run_status_panel(
+    fetch_snapshot: Callable[[], FullFleetSnapshot],
+    *,
+    interval_seconds: float = 30.0,
+    once: bool = False,
+    emit: Callable[[str], None] = print,
+    sleep: Callable[[float], None] | None = None,
+    now: Callable[[], datetime] | None = None,
+) -> int:
+    """Drive the live status dashboard on the FR-061 bounded refresh cadence.
+
+    Thin wiring over the OLB-16 surface: builds a :class:`RefreshScheduler` and runs
+    :func:`run_status_loop`, which rebuilds via ``fetch_snapshot``, renders, and
+    ``emit``s each snapshot. ``once`` renders a single pass; otherwise it loops until
+    interrupted. ``sleep`` / ``now`` are injected (defaults: ``time.sleep`` + UTC
+    wall-clock) so the cadence is testable without real time. Returns an exit code.
+    """
+    import time as _time
+
+    _sleep = sleep if sleep is not None else _time.sleep
+    _now = now if now is not None else (lambda: datetime.now(timezone.utc))
+    scheduler = RefreshScheduler(interval=timedelta(seconds=interval_seconds))
+    run_status_loop(
+        fetch_snapshot,
+        scheduler=scheduler,
+        emit=emit,
+        sleep=_sleep,
+        now=_now,
+        max_refreshes=1 if once else None,
+    )
+    return 0
+
+
 def _main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI entrypoint
     import argparse
     import os
     import uuid
-    from datetime import datetime, timezone
 
     parser = argparse.ArgumentParser(prog="supervisor.control_panel")
     parser.add_argument(
@@ -170,6 +210,11 @@ def _main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI entry
     sub.add_parser("query", help="write a query_register_state command")
     bump = sub.add_parser("bump", help="write a bump_budget command")
     bump.add_argument("new_cap_usd")
+    status_p = sub.add_parser("status", help="render the live fleet dashboard")
+    status_p.add_argument("--once", action="store_true", help="render a single snapshot and exit")
+    status_p.add_argument(
+        "--interval", type=float, default=30.0, help="bounded refresh interval (seconds)"
+    )
     for p in (parser,):
         p.add_argument("--by", default=os.environ.get("USER", "operator"))
 
@@ -180,6 +225,21 @@ def _main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI entry
         metrics = summarize_events(read_events(state_dir / "logs" / "events.jsonl"))
         print(render_metrics(metrics))
         return 0
+
+    if args.cmd == "status":
+        dsn = os.environ.get("OL_SUPERVISOR_DB_URL")
+        if not dsn:
+            print("control_panel status: OL_SUPERVISOR_DB_URL is not set — cannot read the live fleet.")
+            return 1
+        from supervisor.full_status_surface import build_full_fleet_snapshot
+        from supervisor.registry import Registry
+
+        registry = Registry.from_env()
+
+        def _fetch() -> FullFleetSnapshot:
+            return build_full_fleet_snapshot(registry, now=datetime.now(timezone.utc))
+
+        return run_status_panel(_fetch, interval_seconds=args.interval, once=args.once)
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     cid = f"{args.cmd}_{uuid.uuid4().hex[:12]}"
@@ -202,6 +262,7 @@ __all__ = [
     "COMMAND_TYPES",
     "EventMetrics",
     "write_command",
+    "run_status_panel",
     "summarize_events",
     "read_events",
     "render_metrics",
