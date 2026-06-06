@@ -360,7 +360,13 @@ posture_value="${PERMISSION_POSTURE#--permission-mode }"
 # (bypassPermissions): the classifier is off for that one iteration, but the orchestrator's
 # read-only-paths scan + budget cap + §10.5 post-exec gate remain enforced. Non-checkpoint
 # iterations keep the seed's default permission_posture (auto). No-op when the seed omits the field.
-_plan_shape="$(awk -F': *' '/^shape:/{v=$2; gsub(/[[:space:]"]/,"",v); print v; exit}' "$PLAN_PATH" 2>/dev/null || echo "")"
+# Shape extraction (FUP-0853): real Planner plans format the shape as a markdown bullet
+# `- **shape:** integration_checkpoint` (NOT a YAML-frontmatter `^shape:` line — the prior awk
+# matched only the latter and was a silent no-op against every real plan, so the checkpoint
+# override never engaged). Match either the bullet/bold form OR a bare `shape:` line, take the
+# FIRST hit, and anchor on the literal `shape:` field so decoy lines ("- **shape verification
+# binding:**", "seam-shape probe", "no table re-shape") never match.
+_plan_shape="$(sed -nE 's/^[[:space:]]*(-[[:space:]]+)?\*{0,2}shape:\*{0,2}[[:space:]]*([A-Za-z_]+).*/\2/p' "$PLAN_PATH" 2>/dev/null | head -1)"
 CKPT_POSTURE="$(read_seed_field "$SEED" .checkpoint_permission_posture 2>/dev/null || echo "")"
 [[ "$CKPT_POSTURE" == "null" ]] && CKPT_POSTURE=""
 if [[ "$_plan_shape" == "integration_checkpoint" && -n "$CKPT_POSTURE" ]]; then
