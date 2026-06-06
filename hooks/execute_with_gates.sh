@@ -500,4 +500,46 @@ if [[ "$TERMINAL_REASON" != "completed" ]]; then
   echo "execute_with_gates: irregular_termination classification (terminal_reason=$TERMINAL_REASON)" >&2
   exit 1
 fi
+
+# FUP-0854: report-emission recovery. The Executor intermittently finishes a build/checkpoint
+# (commit+push done, terminal_reason=completed, no deliverable-blocking denials) WITHOUT writing
+# execution_report_${ITER}.md (with its '## Items closed' section) — the Consumer then HALTs
+# `failed_report_missing` (observed iter-0020, iter-0026) and cannot auto-close even though the
+# deliverable is genuinely complete + committed + green. When the report is absent on a
+# clean-completed build/checkpoint shape, do ONE bounded `--resume` follow-up that re-enters the
+# SAME Executor session and asks it to write the report from the work it just finished. The report
+# stays genuinely Executor-authored (NOT a JSON->report synthesis), so the Consumer's
+# no-infer-from-result discipline (Core Principle 6) AND its independent substrate re-verification
+# both remain in force — this only restores the missing deliverable, it cannot manufacture a close.
+# Best-effort and fully guarded: never alters this hook's exit code, fires at most once, requests
+# NO code/git change, and is bounded by --max-budget-usd. No-op for noop shapes, when the report
+# already exists, or when no Executor session_id is available.
+case "$_plan_shape" in
+  component_build|integration_checkpoint|skill_build)
+    _report_path="$ITER_DIR/execution_report_${ITER}.md"
+    if [[ ! -f "$_report_path" ]]; then
+      _ex_session="$(jq -r '.session_id // empty' "$RESULT_JSON" 2>/dev/null || echo "")"
+      mkdir -p "$STATE_DIR/logs"
+      if [[ -n "$_ex_session" ]]; then
+        echo "execute_with_gates: FUP-0854 — terminal_reason=completed but $_report_path absent; one bounded --resume follow-up to have the Executor emit its report (no code/git change requested)" >&2
+        _recovery_prompt="The build and all git steps for iteration ${ITER} are ALREADY complete, committed, tagged, and pushed — do NOT modify, rebuild, re-commit, re-tag, or push anything, and do NOT run any verification again. The only thing missing is the session plan's terminal deliverable: the report file at the absolute path ${_report_path}. Write that file NOW from the work you just completed in this same session, using the Write tool. It MUST contain a top-level '## Items closed' section listing each registry work-item you closed this iteration as a bullet in the form '- OLB-NN — <title>' with its closing evidence (commit SHA, tag, cf-code-review BLOCKER/DRIFT counts, cf-pytest passed/skipped counts). If you closed no item this iteration, write the '## Items closed' heading followed by the single word 'none'. Then output only a one-line confirmation. Make no other changes."
+        # shellcheck disable=SC2086
+        claude --print --output-format json --resume "$_ex_session" \
+               --permission-mode "$posture_value" \
+               $EXECUTOR_MODEL_FLAG \
+               "${EXEC_ALLOW[@]}" \
+               --strict-mcp-config --mcp-config "$MCP_CONFIG" \
+               --max-budget-usd "$PER_CALL_CAP" --max-turns 12 \
+               <<<"$_recovery_prompt" >> "$STATE_DIR/logs/report_recovery.log" 2>&1 || true
+        if [[ -f "$_report_path" ]]; then
+          echo "execute_with_gates: FUP-0854 — recovery SUCCEEDED, $_report_path now present" >&2
+        else
+          echo "execute_with_gates: FUP-0854 — recovery did NOT produce $_report_path; Consumer will classify failed_report_missing as before (no regression)" >&2
+        fi
+      else
+        echo "execute_with_gates: FUP-0854 — $_report_path absent and no session_id in result; skipping recovery (Consumer will HALT failed_report_missing)" >&2
+      fi
+    fi
+    ;;
+esac
 exit 0
