@@ -166,6 +166,36 @@ class Registry:
         ]
         return mapped
 
+    def read_active_runs(self) -> Sequence[RegistryRow]:
+        """Return the ``ralph_runs`` rows currently ``running`` (robustness T1#1).
+
+        The §4.4(1) Reconcile step's input. Each row carries ``project_id`` (the
+        FR-010 soft ``project_slug`` reference, so it keys straight into
+        ``reconcile_run`` / ``set_lifecycle_state``), the ``orchestrator_pid`` to
+        probe for liveness, the ``spawned_at`` progress fallback (coerced to an ISO
+        string), and the last-known ``terminal_cost_usd``. Additive read — NOT part
+        of the ``RegistryPort`` Protocol, so it adds no test-double conformance
+        ripple; the Reconcile wiring consumes it via the injected ``active_runs_source``.
+        """
+        cols = ("project_slug", "run_id", "orchestrator_pid", "spawned_at", "terminal_cost_usd")
+        col_list = ", ".join(cols)
+        # Column names are the fixed allowlist above (never caller input); the status
+        # value is parameterised — not an injection vector (bandit B608 suppressed).
+        sql = f"SELECT {col_list} FROM ralph_runs WHERE status = %s"  # nosec B608
+        with self._conn.cursor() as cur:
+            cur.execute(sql, ("running",))
+            rows = cur.fetchall()
+        mapped: list[RegistryRow] = []
+        for row in rows:
+            record: dict[str, object] = dict(zip(cols, row))
+            record["project_id"] = record.pop("project_slug")
+            spawned = record.get("spawned_at")
+            iso = getattr(spawned, "isoformat", None)
+            if callable(iso):
+                record["spawned_at"] = iso()
+            mapped.append(record)
+        return mapped
+
     # --- Writes (Spec v1.3 §5.2-§5.5; sole write surface, NFR-006) ---
 
     def set_lifecycle_state(self, project_id: str, state: str) -> None:

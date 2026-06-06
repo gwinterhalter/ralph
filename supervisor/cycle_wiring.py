@@ -49,9 +49,11 @@ gate-blocked skip).
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
@@ -74,6 +76,10 @@ from supervisor.attention import (
     plan_notifications,
 )
 from supervisor.candidate_enrichment import default_candidate_enricher
+from supervisor.reconcile import (
+    ReconcileAction,
+    derive_reconcile_actions,
+)
 from supervisor.cost_circuit_breaker import (
     BreakerConfig,
     BreakerTrip,
@@ -199,6 +205,100 @@ def _identity_enricher(row: RegistryRow) -> RegistryRow:
 def _utc_now_iso() -> str:
     """Default admission ``spawned_at`` clock — an ISO-8601 UTC timestamp."""
     return datetime.now().astimezone().isoformat()
+
+
+def _utc_now_dt() -> datetime:
+    """Default Reconcile clock — a tz-aware ``datetime`` (T1#1)."""
+    return datetime.now().astimezone()
+
+
+def _default_pid_alive(pid: int) -> bool:
+    """Default PID-liveness probe for the Reconcile step (T1#1).
+
+    ``os.kill(pid, 0)`` raises ``ProcessLookupError`` for a dead PID and
+    ``PermissionError`` for a live one owned by another user (still alive); any
+    other error is treated conservatively as *alive* so a probe failure never
+    reaps a healthy Run. Production may inject ``psutil.pid_exists`` for a
+    cross-platform-robust probe.
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        return True
+    return True
+
+
+@dataclass(frozen=True)
+class ReconcileConfig:
+    """The §4.4 step-1 Reconcile collaborators (robustness T1#1).
+
+    ``active_runs_source`` returns the ``ralph_runs`` rows currently ``running``
+    (the production wiring passes ``Registry.read_active_runs``; a checkpoint test
+    passes a fixture). ``pid_alive`` probes orchestrator liveness, ``progress_at``
+    yields each run's last-progress instant (default ``spawned_at``; production
+    injects the event-stream ``phase_complete`` lookup), and ``hang_timeout_seconds``
+    is the stall budget (defaults to the seed ``hang_timeout_seconds``). A dead-PID
+    run is reconciled ``failed``; a stalled run ``halted`` + ``paused_gate``. Both
+    release the active-run unique-index slot. ``project_filter`` scopes the pass (a
+    bounded checkpoint reconciles only its own disposable runs).
+    """
+
+    active_runs_source: Callable[[], "Sequence[RegistryRow]"]
+    pid_alive: Callable[[int], bool] = _default_pid_alive
+    hang_timeout_seconds: float = 1800.0
+    progress_at: Callable[["RegistryRow"], "str | None"] = field(
+        default=lambda row: (
+            str(row.get("spawned_at"))
+            if isinstance(row.get("spawned_at"), str) and row.get("spawned_at")
+            else None
+        )
+    )
+    clock: Callable[[], datetime] = _utc_now_dt
+    project_filter: Callable[["RegistryRow"], bool] = field(
+        default_factory=lambda: (lambda row: True)
+    )
+
+
+def run_reconcile_step(
+    registry: "RegistryPort", config: ReconcileConfig
+) -> list[ReconcileAction]:
+    """Compose the §4.4 step-1 Reconcile for one pass (robustness T1#1).
+
+    Reads the active runs, derives the terminal reconciliations owed (dead-PID /
+    stall), and applies each via ``reconcile_run`` (terminal status + ``terminated_at``
+    + the run's last-known cost, releasing the active-run slot) then
+    ``set_lifecycle_state`` (the legal post-``running`` Project state). Returns the
+    actions taken (for the surface / audit). A zero-run or all-healthy pass is a
+    genuine no-op — no registry write.
+    """
+    runs = [row for row in config.active_runs_source() if config.project_filter(row)]
+    now_dt = config.clock()
+    actions = derive_reconcile_actions(
+        runs,
+        pid_alive=config.pid_alive,
+        now=now_dt,
+        hang_timeout_seconds=config.hang_timeout_seconds,
+        progress_at=config.progress_at,
+    )
+    if not actions:
+        return actions
+    terminated_at = now_dt.isoformat()
+    cost_by_project = {
+        str(row.get("project_id")): row.get("terminal_cost_usd") for row in runs
+    }
+    for action in actions:
+        raw_cost = cost_by_project.get(action.project_id)
+        cost = raw_cost if isinstance(raw_cost, Decimal) else Decimal("0")
+        registry.reconcile_run(
+            action.project_id,
+            action.run_status,
+            terminated_at=terminated_at,
+            terminal_cost_usd=cost,
+        )
+        registry.set_lifecycle_state(action.project_id, action.lifecycle_state)
+    return actions
 
 
 @dataclass(frozen=True)

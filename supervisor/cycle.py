@@ -24,10 +24,20 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from supervisor.cycle_wiring import run_attend_step, run_guard_step, run_schedule_step
+from supervisor.cycle_wiring import (
+    run_attend_step,
+    run_guard_step,
+    run_reconcile_step,
+    run_schedule_step,
+)
 
 if TYPE_CHECKING:
-    from supervisor.cycle_wiring import AttendConfig, GuardConfig, ScheduleConfig
+    from supervisor.cycle_wiring import (
+        AttendConfig,
+        GuardConfig,
+        ReconcileConfig,
+        ScheduleConfig,
+    )
     from supervisor.ports import RegistryPort
 
 
@@ -48,6 +58,7 @@ class SupervisionCycle:
         schedule_config: ScheduleConfig | None = None,
         attend_config: AttendConfig | None = None,
         guard_config: GuardConfig | None = None,
+        reconcile_config: ReconcileConfig | None = None,
     ) -> None:
         self._registry = registry
         # OLB-11 / OLB-14 additive collaborators (gates olb11-c3-cycle-wiring-scope /
@@ -58,6 +69,7 @@ class SupervisionCycle:
         self._schedule_config = schedule_config
         self._attend_config = attend_config
         self._guard_config = guard_config
+        self._reconcile_config = reconcile_config
 
     def run_once(self) -> None:
         """Execute one supervision cycle: the six §4.4 steps, in order.
@@ -78,7 +90,16 @@ class SupervisionCycle:
     #     signature; the skeleton invokes them in order and does nothing else. ---
 
     def _reconcile(self) -> None:
-        """§4.4(1) Reconcile — mark stalled/terminated running Runs. No-op stub."""
+        """§4.4(1) Reconcile — mark stalled/terminated running Runs (T1#1).
+
+        When a :class:`~supervisor.cycle_wiring.ReconcileConfig` is configured,
+        reaps orphaned (dead orchestrator PID -> ``failed``) and stalled (past the
+        hang budget -> ``halted`` / ``paused_gate``) running Runs, releasing the
+        active-run unique-index slot so the Project can be re-gated. Unconfigured,
+        it is the OLB-01 no-op.
+        """
+        if self._reconcile_config is not None:
+            run_reconcile_step(self._registry, self._reconcile_config)
 
     def _admit(self) -> None:
         """§4.4(2) Admit — gate Candidates, admit-and-spawn the passers. No-op stub."""
