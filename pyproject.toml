@@ -12,6 +12,23 @@ dependencies = [
     "psycopg[binary]>=3.1",
 ]
 
+[tool.mypy]
+# FUP-0856: the enforced `mypy --strict` gate is PRODUCTION-only — the
+# `supervisor/` package. The `tests/` tree carries pre-existing strict-mode
+# helper-typing debt (untyped fixtures; `run_once()` used in a value context) that
+# is intentionally OUTSIDE the gate; cf-code-review runs `mypy --strict supervisor`.
+# `psycopg` (optional, lazily imported, absent in the hermetic type-check env) and
+# `PyYAML` (no bundled stubs) are import-ignored — the production code casts/guards
+# their use, so the gate stays strict-clean in BOTH the hermetic and the
+# psycopg/PyYAML-present environments.
+python_version = "3.12"
+strict = true
+files = ["supervisor"]
+
+[[tool.mypy.overrides]]
+module = ["psycopg", "psycopg.*", "yaml"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 minversion = "7.0"
 # Collect only the Python supervisor tests; the inherited *.sh framework

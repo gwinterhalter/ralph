@@ -73,6 +73,7 @@ from supervisor.attention import (
     intake_escalation,
     plan_notifications,
 )
+from supervisor.candidate_enrichment import default_candidate_enricher
 from supervisor.cost_circuit_breaker import (
     BreakerConfig,
     BreakerTrip,
@@ -182,13 +183,15 @@ class AttentionStateStore:
 
 
 def _identity_enricher(row: RegistryRow) -> RegistryRow:
-    """Default candidate enricher — returns the row unchanged.
+    """A pass-through candidate enricher — returns the row unchanged.
 
-    The live ``_schedule`` spawn arm needs the §6 admission-input fields
-    (``seed_path`` / ``open_item_count`` / ``writable_paths`` / ``mcp_roots`` /
-    ``read_only_paths``) that ``read_candidates`` does not surface; the caller
-    supplies an enricher that merges them in (the C2 ``_enriched_candidate``
-    pattern). The identity default is only ever used when no spawn occurs.
+    Retained for callers (and checkpoint tests) that pre-enrich the discovered row
+    themselves and want no further derivation. The ``ScheduleConfig`` default is
+    :func:`supervisor.candidate_enrichment.default_candidate_enricher` (FUP-0855),
+    which derives the §6 admission-input fields (``seed_path`` / ``open_item_count``
+    / ``writable_paths`` / ``mcp_roots`` / ``read_only_paths``) from the candidate's
+    seed when ``OL_SUPERVISOR_WORKSPACE_ROOT`` is configured, and falls back to this
+    pass-through behaviour when it is not.
     """
     return row
 
@@ -219,7 +222,7 @@ class ScheduleConfig:
     starvation_threshold: int = STARVATION_ROUND_THRESHOLD
     round_state_store: RoundStateStore = field(default_factory=RoundStateStore)
     open_work_counts: Mapping[str, int] = field(default_factory=dict)
-    candidate_enricher: Callable[[RegistryRow], RegistryRow] = _identity_enricher
+    candidate_enricher: Callable[[RegistryRow], RegistryRow] = default_candidate_enricher
     clock: Callable[[], str] = _utc_now_iso
     # The fleet-scoping predicate applied to both the Candidate and running reads.
     # Defaults to accept-all — the production global fleet (the §3 Concurrency Ceiling

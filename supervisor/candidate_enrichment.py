@@ -1,0 +1,257 @@
+"""FUP-0855: production candidate enrichment for the §6 Admission Gate.
+
+``RegistryPort.read_candidates`` surfaces only the ``projects`` columns
+(Spec v1.3 §5.2). The Admission Gate (:mod:`supervisor.admission`) additionally
+reads seed-derived fields off each candidate row — ``seed_path`` (FR-021 spawn),
+``open_item_count`` (FR-018 non-empty work registry), and the ``writable_paths`` /
+``mcp_roots`` / ``read_only_paths`` / ``design_zone`` Blast-Radius inputs (FR-020).
+The component tests bridged this by hand-enriching the discovered row (the C2/C3
+``_enrich*`` helpers); this module is the **production** seam that derives those
+fields from the candidate's seed on disk, so a live discover -> admit cycle is fed
+a complete row instead of a bare ``projects`` row that admission would refuse.
+
+Conventions (defaults mirror the build's own; all overridable):
+
+* the project directory is ``projects.folder_path`` resolved against the
+  supervisor's workspace root (the ``OL_SUPERVISOR_WORKSPACE_ROOT`` env, parallel
+  to ``OL_SUPERVISOR_DB_URL``); an absolute ``folder_path`` is used as-is;
+* the seed is the newest top-level file matching ``*[Ss]eed*.md`` in that
+  directory (scan-newest — the build's anti-shadow convention);
+* ``open_item_count`` is the number of ``| ... | open |`` rows in the seed's
+  ``work_registry`` (resolved scan-newest under the workspace root) — the same
+  ``Status == open`` count the orchestrator's ``stop_check`` uses;
+* ``writable_paths`` defaults to the project directory; ``mcp_roots`` is derived
+  from the seed's ``mcp_servers`` filesystem mount args; ``read_only_paths`` /
+  ``design_zone`` come straight from the seed.
+
+The enricher is **fault-tolerant**: any field it cannot derive is simply left off
+the row (admission then safely refuses an under-populated candidate rather than
+the cycle crashing). It NEVER raises and NEVER overwrites a key already present on
+the row — so a caller-supplied / pre-enriched row (a checkpoint test, or a future
+DB-backed candidate) is returned unchanged.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+from collections.abc import Callable, Sequence
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from supervisor.ports import RegistryRow
+
+WORKSPACE_ROOT_ENV = "OL_SUPERVISOR_WORKSPACE_ROOT"
+
+_SEED_GLOB = "*[Ss]eed*.md"
+# A work-registry row whose Status column (the 2nd cell) is exactly ``open``.
+_OPEN_ROW = re.compile(r"^\|[^|]+\|\s*open\s*\|", re.MULTILINE)
+# YAML frontmatter = the block between the first two ``---`` fences.
+_FRONTMATTER = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
+
+# The keys this module derives. None is ever written over an existing row value.
+_DERIVED_KEYS = (
+    "seed_path",
+    "initiative_slug",
+    "open_item_count",
+    "writable_paths",
+    "mcp_roots",
+    "read_only_paths",
+    "design_zone",
+)
+
+
+def _newest_match(directory: Path, glob: str) -> Path | None:
+    """Newest top-level file in ``directory`` matching ``glob`` (None if none)."""
+    try:
+        matches = [p for p in directory.glob(glob) if p.is_file()]
+    except OSError:
+        return None
+    if not matches:
+        return None
+    return max(matches, key=lambda p: p.stat().st_mtime)
+
+
+def _parse_frontmatter(seed_text: str) -> dict[str, Any]:
+    """Return the seed's YAML frontmatter as a dict ({} if absent/unparseable)."""
+    match = _FRONTMATTER.search(seed_text)
+    if match is None:
+        return {}
+    try:
+        loaded = yaml.safe_load(match.group(1))
+    except yaml.YAMLError:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _filesystem_mcp_roots(front: dict[str, Any]) -> list[str]:
+    """Path-like args of the ``filesystem`` MCP server (the mounted roots)."""
+    servers = front.get("mcp_servers")
+    if not isinstance(servers, Sequence):
+        return []
+    roots: list[str] = []
+    for server in servers:
+        if not isinstance(server, dict) or server.get("name") != "filesystem":
+            continue
+        for arg in server.get("args", []) or []:
+            text = str(arg)
+            # A path-like arg: a drive root or a separator, not a flag/package spec.
+            if text.startswith(("-", "@")):
+                continue
+            if ":" in text or "\\" in text or "/" in text:
+                roots.append(text)
+    return roots
+
+
+def _open_item_count(front: dict[str, Any], workspace_root: Path) -> int | None:
+    """Count ``Status == open`` rows in the seed's ``work_registry`` (or None).
+
+    ``work_registry`` is a bare filename resolved scan-newest under the workspace
+    root — the orchestrator's resolution. Returns None when it cannot be resolved,
+    so the field is omitted rather than asserting a false zero.
+    """
+    name = front.get("work_registry")
+    if not isinstance(name, str) or not name:
+        return None
+    registry_path = _newest_match(workspace_root, name)
+    if registry_path is None:
+        # Fall back to a recursive scan (the register may live in a subfolder).
+        try:
+            candidates = [
+                p for p in workspace_root.rglob(name) if p.is_file()
+            ]
+        except OSError:
+            return None
+        if not candidates:
+            return None
+        registry_path = max(candidates, key=lambda p: p.stat().st_mtime)
+    try:
+        text = registry_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    return len(_OPEN_ROW.findall(text))
+
+
+def _resolve_workspace_root(workspace_root: str | os.PathLike[str] | None) -> Path | None:
+    root = workspace_root if workspace_root is not None else os.environ.get(
+        WORKSPACE_ROOT_ENV
+    )
+    if not root:
+        return None
+    return Path(str(root))
+
+
+def enrich_candidate_from_seed(
+    row: RegistryRow,
+    *,
+    workspace_root: str | os.PathLike[str] | None = None,
+    seed_glob: str = _SEED_GLOB,
+) -> RegistryRow:
+    """Return ``row`` merged with the seed-derived §6 admission inputs.
+
+    Best-effort and side-effect-free: reads only the candidate's seed + work
+    registry. Returns the row unchanged when the workspace root is unknown, the
+    project directory or seed cannot be located, or a field cannot be derived.
+    An existing key on ``row`` is never overwritten.
+    """
+    root = _resolve_workspace_root(workspace_root)
+    if root is None:
+        return row
+
+    folder = row.get("folder_path")
+    if not isinstance(folder, str) or not folder:
+        return row
+    folder_path = Path(folder)
+    if not folder_path.is_absolute():
+        folder_path = root / folder_path
+
+    seed_file = _newest_match(folder_path, seed_glob)
+    if seed_file is None:
+        return row
+    try:
+        seed_text = seed_file.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return row
+    front = _parse_frontmatter(seed_text)
+
+    derived: dict[str, object] = {"seed_path": str(seed_file)}
+
+    initiative = front.get("initiative")
+    if isinstance(initiative, dict):
+        slug = initiative.get("slug") or initiative.get("project_id")
+        if slug:
+            derived["initiative_slug"] = str(slug)
+
+    read_only = front.get("read_only_paths")
+    if isinstance(read_only, Sequence) and not isinstance(read_only, (str, bytes)):
+        derived["read_only_paths"] = [str(p) for p in read_only]
+
+    writable = front.get("writable_paths")
+    if isinstance(writable, Sequence) and not isinstance(writable, (str, bytes)):
+        derived["writable_paths"] = [str(p) for p in writable]
+    else:
+        # No explicit field — the project's own directory is its writable root.
+        derived["writable_paths"] = [str(folder_path)]
+
+    mcp_roots = front.get("mcp_roots")
+    if isinstance(mcp_roots, Sequence) and not isinstance(mcp_roots, (str, bytes)):
+        derived["mcp_roots"] = [str(p) for p in mcp_roots]
+    else:
+        fs_roots = _filesystem_mcp_roots(front)
+        if fs_roots:
+            derived["mcp_roots"] = fs_roots
+
+    design_zone = front.get("design_zone")
+    if isinstance(design_zone, str) and design_zone:
+        derived["design_zone"] = design_zone
+
+    open_count = _open_item_count(front, root)
+    if open_count is not None:
+        derived["open_item_count"] = open_count
+
+    # Never overwrite a value the row already carries (pre-enriched / caller-set).
+    merged = dict(row)
+    for key, value in derived.items():
+        merged.setdefault(key, value)
+    return merged
+
+
+def make_seed_candidate_enricher(
+    workspace_root: str | os.PathLike[str] | None = None,
+    *,
+    seed_glob: str = _SEED_GLOB,
+) -> Callable[[RegistryRow], RegistryRow]:
+    """Bind a workspace root into a one-arg enricher for ``ScheduleConfig``.
+
+    With ``workspace_root=None`` the returned enricher reads
+    ``OL_SUPERVISOR_WORKSPACE_ROOT`` at call time.
+    """
+
+    def _enricher(row: RegistryRow) -> RegistryRow:
+        return enrich_candidate_from_seed(
+            row, workspace_root=workspace_root, seed_glob=seed_glob
+        )
+
+    return _enricher
+
+
+def default_candidate_enricher(row: RegistryRow) -> RegistryRow:
+    """The ``ScheduleConfig`` default: enrich from the seed when a workspace root is
+    configured (``OL_SUPERVISOR_WORKSPACE_ROOT``), otherwise pass the row through.
+
+    This makes a production cycle that exports the workspace root (alongside
+    ``OL_SUPERVISOR_DB_URL``) get seed enrichment automatically, while a test or a
+    cycle with no configured root — or one that supplies its own enricher — is
+    unaffected.
+    """
+    return enrich_candidate_from_seed(row)
+
+
+__all__ = [
+    "WORKSPACE_ROOT_ENV",
+    "enrich_candidate_from_seed",
+    "make_seed_candidate_enricher",
+    "default_candidate_enricher",
+]

@@ -135,10 +135,12 @@ class Registry:
             )
         # lazy: keeps this module's import and the unit suite DB-free. psycopg is
         # a declared dependency provisioned at the C2/OLB-08 preflight, so it is
-        # absent from the hermetic type-check / unit env.
-        import psycopg  # type: ignore[import-not-found]
+        # absent from the hermetic type-check / unit env (pyproject [tool.mypy]
+        # ignore_missing_imports handles the absent case; the cast keeps the gate
+        # strict-clean in a psycopg-PRESENT env too — FUP-0856).
+        import psycopg
 
-        return cls(psycopg.connect(dsn))
+        return cls(cast("DBConnection", psycopg.connect(dsn)))
 
     # --- Reads (Spec v1.3 §5.2 / §6 FR-015) ---
 
