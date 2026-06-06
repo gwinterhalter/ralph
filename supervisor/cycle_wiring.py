@@ -77,6 +77,7 @@ from supervisor.attention import (
 )
 from supervisor.candidate_enrichment import default_candidate_enricher
 from supervisor.reconcile import (
+    REASON_STALLED,
     ReconcileAction,
     derive_reconcile_actions,
 )
@@ -857,6 +858,40 @@ class LearnConfig:
     report_sink: Callable[["RunAuditReport"], None] = lambda _report: None
 
 
+def stall_signals_from_actions(
+    actions: "Sequence[ReconcileAction]",
+    *,
+    repair_kind: RepairKind = RepairKind.REATTACH_STALLED_RUN,
+    confidence: float = 0.8,
+    in_scope: bool = True,
+    safety_gate_refuses: bool = False,
+) -> dict[str, StallSignal]:
+    """Bridge reconcile-detected STALLS into the Guard step's repair-intake (D3; FR-046).
+
+    Converts each ``REASON_STALLED`` :class:`ReconcileAction` (a live Run past the hang
+    budget, PID still alive) into the :class:`StallSignal` the OLB-13 Repair-Auto-OK
+    policy evaluates — so the Guard step's stall source is fed from live reconcile
+    detection instead of a supplied placeholder. Dead-PID actions are EXCLUDED (those
+    are terminally reaped by the Reconcile step, not repair candidates). The
+    classification fields default to a reversible re-attach posture; production supplies
+    the Answerer-assessed ``confidence`` / ``in_scope`` / ``safety_gate_refuses``. The
+    production wiring sets ``GuardConfig.stall_signals = lambda: stall_signals_from_actions(
+    derive_reconcile_actions(...))``.
+    """
+    signals: dict[str, StallSignal] = {}
+    for action in actions:
+        if action.reason != REASON_STALLED:
+            continue
+        signals[action.project_id] = StallSignal(
+            repair_kind=repair_kind,
+            triggering_anomaly=action.reason,
+            confidence=confidence,
+            in_scope=in_scope,
+            safety_gate_refuses=safety_gate_refuses,
+        )
+    return signals
+
+
 def run_learn_step(config: LearnConfig) -> "RunAuditReport | None":
     """Compose the §4.4 step-6 Learn for one pass (D1; FR-049).
 
@@ -890,4 +925,5 @@ __all__ = [
     "run_guard_step",
     "run_kill_switch_halt",
     "run_learn_step",
+    "stall_signals_from_actions",
 ]
