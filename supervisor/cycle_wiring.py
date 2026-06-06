@@ -627,6 +627,109 @@ def run_guard_step(registry: RegistryPort, config: GuardConfig) -> GuardOutcome:
     )
 
 
+# --- FR-036 fleet-wide Kill-Switch halt (OLB-16 / Spec v1.3 §9) ---------------
+
+
+@dataclass(frozen=True)
+class KillSwitchConfig:
+    """The FR-036 fleet-wide Kill-Switch halt collaborators (Spec v1.3 §9.2).
+
+    Bundles what :func:`run_kill_switch_halt` composes: the closed OLB-06
+    :class:`~supervisor.safety_gates.KillSwitch` state primitive whose engaged flag
+    decides the halt; the persisted :class:`AttentionStateStore` the per-Run
+    safe-stop escalations are intaken into (FR-028/029); the ``reason`` recorded on
+    each stop; the injected ``clock`` (no wall-clock read inside the pure layer); and
+    the ``project_filter`` scoping the running read (accept-all in production; the
+    disposable fleet in a checkpoint). All carry build-time defaults — a config with a
+    disengaged KillSwitch is a complete no-op pass.
+    """
+
+    kill_switch: KillSwitch = field(default_factory=KillSwitch)
+    attention_store: AttentionStateStore = field(default_factory=AttentionStateStore)
+    reason: str = (
+        "fleet-wide Kill-Switch engaged — Dispatch halted and every running Run "
+        "signalled to a safe stop (FR-036)"
+    )
+    clock: Callable[[], datetime] = field(
+        default_factory=lambda: (lambda: datetime.now().astimezone())
+    )
+    project_filter: Callable[[RegistryRow], bool] = field(
+        default_factory=lambda: (lambda row: True)
+    )
+
+
+@dataclass(frozen=True)
+class KillSwitchOutcome:
+    """The result of one :func:`run_kill_switch_halt` pass (Spec v1.3 §9.2 FR-036).
+
+    ``engaged`` is the Kill-Switch state this pass observed; ``dispatch_allowed`` is
+    its negation — ``False`` while engaged means NO further Dispatch is issued
+    fleet-wide (the §9.3 hard floor the OLB-06 :func:`check_dispatch_allowed` enforces
+    at every spawn site). ``stopped_projects`` are the ``running`` Projects signalled
+    to a safe stop this pass (each tripped to ``paused_safety`` — FR-038, never killed);
+    ``escalations`` the top-tier :class:`Escalation`\\ s intaken for them. A disengaged
+    pass returns ``engaged=False`` / ``dispatch_allowed=True`` and stops nothing.
+    """
+
+    engaged: bool
+    dispatch_allowed: bool
+    stopped_projects: tuple[str, ...]
+    escalations: tuple[Escalation, ...]
+
+
+def run_kill_switch_halt(
+    registry: RegistryPort, config: KillSwitchConfig
+) -> KillSwitchOutcome:
+    """Apply the FR-036 fleet-wide Kill-Switch halt for one pass — composes closed primitives.
+
+    When ``config.kill_switch`` is engaged (Spec v1.3 §9.2 FR-036 / §9.3 precedence):
+
+    * **no further Dispatch fleet-wide** — the returned ``dispatch_allowed`` is
+      ``False``; the live spawn block is the OLB-06 :func:`check_dispatch_allowed`
+      already consulted by every admission spawn (an engaged KillSwitch refuses ALL
+      Dispatch, overriding scheduler/admission state), so this halt issues no spawn and
+      needs no new gate; and
+    * **every running Run is signalled to a safe stop** — each ``running`` Project read
+      through the OLB-02 seam (scoped by ``config.project_filter``) is tripped to
+      ``paused_safety`` via the closed OLB-06 :func:`~supervisor.safety_gates.trip_to_paused_safety`
+      write seam + intaken as a top-tier escalation (the same FR-038 trip the Guard
+      uses). The trip is a PAUSE, never a kill and never a terminal ``failed`` status —
+      the §9.2 no-silent-kill invariant (FR-038).
+
+    Disengaged, it is a complete no-op: nothing is read-tripped, ``dispatch_allowed`` is
+    ``True``. Composes the closed OLB-06 KillSwitch + FR-038 trip read-only; adds no new
+    reconcile logic and reshapes no closed seam (gate ``olb16-c5-killswitch-fleet-halt-wiring-scope``
+    = A). Persists the updated attention state; returns the :class:`KillSwitchOutcome`.
+    """
+    if not config.kill_switch.engaged:
+        return KillSwitchOutcome(
+            engaged=False,
+            dispatch_allowed=True,
+            stopped_projects=(),
+            escalations=(),
+        )
+
+    running = [row for row in registry.read_running() if config.project_filter(row)]
+    state = config.attention_store.load()
+    stopped: list[str] = []
+    escalations: list[Escalation] = []
+    for row in running:
+        project_id = str(row["project_id"])
+        state, escalation = _trip_and_intake(
+            registry, state, project_id, config.reason, config.clock()
+        )
+        stopped.append(project_id)
+        escalations.append(escalation)
+    config.attention_store.save(state)
+
+    return KillSwitchOutcome(
+        engaged=True,
+        dispatch_allowed=False,
+        stopped_projects=tuple(stopped),
+        escalations=tuple(escalations),
+    )
+
+
 __all__ = [
     "RoundStateStore",
     "AttentionStateStore",
@@ -635,9 +738,12 @@ __all__ = [
     "GuardConfig",
     "GuardOutcome",
     "StallSignal",
+    "KillSwitchConfig",
+    "KillSwitchOutcome",
     "to_project_records",
     "to_attention_escalation",
     "run_schedule_step",
     "run_attend_step",
     "run_guard_step",
+    "run_kill_switch_halt",
 ]
