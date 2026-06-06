@@ -480,7 +480,8 @@ while true; do
       command_dispatch_run "$STATE_DIR" "$SEED" "$ITER"
       if [[ -f "$STATE_DIR/pause_requested.flag" ]]; then
         log "PAUSE_REQUESTED: operator pause honored at iter $ITER boundary (post-failure path)"
-        dispatch_notification "$SEED" "$STATE_DIR" pause_honored "$(jq -nc --arg it "$ITER" '{iteration:$it, reason:"command_dispatch_pause_post_failure"}')"
+        # FUP-0858: fire-and-forget — backgrounded so the clean pause exit isn't gated on it.
+        dispatch_notification "$SEED" "$STATE_DIR" pause_honored "$(jq -nc --arg it "$ITER" '{iteration:$it, reason:"command_dispatch_pause_post_failure"}')" &
         rm -f "$STATE_DIR/pause_requested.flag"
         emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "0" "orchestrator" "run_end" "" "" "" \
           "$(jq -nc --arg it "$ITER" '{terminal_reason:"paused", iteration:$it}')"
@@ -601,7 +602,9 @@ while true; do
   # Pause-honor: command_dispatch may have written pause_requested.flag; clean-exit if so.
   if [[ -f "$STATE_DIR/pause_requested.flag" ]]; then
     log "PAUSE_REQUESTED: operator pause command honored at iter $ITER boundary"
-    dispatch_notification "$SEED" "$STATE_DIR" pause_honored "$(jq -nc --arg it "$ITER" '{iteration:$it, reason:"command_dispatch_pause"}')"
+    # FUP-0858: fire-and-forget — the pause notification (now hard-bounded in lib/notify.sh)
+    # is backgrounded so the clean pause exit is never gated on a notification side-effect.
+    dispatch_notification "$SEED" "$STATE_DIR" pause_honored "$(jq -nc --arg it "$ITER" '{iteration:$it, reason:"command_dispatch_pause"}')" &
     rm -f "$STATE_DIR/pause_requested.flag"
     # FUP-0833(c): pair this invocation's run_start (C.1) with a run_end on the pause exit too.
     emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "0" "orchestrator" "run_end" "" "" "" \

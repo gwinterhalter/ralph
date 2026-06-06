@@ -239,7 +239,11 @@ ORCH_ERR="$TMPROOT/orch.stderr"
 # MSYS_NO_PATHCONV=1; the export inside the orchestrator hits the WinGet jq before path conversion.
 # Unsetting at the launch boundary keeps the test runnable on Windows+WinGet jq without affecting
 # the real orchestrator's behaviour under operator's Unix-jq environment.
-PATH="$TMPBIN:$PATH" CLAUDE_SKILLS_DIR="$RALPH_ROOT" \
+# FUP-0858: the sandbox seed declares no notification_channel, so dispatch_notification
+# falls through to the win11toast fallback, whose un-timeboxed desktop toast() blocked the
+# pause-exit path (the prior intermittent hang). RALPH_DISABLE_DESKTOP_TOAST=1 exercises the
+# new headless guard so the test never touches the desktop/network — fully deterministic.
+RALPH_DISABLE_DESKTOP_TOAST=1 PATH="$TMPBIN:$PATH" CLAUDE_SKILLS_DIR="$RALPH_ROOT" \
   bash -c "unset MSYS_NO_PATHCONV; exec bash \"$TMP_RALPH/orchestrator.sh\" \"$TMPSEED\"" \
   > "$ORCH_OUT" 2> "$ORCH_ERR"
 ORCH_RC=$?
