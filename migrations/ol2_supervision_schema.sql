@@ -31,21 +31,27 @@ ALTER TABLE projects ADD COLUMN IF NOT EXISTS heartbeat_workstream_id text;
 -- ---------------------------------------------------------------------------
 -- §5.4 Run Registry — `ralph_runs` (FR-009..014). seed_path is NOT NULL (the
 -- iter-0017 production shape preflight asserts); status CHECK = registry.RUN_STATUSES.
+-- The column shape MIRRORS the canonical code_factory_db ralph_runs table EXACTLY so a
+-- fresh apply == canonical: `run_id` is `uuid` with a `gen_random_uuid()` server default
+-- (the supervisor's record_run inserts WITHOUT a run_id and relies on this default — a
+-- `text PK` with no default would reject those inserts); `metadata` is NOT NULL DEFAULT
+-- '{}'; `spawned_at` is nullable (admission supplies it explicitly); `created_at` exists.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS ralph_runs (
-    run_id            text PRIMARY KEY,
+    run_id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),  -- canonical: uuid + server default
     project_slug      text NOT NULL,                       -- FR-010 soft reference
     seed_path         text NOT NULL,                       -- FR-021 spawn-row completeness (NOT NULL)
     orchestrator_pid  integer,                             -- FR-009 post-spawn pid
-    orchestrator_start_time text,                           -- FR-013 recorded half (pid-reuse disambiguation)
     status            text NOT NULL DEFAULT 'running'
                           CHECK (status IN ('running', 'complete', 'budget_exhausted', 'failed', 'halted')),
     idempotency_key   text,
-    spawned_at        timestamptz NOT NULL DEFAULT now(),
+    spawned_at        timestamptz,                         -- canonical: nullable (admission supplies it)
     terminated_at     timestamptz,                         -- FR-011 terminal reconcile
     terminal_cost_usd numeric(10, 4),                      -- FR-014 exact-decimal money (NFR-007)
-    metadata          jsonb,
-    updated_at        timestamptz NOT NULL DEFAULT now()
+    metadata          jsonb NOT NULL DEFAULT '{}'::jsonb,
+    created_at        timestamptz NOT NULL DEFAULT now(),
+    updated_at        timestamptz NOT NULL DEFAULT now(),
+    orchestrator_start_time text                            -- FR-013 recorded half (pid-reuse disambiguation)
 );
 
 -- FR-013 recorded half: persist the orchestrator's OS start-time at spawn so a
