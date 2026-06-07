@@ -99,6 +99,7 @@ def build_production_cycle(
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     hang_timeout_seconds: float = DEFAULT_HANG_TIMEOUT_SECONDS,
     completion_probe: Callable[[RegistryRow], "RunCompletion | None"] = lambda _row: None,
+    admitted_source: Callable[[], Sequence[RegistryRow]] = lambda: [],
 ) -> SupervisionCycle:
     """Assemble a :class:`SupervisionCycle` wired with all five §4.4 step configs.
 
@@ -151,6 +152,7 @@ def build_production_cycle(
             list(registry.read_running()), workspace_root=workspace_root
         ),
         candidate_enricher=make_seed_candidate_enricher(workspace_root),
+        admitted_source=admitted_source,
     )
 
     return SupervisionCycle(
@@ -253,6 +255,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
             workspace_root=workspace_root,
             events_log_path=events_log,
             completion_probe=_completion_of,
+            admitted_source=registry.read_admitted,
         )
         cycle.run_once()
         cycles += 1

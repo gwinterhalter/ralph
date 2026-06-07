@@ -347,6 +347,11 @@ class ScheduleConfig:
     open_work_counts: Mapping[str, int] = field(default_factory=dict)
     candidate_enricher: Callable[[RegistryRow], RegistryRow] = default_candidate_enricher
     clock: Callable[[], str] = _utc_now_iso
+    #: FR-019 ceiling-held Projects to re-feed the scheduler (production wires
+    #: ``Registry.read_admitted``). Default empty → a candidate-only cycle is unchanged.
+    #: Without this an ``admitted`` Project is dispatched-eligible per the scheduler but
+    #: never appears in its input, so a held Project would be orphaned.
+    admitted_source: Callable[[], "Sequence[RegistryRow]"] = field(default=lambda: [])
     # The fleet-scoping predicate applied to both the Candidate and running reads.
     # Defaults to accept-all — the production global fleet (the §3 Concurrency Ceiling
     # is fleet-wide). A bounded checkpoint supplies a predicate so it operates over,
@@ -445,12 +450,17 @@ def run_schedule_step(
     precedence that the safety floor, not the scheduler, is the hard ceiling.
     """
     candidates = [row for row in registry.read_candidates() if config.project_filter(row)]
+    admitted = [row for row in config.admitted_source() if config.project_filter(row)]
     running = [row for row in registry.read_running() if config.project_filter(row)]
     running_count = len(running)
     in_flight = [str(row["project_id"]) for row in running]
 
+    # Candidates AND ceiling-held `admitted` Projects are both spawn-eligible (FR-019
+    # hold → spawn once headroom frees); both are presented to the scheduler as
+    # ADMITTED records and are the lookup pool for the spawn step.
+    dispatchable = [*candidates, *admitted]
     records = to_project_records(
-        candidates, running, open_work_counts=config.open_work_counts
+        dispatchable, running, open_work_counts=config.open_work_counts
     )
     decision = select_next_dispatch(
         records,
@@ -467,7 +477,7 @@ def run_schedule_step(
     config.round_state_store.save(decision.round_state)
 
     if decision.dispatch_kind == "spawn":
-        _spawn_selected(registry, config, decision.project_id, candidates, running_count)
+        _spawn_selected(registry, config, decision.project_id, dispatchable, running_count)
     # The resume arm (a `running` Project's next iteration) is OLB-16; it is never
     # selected here because every `running` Project is FR-027 in-flight-excluded.
     return decision

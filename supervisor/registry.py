@@ -152,6 +152,17 @@ class Registry:
         """Return Projects in the ``running`` lifecycle state (Spec §5.3/§5.4)."""
         return self._select_projects_by_state("running")
 
+    def read_admitted(self) -> Sequence[RegistryRow]:
+        """Return Projects in the ``admitted`` lifecycle state (Spec §6 FR-019).
+
+        The FR-019 ceiling-hold parks a Candidate in ``admitted`` (spawn deferred until
+        headroom). These must be fed back to the Schedule step so a held Project is
+        dispatched once a slot frees — otherwise an admitted Project is orphaned (it is
+        in neither ``read_candidates`` nor ``read_running``). Additive read, NOT part of
+        the ``RegistryPort`` Protocol (no test-double ripple); the Schedule wiring
+        consumes it via the injected ``admitted_source``."""
+        return self._select_projects_by_state("admitted")
+
     def _select_projects_by_state(self, lifecycle_state: str) -> list[RegistryRow]:
         # Column list is the fixed internal PROJECT_COLUMNS allowlist (never caller
         # input); the lifecycle_state value is parameterised, so this is not an
