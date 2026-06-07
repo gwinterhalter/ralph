@@ -17,6 +17,7 @@ scope (the spawned Run confines itself to its own seed thereafter).
 """
 from __future__ import annotations
 
+import os
 import shutil
 
 # subprocess launches the framework orchestrator.sh with constant args, not caller
@@ -32,6 +33,35 @@ from supervisor.safety_gates import BlastRadiusScope
 #: the spawned seed so the §14 teardown (``supervisor.run_lifecycle``) can read the
 #: §13.1 INITIATIVE_COMPLETE terminal signal off the spawned Run's own output.
 SPAWN_LOG_SUFFIX = ".spawn.out"
+
+
+def _detach_kwargs() -> dict[str, object]:
+    """Platform flags that fully decouple the spawned orchestrator from the
+    supervisor's console / controlling terminal.
+
+    Two correctness reasons, not cosmetics:
+
+    * **The orchestrator must outlive the supervisor cycle.** It runs its own
+      role-call loop to terminal and is re-attached on a later cycle (FR-013); a
+      child tied to the supervisor's session would be torn down the moment the
+      supervisor process exits, defeating re-attach.
+    * **No console-close cascade back to the parent.** A Windows child left on the
+      parent's console delivers a CTRL_CLOSE/shutdown event to every process
+      sharing that console when the supervisor exits — which can close the
+      operator's own terminal. Detaching prevents that blast-back.
+
+    On Windows ``DETACHED_PROCESS`` gives the child no console at all (stdio is
+    already redirected to a file / DEVNULL) and ``CREATE_NEW_PROCESS_GROUP``
+    isolates it from parent Ctrl signals. On POSIX ``start_new_session=True``
+    (``setsid``) moves it into its own session/process group, off the controlling
+    terminal.
+    """
+    if os.name == "nt":
+        flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(
+            subprocess, "CREATE_NEW_PROCESS_GROUP", 0
+        )
+        return {"creationflags": flags}
+    return {"start_new_session": True}
 
 
 @dataclass(frozen=True)
@@ -116,6 +146,10 @@ class OrchestratorSpawnPort:
                     stdout=stream,
                     stderr=subprocess.STDOUT,
                     stdin=subprocess.DEVNULL,
+                    # Detach from the supervisor's console/session: the orchestrator
+                    # must survive the supervisor exiting (FR-013 re-attach) and must
+                    # not blast a console-close event back to the parent terminal.
+                    **_detach_kwargs(),
                 )
         except OSError as exc:
             return SpawnResult(ok=False, detail=f"orchestrator spawn failed: {exc!r}")
