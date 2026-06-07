@@ -222,7 +222,18 @@ def _main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI entry
     state_dir = Path(args.state_dir)
 
     if args.cmd == "metrics":
-        metrics = summarize_events(read_events(state_dir / "logs" / "events.jsonl"))
+        events_path = state_dir / "logs" / "events.jsonl"
+        if not events_path.is_file():
+            # The most common "metrics looks broken" cause: --state-dir defaulted to
+            # '.' (no event log here) instead of the orchestrator's state dir. Say so,
+            # rather than silently printing all-zero metrics.
+            print(f"control_panel metrics: no event log at {events_path}")
+            print(
+                "  point --state-dir at the orchestrator state dir (the one holding "
+                "logs/events.jsonl) or set OL_SUPERVISOR_STATE_DIR."
+            )
+            return 1
+        metrics = summarize_events(read_events(events_path))
         print(render_metrics(metrics))
         return 0
 
@@ -249,6 +260,11 @@ def _main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI entry
         state_dir, ctype, command_id=cid, issued_by=args.by, issued_at=now, new_cap_usd=cap
     )
     print(f"wrote {ctype} command: {path}")
+    print(
+        "  queued for the orchestrator's command_dispatch — it is consumed on the "
+        "running orchestrator's next cycle (asynchronous; not a synchronous read). "
+        "With no orchestrator running for this state dir, it simply waits."
+    )
     return 0
 
 
