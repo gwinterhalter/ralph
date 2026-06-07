@@ -41,7 +41,26 @@ DEFAULT_HANG_TIMEOUT_SECONDS = 1800.0
 
 
 def _pid_alive(pid: int) -> bool:
-    """OS pid-liveness probe (ProcessLookupError = dead; PermissionError = alive)."""
+    """OS pid-liveness probe — **read-only on every platform**.
+
+    On POSIX ``os.kill(pid, 0)`` is a no-op existence check (ProcessLookupError =
+    dead; PermissionError = alive, owned by another user). On Windows it is NOT a
+    probe: Python's ``os.kill`` has no signal-0 special case and calls
+    ``TerminateProcess(handle, 0)`` — which would **kill a live pid** (and raise
+    ``OSError`` for a dead one, misreporting it as alive). So Windows uses a
+    non-destructive existence check (:func:`psutil.pid_exists`) instead. Without this,
+    the Reconcile liveness pass would terminate the very orchestrators it is meant to
+    observe — and any unrelated process that reused a stale ``ralph_runs`` pid.
+    """
+    if os.name == "nt":
+        try:
+            import psutil
+        except ImportError:
+            # Cannot safely probe without terminating; never reap on Windows when the
+            # probe is unavailable (the INITIATIVE_COMPLETE completion probe still
+            # classifies clean exits; a crash just isn't auto-reaped until psutil is present).
+            return True
+        return bool(psutil.pid_exists(pid))
     try:
         os.kill(pid, 0)
     except ProcessLookupError:

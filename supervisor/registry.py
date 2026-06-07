@@ -184,11 +184,22 @@ class Registry:
         FR-010 soft ``project_slug`` reference, so it keys straight into
         ``reconcile_run`` / ``set_lifecycle_state``), the ``orchestrator_pid`` to
         probe for liveness, the ``spawned_at`` progress fallback (coerced to an ISO
-        string), and the last-known ``terminal_cost_usd``. Additive read — NOT part
-        of the ``RegistryPort`` Protocol, so it adds no test-double conformance
-        ripple; the Reconcile wiring consumes it via the injected ``active_runs_source``.
+        string), the last-known ``terminal_cost_usd``, and ``seed_path`` — the
+        production completion probe resolves the run's terminal artifacts (the §13.1
+        INITIATIVE_COMPLETE signal + spend ledger) off the seed's sibling ``state/``
+        dir, so a clean completion is reconciled ``complete`` rather than mis-reaped as
+        a stall. Additive read — NOT part of the ``RegistryPort`` Protocol, so it adds
+        no test-double conformance ripple; the Reconcile wiring consumes it via the
+        injected ``active_runs_source``.
         """
-        cols = ("project_slug", "run_id", "orchestrator_pid", "spawned_at", "terminal_cost_usd")
+        cols = (
+            "project_slug",
+            "run_id",
+            "orchestrator_pid",
+            "spawned_at",
+            "terminal_cost_usd",
+            "seed_path",
+        )
         col_list = ", ".join(cols)
         # Column names are the fixed allowlist above (never caller input); the status
         # value is parameterised — not an injection vector (bandit B608 suppressed).

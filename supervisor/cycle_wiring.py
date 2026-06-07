@@ -222,14 +222,23 @@ def _utc_now_dt() -> datetime:
 
 
 def _default_pid_alive(pid: int) -> bool:
-    """Default PID-liveness probe for the Reconcile step (T1#1).
+    """Default PID-liveness probe for the Reconcile step (T1#1) — **read-only**.
 
-    ``os.kill(pid, 0)`` raises ``ProcessLookupError`` for a dead PID and
+    On POSIX ``os.kill(pid, 0)`` raises ``ProcessLookupError`` for a dead PID and
     ``PermissionError`` for a live one owned by another user (still alive); any
-    other error is treated conservatively as *alive* so a probe failure never
-    reaps a healthy Run. Production may inject ``psutil.pid_exists`` for a
-    cross-platform-robust probe.
+    other error is treated conservatively as *alive* so a probe failure never reaps
+    a healthy Run. On Windows ``os.kill(pid, 0)`` is NOT a probe — it calls
+    ``TerminateProcess(handle, 0)`` and would kill a live pid — so a non-destructive
+    :func:`psutil.pid_exists` check is used there (production wiring injects the same
+    via ``__main__._pid_alive``; this default mirrors it so the un-injected path is
+    safe too).
     """
+    if os.name == "nt":
+        try:
+            import psutil
+        except ImportError:
+            return True  # never reap on Windows when we cannot safely probe
+        return bool(psutil.pid_exists(pid))
     try:
         os.kill(pid, 0)
     except ProcessLookupError:

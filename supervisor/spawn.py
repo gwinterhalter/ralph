@@ -35,9 +35,9 @@ from supervisor.safety_gates import BlastRadiusScope
 SPAWN_LOG_SUFFIX = ".spawn.out"
 
 
-def _detach_kwargs() -> dict[str, object]:
-    """Platform flags that fully decouple the spawned orchestrator from the
-    supervisor's console / controlling terminal.
+def _detach_flags() -> tuple[int, bool]:
+    """``(creationflags, start_new_session)`` that fully decouple the spawned
+    orchestrator from the supervisor's console / controlling terminal.
 
     Two correctness reasons, not cosmetics:
 
@@ -52,16 +52,18 @@ def _detach_kwargs() -> dict[str, object]:
 
     On Windows ``DETACHED_PROCESS`` gives the child no console at all (stdio is
     already redirected to a file / DEVNULL) and ``CREATE_NEW_PROCESS_GROUP``
-    isolates it from parent Ctrl signals. On POSIX ``start_new_session=True``
-    (``setsid``) moves it into its own session/process group, off the controlling
-    terminal.
+    isolates it from parent Ctrl signals; ``start_new_session`` is inert there. On
+    POSIX ``start_new_session=True`` (``setsid``) moves it into its own
+    session/process group, off the controlling terminal; ``creationflags`` is 0.
+    Both kwargs are valid on every platform (the inert one defaults harmlessly), so
+    the spawn passes both explicitly.
     """
     if os.name == "nt":
         flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(
             subprocess, "CREATE_NEW_PROCESS_GROUP", 0
         )
-        return {"creationflags": flags}
-    return {"start_new_session": True}
+        return flags, False
+    return 0, True
 
 
 @dataclass(frozen=True)
@@ -135,6 +137,10 @@ class OrchestratorSpawnPort:
         # Capture stdout+stderr to a file co-located with the seed. The parent's
         # handle is closed once Popen has dup'd it to the child (the `with` block);
         # the child keeps writing through its own inherited descriptor.
+        # Detach from the supervisor's console/session: the orchestrator must survive
+        # the supervisor exiting (FR-013 re-attach) and must not blast a console-close
+        # event back to the parent terminal.
+        creationflags, new_session = _detach_flags()
         try:
             with stdout_path.open("wb") as stream:
                 # shell=False; argv is framework-internal constants (bash +
@@ -146,10 +152,8 @@ class OrchestratorSpawnPort:
                     stdout=stream,
                     stderr=subprocess.STDOUT,
                     stdin=subprocess.DEVNULL,
-                    # Detach from the supervisor's console/session: the orchestrator
-                    # must survive the supervisor exiting (FR-013 re-attach) and must
-                    # not blast a console-close event back to the parent terminal.
-                    **_detach_kwargs(),
+                    creationflags=creationflags,
+                    start_new_session=new_session,
                 )
         except OSError as exc:
             return SpawnResult(ok=False, detail=f"orchestrator spawn failed: {exc!r}")
