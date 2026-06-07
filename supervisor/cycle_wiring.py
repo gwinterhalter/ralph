@@ -49,7 +49,6 @@ gate-blocked skip).
 from __future__ import annotations
 
 import json
-import os
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -76,6 +75,7 @@ from supervisor.attention import (
     plan_notifications,
 )
 from supervisor.candidate_enrichment import default_candidate_enricher
+from supervisor.pid_probe import pid_alive
 from supervisor.reconcile import (
     REASON_STALLED,
     RUN_COMPLETE,
@@ -221,31 +221,11 @@ def _utc_now_dt() -> datetime:
     return datetime.now().astimezone()
 
 
-def _default_pid_alive(pid: int) -> bool:
-    """Default PID-liveness probe for the Reconcile step (T1#1) — **read-only**.
-
-    On POSIX ``os.kill(pid, 0)`` raises ``ProcessLookupError`` for a dead PID and
-    ``PermissionError`` for a live one owned by another user (still alive); any
-    other error is treated conservatively as *alive* so a probe failure never reaps
-    a healthy Run. On Windows ``os.kill(pid, 0)`` is NOT a probe — it calls
-    ``TerminateProcess(handle, 0)`` and would kill a live pid — so a non-destructive
-    :func:`psutil.pid_exists` check is used there (production wiring injects the same
-    via ``__main__._pid_alive``; this default mirrors it so the un-injected path is
-    safe too).
-    """
-    if os.name == "nt":
-        try:
-            import psutil
-        except ImportError:
-            return True  # never reap on Windows when we cannot safely probe
-        return bool(psutil.pid_exists(pid))
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except (PermissionError, OSError):
-        return True
-    return True
+# Default PID-liveness probe for the Reconcile step (T1#1): the single shared,
+# read-only `pid_probe.pid_alive` (does NOT use os.kill on Windows, where that would
+# terminate the pid). Production injects the same via `__main__._pid_alive`; this
+# default mirrors it so the un-injected path is safe too.
+_default_pid_alive = pid_alive
 
 
 @dataclass(frozen=True)

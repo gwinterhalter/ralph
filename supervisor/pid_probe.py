@@ -12,6 +12,36 @@ and the hermetic unit suite — needs no driver and no live process.
 """
 from __future__ import annotations
 
+import os
+
+
+def pid_alive(pid: int) -> bool:
+    """OS pid-liveness probe — **read-only on every platform**.
+
+    On POSIX ``os.kill(pid, 0)`` is a no-op existence check (ProcessLookupError =
+    dead; PermissionError = alive, owned by another user). On Windows it is NOT a
+    probe: Python's ``os.kill`` has no signal-0 special case and calls
+    ``TerminateProcess(handle, 0)`` — which would **kill a live pid** (and raise
+    ``OSError`` for a dead one, misreporting it alive). So Windows uses a
+    non-destructive :func:`psutil.pid_exists` check; if psutil is unavailable it
+    returns ``True`` (never reap on Windows when the probe can't run safely — the
+    INITIATIVE_COMPLETE completion probe still classifies clean exits). The single
+    source of the liveness probe for the Reconcile + re-attach passes.
+    """
+    if os.name == "nt":
+        try:
+            import psutil
+        except ImportError:
+            return True
+        return bool(psutil.pid_exists(pid))
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        return True
+    return True
+
 
 def format_pid_start_time(create_time: float) -> str:
     """Canonical string form of an OS process create-time (epoch seconds).
@@ -40,4 +70,4 @@ def probe_pid_start_time(pid: int) -> str | None:
         return None
 
 
-__all__ = ["format_pid_start_time", "probe_pid_start_time"]
+__all__ = ["pid_alive", "format_pid_start_time", "probe_pid_start_time"]

@@ -24,6 +24,7 @@ import pytest
 
 from supervisor import __main__ as svmain
 from supervisor import cycle_wiring
+from supervisor import pid_probe
 from supervisor.registry import Registry
 
 pytestmark = pytest.mark.unit
@@ -97,26 +98,25 @@ def test_read_active_runs_pid_start_time_none_when_metadata_absent() -> None:
     assert rows[0]["pid_start_time"] is None
 
 
-# --- (2) PID-liveness probes are read-only on Windows ----------------------------
+# --- (2) PID-liveness probe is read-only on Windows ------------------------------
+# The probe is the single shared `pid_probe.pid_alive`; __main__._pid_alive and
+# cycle_wiring._default_pid_alive are aliases of it (consolidated — no duplication).
 
 
-@pytest.mark.parametrize(
-    "probe",
-    [svmain._pid_alive, cycle_wiring._default_pid_alive],
-    ids=["main._pid_alive", "cycle_wiring._default_pid_alive"],
-)
-def test_pid_alive_on_windows_never_calls_os_kill(
-    probe, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_probe_is_a_single_shared_function() -> None:
+    assert svmain._pid_alive is pid_probe.pid_alive
+    assert cycle_wiring._default_pid_alive is pid_probe.pid_alive
+
+
+def test_pid_alive_on_windows_never_calls_os_kill(monkeypatch: pytest.MonkeyPatch) -> None:
     """On the Windows branch the probe must consult psutil.pid_exists and must NOT
     reach ``os.kill`` (which on Windows would TerminateProcess the pid)."""
-    module = svmain if probe is svmain._pid_alive else cycle_wiring
-    monkeypatch.setattr(module.os, "name", "nt")
+    monkeypatch.setattr(pid_probe.os, "name", "nt")
 
     def _boom(*_a: object, **_k: object) -> None:  # pragma: no cover - must not run
         raise AssertionError("os.kill must never be called on the Windows branch")
 
-    monkeypatch.setattr(module.os, "kill", _boom)
+    monkeypatch.setattr(pid_probe.os, "kill", _boom)
 
     seen: list[int] = []
 
@@ -126,17 +126,17 @@ def test_pid_alive_on_windows_never_calls_os_kill(
 
     monkeypatch.setattr(psutil, "pid_exists", _exists)
 
-    assert probe(4242) is True
-    assert probe(9999) is False
+    assert pid_probe.pid_alive(4242) is True
+    assert pid_probe.pid_alive(9999) is False
     assert seen == [4242, 9999]  # the read-only check ran for both
 
 
 def test_pid_alive_on_posix_uses_os_kill(monkeypatch: pytest.MonkeyPatch) -> None:
     """On POSIX the dead-pid path returns False via ProcessLookupError (unchanged)."""
-    monkeypatch.setattr(svmain.os, "name", "posix")
+    monkeypatch.setattr(pid_probe.os, "name", "posix")
 
     def _kill(_pid: int, _sig: int) -> None:
         raise ProcessLookupError
 
-    monkeypatch.setattr(svmain.os, "kill", _kill)
-    assert svmain._pid_alive(12345) is False
+    monkeypatch.setattr(pid_probe.os, "kill", _kill)
+    assert pid_probe.pid_alive(12345) is False

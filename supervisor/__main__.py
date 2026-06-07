@@ -32,7 +32,7 @@ from supervisor.cycle_wiring import (
     stall_signals_from_actions,
 )
 from supervisor.heartbeats import read_heartbeats_from_log
-from supervisor.pid_probe import format_pid_start_time, probe_pid_start_time
+from supervisor.pid_probe import format_pid_start_time, pid_alive, probe_pid_start_time
 from supervisor.ports import RegistryPort, RegistryRow
 from supervisor.reattach import derive_reattach_decisions
 from supervisor.reconcile import RunCompletion, derive_reconcile_actions
@@ -41,34 +41,11 @@ from supervisor.reconcile import RunCompletion, derive_reconcile_actions
 DEFAULT_HANG_TIMEOUT_SECONDS = 1800.0
 
 
-def _pid_alive(pid: int) -> bool:
-    """OS pid-liveness probe — **read-only on every platform**.
-
-    On POSIX ``os.kill(pid, 0)`` is a no-op existence check (ProcessLookupError =
-    dead; PermissionError = alive, owned by another user). On Windows it is NOT a
-    probe: Python's ``os.kill`` has no signal-0 special case and calls
-    ``TerminateProcess(handle, 0)`` — which would **kill a live pid** (and raise
-    ``OSError`` for a dead one, misreporting it as alive). So Windows uses a
-    non-destructive existence check (:func:`psutil.pid_exists`) instead. Without this,
-    the Reconcile liveness pass would terminate the very orchestrators it is meant to
-    observe — and any unrelated process that reused a stale ``ralph_runs`` pid.
-    """
-    if os.name == "nt":
-        try:
-            import psutil
-        except ImportError:
-            # Cannot safely probe without terminating; never reap on Windows when the
-            # probe is unavailable (the INITIATIVE_COMPLETE completion probe still
-            # classifies clean exits; a crash just isn't auto-reaped until psutil is present).
-            return True
-        return bool(psutil.pid_exists(pid))
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except (PermissionError, OSError):
-        return True
-    return True
+# The OS pid-liveness probe lives in the shared `pid_probe` module (read-only on every
+# platform — critically, it does NOT use os.kill on Windows, where that would terminate
+# the pid). `_pid_alive` keeps its private name as the probe wired into the Reconcile +
+# re-attach passes; `cycle_wiring` consumes the same single source.
+_pid_alive = pid_alive
 
 
 # The FR-013 start-time formatter + live probe live in the shared `pid_probe` module
