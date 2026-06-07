@@ -34,6 +34,7 @@ from supervisor.cycle_wiring import (
 from supervisor.heartbeats import read_heartbeats_from_log
 from supervisor.pid_probe import format_pid_start_time, pid_alive, probe_pid_start_time
 from supervisor.ports import RegistryPort, RegistryRow
+from supervisor.safety_gates import KillSwitch
 from supervisor.reattach import derive_reattach_decisions
 from supervisor.reconcile import RunCompletion, derive_reconcile_actions
 
@@ -71,6 +72,7 @@ def build_production_cycle(
     completion_probe: Callable[[RegistryRow], "RunCompletion | None"] = lambda _row: None,
     admitted_source: Callable[[], Sequence[RegistryRow]] = lambda: [],
     record_start_time: Callable[[str, str], None] | None = None,
+    kill_switch: KillSwitch | None = None,
 ) -> SupervisionCycle:
     """Assemble a :class:`SupervisionCycle` wired with all five §4.4 step configs.
 
@@ -125,6 +127,9 @@ def build_production_cycle(
         candidate_enricher=make_seed_candidate_enricher(workspace_root),
         admitted_source=admitted_source,
         record_start_time=record_start_time,
+        # FR-036: an engaged Kill-Switch makes admission refuse ALL new dispatch this
+        # cycle (running Runs untouched). Default disengaged → normal scheduling.
+        kill_switch=kill_switch if kill_switch is not None else KillSwitch(),
     )
 
     return SupervisionCycle(
@@ -194,6 +199,25 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
     events_log = os.path.join(state_dir, "logs", "events.jsonl")
     from pathlib import Path
 
+    # Operator drill knobs (all OFF/neutral by default — absent => unchanged behaviour):
+    #  * hang-timeout override for the stall drill;
+    #  * a KILL_SWITCH sentinel file in the state dir (FR-036 — refuse new dispatch);
+    #  * an opt-in emergency cumulative-spend ceiling (T3#6 backstop — kill on breach).
+    from decimal import Decimal
+
+    from supervisor.spend_backstop import EmergencySpendConfig, evaluate_spend_backstop
+
+    hang_timeout = float(
+        os.environ.get("OL_SUPERVISOR_HANG_TIMEOUT_SECONDS") or DEFAULT_HANG_TIMEOUT_SECONDS
+    )
+    kill_switch_sentinel = Path(state_dir) / "KILL_SWITCH"
+    _ceiling = os.environ.get("OL_SUPERVISOR_EMERGENCY_SPEND_CEILING_USD")
+    spend_config = (
+        EmergencySpendConfig(ceiling_usd=Decimal(_ceiling))
+        if _ceiling
+        else EmergencySpendConfig()
+    )
+
     seed_validator = SeedReviewValidator()
     spawn_port = OrchestratorSpawnPort(
         Path(os.environ.get("OL_SUPERVISOR_ORCHESTRATOR", "orchestrator.sh"))
@@ -219,6 +243,21 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
 
     cycles = 0
     while args.max_cycles is None or cycles < args.max_cycles:
+        # Re-read the kill-switch each cycle: the operator can engage/disengage between
+        # cycles by creating/removing the sentinel; the spend backstop can also engage it.
+        kill_switch = KillSwitch(engaged=kill_switch_sentinel.exists())
+        if spend_config.ceiling_usd is not None:
+            escalation = evaluate_spend_backstop(
+                registry.read_cumulative_spend_usd(), spend_config, project_id="*fleet*"
+            )
+            if escalation is not None:
+                kill_switch.engage()
+                print(
+                    f"supervisor: SPEND BACKSTOP — {escalation.reason} "
+                    f"(killed={escalation.killed}); engaging kill-switch."
+                )
+        if kill_switch.engaged:
+            print("supervisor: KILL-SWITCH ENGAGED — refusing new dispatch this cycle.")
         cycle = build_production_cycle(
             registry,
             seed_validator=seed_validator,
@@ -226,9 +265,11 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
             active_runs_source=registry.read_active_runs,
             workspace_root=workspace_root,
             events_log_path=events_log,
+            hang_timeout_seconds=hang_timeout,
             completion_probe=_completion_of,
             admitted_source=registry.read_admitted,
             record_start_time=registry.record_pid_start_time,
+            kill_switch=kill_switch,
         )
         cycle.run_once()
         cycles += 1

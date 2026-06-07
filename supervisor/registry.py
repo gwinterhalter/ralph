@@ -228,6 +228,20 @@ class Registry:
             mapped.append(record)
         return mapped
 
+    def read_cumulative_spend_usd(self) -> Decimal:
+        """Fleet cumulative spend — the sum of recorded ``terminal_cost_usd`` across all
+        Runs (FR-014), as an exact ``Decimal`` (NFR-007).
+
+        The figure the opt-in emergency spend backstop (T3#6) compares to its hard
+        ceiling. Concrete-only — NOT on the ``RegistryPort`` Protocol (no test-double
+        ripple); the production ``main`` loop consumes it when the backstop is configured.
+        ``COALESCE(..., 0)`` so an empty table reads ``Decimal('0')``, never NULL."""
+        with self._conn.cursor() as cur:
+            cur.execute("SELECT COALESCE(SUM(terminal_cost_usd), 0) FROM ralph_runs")
+            row = cur.fetchone()
+        raw = row[0] if row else 0
+        return raw if isinstance(raw, Decimal) else Decimal(str(raw))
+
     # --- Writes (Spec v1.3 §5.2-§5.5; sole write surface, NFR-006) ---
 
     def set_lifecycle_state(self, project_id: str, state: str) -> None:

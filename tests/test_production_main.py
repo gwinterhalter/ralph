@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
 
 from supervisor.__main__ import build_production_cycle
+from supervisor.registry import Registry
+from supervisor.safety_gates import KillSwitch
 
 pytestmark = pytest.mark.unit
 
@@ -79,3 +83,78 @@ def test_run_once_is_idempotent_across_passes() -> None:
     for _ in range(3):
         cycle.run_once()  # type: ignore[attr-defined]
     assert reg.writes == []
+
+
+# --- operator drill knobs: kill-switch + hang-timeout thread into the configs ---
+
+
+def test_kill_switch_is_threaded_into_schedule_config() -> None:
+    """FR-036: an engaged Kill-Switch passed to the assembly reaches the Schedule step's
+    admission gate (which refuses all new dispatch while engaged)."""
+    cycle = build_production_cycle(
+        _FakeRegistry(),  # type: ignore[arg-type]
+        seed_validator=_FakeSeedValidator(),
+        spawn_port=_FakeSpawnPort(),
+        active_runs_source=lambda: [],
+        kill_switch=KillSwitch(engaged=True),
+    )
+    assert cycle._schedule_config.kill_switch.engaged is True  # type: ignore[attr-defined]
+
+
+def test_default_kill_switch_is_disengaged() -> None:
+    _reg, cycle = _build()
+    assert cycle._schedule_config.kill_switch.engaged is False  # type: ignore[attr-defined]
+
+
+def test_hang_timeout_is_threaded_into_reconcile_config() -> None:
+    """The stall-drill knob: the supplied hang budget reaches the Reconcile config."""
+    cycle = build_production_cycle(
+        _FakeRegistry(),  # type: ignore[arg-type]
+        seed_validator=_FakeSeedValidator(),
+        spawn_port=_FakeSpawnPort(),
+        active_runs_source=lambda: [],
+        hang_timeout_seconds=60.0,
+    )
+    assert cycle._reconcile_config.hang_timeout_seconds == 60.0  # type: ignore[attr-defined]
+
+
+# --- Registry.read_cumulative_spend_usd (the spend-backstop input) ---
+
+
+class _SumCursor:
+    def __init__(self, result: object) -> None:
+        self._result = result
+
+    def __enter__(self) -> _SumCursor:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def execute(self, query: str, params: object = ()) -> None:
+        self.query = query
+
+    def fetchone(self) -> object:
+        return self._result
+
+
+class _SumConn:
+    def __init__(self, result: object) -> None:
+        self._result = result
+
+    def cursor(self) -> _SumCursor:
+        return _SumCursor(self._result)
+
+    def commit(self) -> None:  # pragma: no cover - reads don't commit
+        pass
+
+
+def test_read_cumulative_spend_sums_as_decimal() -> None:
+    got = Registry(_SumConn((Decimal("7.5781"),))).read_cumulative_spend_usd()
+    assert got == Decimal("7.5781")
+    assert isinstance(got, Decimal)
+
+
+def test_read_cumulative_spend_empty_table_is_zero() -> None:
+    # COALESCE(SUM, 0) → 0 on an empty table; coerced to an exact Decimal.
+    assert Registry(_SumConn((0,))).read_cumulative_spend_usd() == Decimal("0")
