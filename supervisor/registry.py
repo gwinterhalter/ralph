@@ -215,8 +215,15 @@ class Registry:
         Reads the Project's current state and rejects an illegal §5.3 transition
         BEFORE the UPDATE — so an illegal transition never reaches the database
         (FR-008 enforced at the write boundary).
+
+        Re-asserting the state the Project is already in is an idempotent no-op (not a
+        transition), so the FR-019 admit path is safely re-entrant: spawning a Project
+        the ceiling-hold already moved to ``admitted`` re-issues ``set(admitted)`` and
+        must not trip the (correctly illegal) ``admitted -> admitted`` guard.
         """
         current = self._current_lifecycle_state(project_id)
+        if current == state:
+            return
         transitions.assert_legal_transition(current, state)
         self._execute_write(
             "UPDATE projects SET lifecycle_state = %s, updated_at = now() "

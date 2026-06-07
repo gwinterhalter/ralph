@@ -202,6 +202,23 @@ def test_set_lifecycle_state_rejects_illegal_transition_before_any_write(
 
 
 @pytest.mark.unit
+def test_set_lifecycle_state_same_state_is_idempotent_noop(
+    registry: Registry, conn: _FakeConn
+) -> None:
+    """Re-asserting the state a Project is already in is a no-op (not an illegal
+    self-transition): no UPDATE, no commit, no raise. This is what makes the FR-019
+    admit path re-entrant — spawning a ceiling-held (already ``admitted``) Project
+    re-issues ``set(admitted)`` and must not trip the ``admitted -> admitted`` guard."""
+    conn.fetchone_result = ("admitted",)  # already admitted
+
+    registry.set_lifecycle_state("p1", "admitted")  # must not raise
+
+    statements = conn.statements()
+    assert not any(s.startswith("UPDATE PROJECTS") for s in statements)
+    assert conn.commits == 0
+
+
+@pytest.mark.unit
 def test_record_run_inserts_with_soft_project_slug_reference(
     registry: Registry, conn: _FakeConn
 ) -> None:
