@@ -276,7 +276,7 @@ def lists_read_only_corpus(scope: BlastRadiusScope) -> bool:
     if scope.design_zone:
         required.append(scope.design_zone)
     return all(
-        any(_is_ancestor_or_equal(declared, target) for declared in scope.read_only_paths)
+        any(_covers_read_only_target(declared, target) for declared in scope.read_only_paths)
         for target in required
     )
 
@@ -347,6 +347,27 @@ def _is_ancestor_or_equal(ancestor: str, target: str) -> bool:
     na = _normalize(ancestor)
     nt = _normalize(target)
     return nt == na or nt.startswith(na + "/")
+
+
+def _covers_read_only_target(declared: str, target: str) -> bool:
+    """True iff a declared read-only path satisfies a required FR-034 ``target``.
+
+    Two ways to cover it:
+
+    * the declared path is an ancestor-or-equal of the target — a broader read-only
+      root that contains it (the original rule); OR
+    * the declared path *resolves to* the target — the normalized target is a
+      path-suffix of the declared path. This accepts the canonical ABSOLUTE corpus
+      path (e.g. ``K:\\...\\Project_Docs_Current\\``) against the location-agnostic
+      bare token the spec constant uses (``Project_Docs_Current\\``). Real seeds
+      declare the corpus by its absolute path, so without this every real Blast-Radius
+      Scope would spuriously fail the read-only invariant.
+    """
+    if _is_ancestor_or_equal(declared, target):
+        return True
+    nd = _normalize(declared)
+    nt = _normalize(target)
+    return nd == nt or nd.endswith("/" + nt)
 
 
 def _paths_overlap(a: str, b: str) -> bool:

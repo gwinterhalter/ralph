@@ -17,9 +17,10 @@ Conventions (defaults mirror the build's own; all overridable):
   to ``OL_SUPERVISOR_DB_URL``); an absolute ``folder_path`` is used as-is;
 * the seed is the newest top-level file matching ``*[Ss]eed*.md`` in that
   directory (scan-newest — the build's anti-shadow convention);
-* ``open_item_count`` is the number of ``| ... | open |`` rows in the seed's
-  ``work_registry`` (resolved scan-newest under the workspace root) — the same
-  ``Status == open`` count the orchestrator's ``stop_check`` uses;
+* ``open_item_count`` is the number of OPEN gap rows in the seed's ``work_registry``
+  (resolved scan-newest under the workspace root) — open per the ``registry_zero_open``
+  contract (Priority cell ``**P1/P2/P3**``; ``**RESOLVED**`` = closed), the same count
+  the orchestrator's ``stop_check`` uses;
 * ``writable_paths`` defaults to the project directory; ``mcp_roots`` is derived
   from the seed's ``mcp_servers`` filesystem mount args; ``read_only_paths`` /
   ``design_zone`` come straight from the seed.
@@ -42,12 +43,23 @@ from typing import Any
 import yaml
 
 from supervisor.ports import RegistryRow
+from supervisor.safety_gates import READ_ONLY_CORPUS_PATH
 
 WORKSPACE_ROOT_ENV = "OL_SUPERVISOR_WORKSPACE_ROOT"
 
+#: Normalized tail of the FR-034 corpus token, for matching a seed's read-only paths.
+_CORPUS_TAIL = READ_ONLY_CORPUS_PATH.replace("\\", "/").rstrip("/").lower()
+
 _SEED_GLOB = "*[Ss]eed*.md"
-# A work-registry row whose Status column (the 2nd cell) is exactly ``open``.
-_OPEN_ROW = re.compile(r"^\|[^|]+\|\s*open\s*\|", re.MULTILINE)
+# An OPEN gap's Priority CELL, per the ``registry_zero_open`` contract the
+# orchestrator's stop_check uses: a table cell whose content begins with the bold
+# priority token ``**P1**``/``**P2**``/``**P3**`` (matched as ``|`` + whitespace +
+# token, so it pins the Priority *cell* — not a prose ``**P1**`` mention inside a
+# change-history / summary cell, which would over-count). A gap is CLOSED once its
+# Priority cell begins ``**RESOLVED**``. This matches the real Ralph register format
+# (the Priority-cell convention); the old status-in-column-2 heuristic counted 0
+# against every real register, silently blocking live admission (FR-018).
+_OPEN_ROW = re.compile(r"\|\s*\*\*P[123]\*\*", re.MULTILINE)
 # YAML frontmatter = the block between the first two ``---`` fences.
 _FRONTMATTER = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 
@@ -64,10 +76,15 @@ _DERIVED_KEYS = (
 
 
 def _newest_match(directory: Path, glob: str) -> Path | None:
-    """Newest top-level file in ``directory`` matching ``glob`` (None if none)."""
+    """Newest top-level file in ``directory`` matching ``glob`` (None if none).
+
+    Never raises: a non-relative / malformed pattern (``Path.glob`` rejects an
+    absolute pattern with ``NotImplementedError``/``ValueError``) degrades to None
+    rather than propagating — preserving the module's fault-tolerance contract.
+    """
     try:
         matches = [p for p in directory.glob(glob) if p.is_file()]
-    except OSError:
+    except (OSError, ValueError, NotImplementedError):
         return None
     if not matches:
         return None
@@ -106,7 +123,8 @@ def _filesystem_mcp_roots(front: dict[str, Any]) -> list[str]:
 
 
 def _open_item_count(front: dict[str, Any], workspace_root: Path) -> int | None:
-    """Count ``Status == open`` rows in the seed's ``work_registry`` (or None).
+    """Count OPEN gap rows (``registry_zero_open`` contract) in the seed's
+    ``work_registry`` (or None).
 
     ``work_registry`` is a bare filename resolved scan-newest under the workspace
     root — the orchestrator's resolution. Returns None when it cannot be resolved,
@@ -115,18 +133,27 @@ def _open_item_count(front: dict[str, Any], workspace_root: Path) -> int | None:
     name = front.get("work_registry")
     if not isinstance(name, str) or not name:
         return None
-    registry_path = _newest_match(workspace_root, name)
+    # ``work_registry`` may be a bare filename (resolved scan-newest under the
+    # workspace root — the orchestrator's convention) OR an absolute path: real
+    # seeds commonly declare the full path (e.g. the oltest_c2 harness). Resolve an
+    # absolute value directly; only glob/rglob a bare name, because ``Path.glob``
+    # raises on a non-relative pattern.
+    name_path = Path(name)
+    if name_path.is_absolute():
+        registry_path: Path | None = name_path if name_path.is_file() else None
+    else:
+        registry_path = _newest_match(workspace_root, name)
+        if registry_path is None:
+            # Fall back to a recursive scan (the register may live in a subfolder).
+            try:
+                candidates = [p for p in workspace_root.rglob(name) if p.is_file()]
+            except (OSError, ValueError, NotImplementedError):
+                return None
+            if not candidates:
+                return None
+            registry_path = max(candidates, key=lambda p: p.stat().st_mtime)
     if registry_path is None:
-        # Fall back to a recursive scan (the register may live in a subfolder).
-        try:
-            candidates = [
-                p for p in workspace_root.rglob(name) if p.is_file()
-            ]
-        except OSError:
-            return None
-        if not candidates:
-            return None
-        registry_path = max(candidates, key=lambda p: p.stat().st_mtime)
+        return None
     try:
         text = registry_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -186,7 +213,19 @@ def enrich_candidate_from_seed(
 
     read_only = front.get("read_only_paths")
     if isinstance(read_only, Sequence) and not isinstance(read_only, (str, bytes)):
-        derived["read_only_paths"] = [str(p) for p in read_only]
+        ro_paths = [str(p) for p in read_only]
+        # FR-034: real seeds declare the corpus by its ABSOLUTE path, but the OLB-06
+        # gate constant is the location-agnostic bare token. When a declared path
+        # resolves to the corpus dir, also surface the bare token so admission's
+        # read-only invariant recognizes it however the seed spelled the path. (The
+        # gate matcher accepts the absolute form too — this is the belt-and-suspenders
+        # half so the canonical token is present regardless of route.)
+        resolves_to_corpus = any(
+            p.replace("\\", "/").rstrip("/").lower().endswith(_CORPUS_TAIL) for p in ro_paths
+        )
+        if resolves_to_corpus and READ_ONLY_CORPUS_PATH not in ro_paths:
+            ro_paths.append(READ_ONLY_CORPUS_PATH)
+        derived["read_only_paths"] = ro_paths
 
     writable = front.get("writable_paths")
     if isinstance(writable, Sequence) and not isinstance(writable, (str, bytes)):
@@ -227,7 +266,8 @@ def open_work_counts_for(
     """Live FR-024 open-work-count source: project_id -> open registry rows (D2).
 
     For each project row (carrying ``project_id`` + ``folder_path``), locates its
-    seed and counts the ``Status == open`` rows in that seed's ``work_registry`` —
+    seed and counts the OPEN gap rows (``registry_zero_open``) in that seed's
+    ``work_registry`` —
     the same count the orchestrator's ``stop_check`` uses. The result feeds the
     scheduler's FR-024 closest-to-done bias and the §13 status surface, replacing the
     supplied-parameter placeholder with a live read. Fault-tolerant: a project whose

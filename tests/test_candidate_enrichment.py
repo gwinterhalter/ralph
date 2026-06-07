@@ -51,13 +51,15 @@ mcp_servers:
 
 _REGISTER = """# Demo Register
 
-| ID | Status | Title |
-|---|---|---|
-| D-01 | closed | done |
-| D-02 | open | a |
-| D-03 | open | b |
-| D-04 | closed | done |
-| D-05 | open | c |
+Per the registry_zero_open contract: open Priority `**P1/P2/P3**`, closed `**RESOLVED**`.
+
+| ID | Name | Gap | Priority | Prereq | Resolution |
+|---|---|---|---|---|---|
+| D-01 | a | x | **RESOLVED** (2026-06-06, done) | - | - |
+| D-02 | b | x | **P1** | - | - |
+| D-03 | c | x | **P2** | - | - |
+| D-04 | d | x | **RESOLVED** (2026-06-06, done) | - | - |
+| D-05 | e | x | **P3** | - | - |
 """
 
 
@@ -102,6 +104,78 @@ def test_absolute_folder_path_is_used_as_is(tmp_path: Path) -> None:
 
     assert out["seed_path"].endswith("Demo_Project_Seed_v1.0.md")
     assert out["open_item_count"] == 3
+
+
+def test_absolute_work_registry_is_resolved_directly(tmp_path: Path) -> None:
+    """Regression: a seed declaring an ABSOLUTE ``work_registry`` (as the real
+    oltest_c2 harness does) must be read directly — NOT passed to ``Path.glob`` as a
+    pattern, which raises ``NotImplementedError`` on a non-relative pattern and
+    previously crashed the whole schedule step / ``python -m supervisor``."""
+    ws, proj = _make_workspace(tmp_path)
+    abs_register = (ws / "Demo_Register.md")
+    seed = _SEED.replace(
+        'work_registry: "Demo_Register.md"',
+        f'work_registry: "{abs_register.as_posix()}"',
+    )
+    (proj / "Demo_Project_Seed_v1.0.md").write_text(
+        seed.format(ws=ws.as_posix(), proj=proj.as_posix()), encoding="utf-8"
+    )
+    row = {"project_id": "demo_proj", "folder_path": str(proj)}
+
+    out = enrich_candidate_from_seed(row, workspace_root=ws)  # must not raise
+
+    assert out["open_item_count"] == 3  # D-02 / D-03 / D-05, read from the absolute path
+
+
+def test_absolute_work_registry_missing_file_omits_count(tmp_path: Path) -> None:
+    """An absolute ``work_registry`` pointing at a non-existent file degrades to
+    'omit open_item_count' (never raises), so admission safely refuses rather than
+    the cycle crashing."""
+    ws, proj = _make_workspace(tmp_path)
+    seed = _SEED.replace(
+        'work_registry: "Demo_Register.md"',
+        f'work_registry: "{(ws / "Nope.md").as_posix()}"',
+    )
+    (proj / "Demo_Project_Seed_v1.0.md").write_text(
+        seed.format(ws=ws.as_posix(), proj=proj.as_posix()), encoding="utf-8"
+    )
+    out = enrich_candidate_from_seed(
+        {"project_id": "demo_proj", "folder_path": str(proj)}, workspace_root=ws
+    )
+    assert "open_item_count" not in out  # omitted, not a false 0; no crash
+
+
+def test_absolute_corpus_path_also_surfaces_bare_token(tmp_path: Path) -> None:
+    """FR-034: when a seed declares the corpus by its absolute path, the enricher also
+    surfaces the canonical bare READ_ONLY_CORPUS_PATH token so admission's gate
+    recognizes it — the belt-and-suspenders half of the assembled-run FR-034 fix."""
+    from supervisor.safety_gates import READ_ONLY_CORPUS_PATH
+
+    ws, proj = _make_workspace(tmp_path)
+    # Forward-slash absolute form (YAML-safe; the enricher normalizes separators).
+    abs_corpus = "K:/Claude Code Factory/V3/Project_Docs/Project_Docs_Current/"
+    seed = _SEED.replace('- "{ws}/corpus"', f'- "{abs_corpus}"')
+    (proj / "Demo_Project_Seed_v1.0.md").write_text(
+        seed.format(ws=ws.as_posix(), proj=proj.as_posix()), encoding="utf-8"
+    )
+    out = enrich_candidate_from_seed(
+        {"project_id": "demo_proj", "folder_path": str(proj)}, workspace_root=ws
+    )
+    assert abs_corpus in out["read_only_paths"]
+    assert READ_ONLY_CORPUS_PATH in out["read_only_paths"]  # bare token added
+
+
+def test_non_corpus_read_only_path_is_left_alone(tmp_path: Path) -> None:
+    """A read-only path that does NOT resolve to the corpus dir is not augmented."""
+    from supervisor.safety_gates import READ_ONLY_CORPUS_PATH
+
+    ws, proj = _make_workspace(tmp_path)
+    out = enrich_candidate_from_seed(
+        {"project_id": "demo_proj", "folder_path": str(proj)}, workspace_root=ws
+    )
+    # _SEED declares read_only "{ws}/corpus" (not the corpus dir) -> token NOT added.
+    assert out["read_only_paths"] == [f"{ws.as_posix()}/corpus"]
+    assert READ_ONLY_CORPUS_PATH not in out["read_only_paths"]
 
 
 def test_passthrough_when_no_workspace_root(tmp_path: Path) -> None:

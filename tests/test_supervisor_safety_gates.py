@@ -201,6 +201,24 @@ def test_fr034_declared_design_zone_must_also_be_read_only() -> None:
     assert lists_read_only_corpus(both)
 
 
+@pytest.mark.unit
+def test_fr034_absolute_corpus_path_satisfies_invariant() -> None:
+    """FR-034: a scope listing the corpus by its canonical ABSOLUTE path satisfies the
+    invariant against the location-agnostic bare token. Real seeds declare the absolute
+    path; without this every real Blast-Radius Scope would spuriously fail the gate (the
+    composition bug the assembled `python -m supervisor` run surfaced)."""
+    abs_corpus = _scope(
+        read_only=("K:/Claude Code Factory/V3/Project_Docs/Project_Docs_Current/",)
+    )
+    assert lists_read_only_corpus(abs_corpus)
+    assert check_dispatch_allowed(
+        blast_radius_scope=abs_corpus, running_count=0, kill_switch=KillSwitch()
+    )
+    # A path NOT resolving to the corpus dir still fails (no over-broad acceptance).
+    unrelated = _scope(read_only=("K:/some/other/dir/",))
+    assert not lists_read_only_corpus(unrelated)
+
+
 # --- (b) FR-037 concurrency-ceiling refusal ---
 
 
