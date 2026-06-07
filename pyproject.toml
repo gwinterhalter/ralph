@@ -10,6 +10,12 @@ dependencies = [
     # Registry.from_env so the import of registry.py and the whole unit suite stay
     # hermetic/DB-free; the live branch is wired only at C2/OLB-08.
     "psycopg[binary]>=3.1",
+    # FR-013 re-attach: the live OS process start-time probe
+    # (supervisor.__main__._pid_start_time) reads psutil.Process(pid).create_time()
+    # to disambiguate a recycled pid from our original orchestrator. Imported lazily
+    # inside the probe with a graceful ImportError -> None fallback, so the hermetic
+    # unit suite stays runnable without it; required in deployment for FR-013 to fire.
+    "psutil>=5.9",
 ]
 
 [tool.mypy]
@@ -26,7 +32,7 @@ strict = true
 files = ["supervisor"]
 
 [[tool.mypy.overrides]]
-module = ["psycopg", "psycopg.*", "yaml"]
+module = ["psycopg", "psycopg.*", "yaml", "psutil"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

@@ -51,6 +51,42 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+def format_pid_start_time(create_time: float) -> str:
+    """Canonical string form of an OS process create-time (epoch seconds).
+
+    Shared by the live probe (:func:`_pid_start_time`) and — when spawn-time
+    start-time recording lands — the recorder, so the FR-013 ``recorded == live``
+    comparison can never drift on formatting. Fixed 6-dp so platform float-repr
+    differences don't produce a spurious pid-reuse verdict.
+    """
+    return f"{create_time:.6f}"
+
+
+def _pid_start_time(pid: int) -> str | None:
+    """Live OS process start-time probe for FR-013 pid-reuse disambiguation.
+
+    Returns the canonical start-time string for ``pid`` via :mod:`psutil`, or ``None``
+    when psutil is unavailable or the process is gone — :func:`derive_reattach_decisions`
+    treats ``None`` as 'cannot disambiguate' and conservatively re-attaches (it never
+    reaps a live pid it cannot positively disprove is ours). Replaces the former
+    ``lambda _pid: None`` stub so the live half of FR-013 is real in deployment.
+
+    NOTE: full pid-reuse disambiguation also requires the *recorded* half — the
+    orchestrator's start-time persisted at spawn (run-row ``orchestrator_start_time``,
+    written with :func:`format_pid_start_time`). Until that lands the ``recorded`` side
+    is ``None`` and every live pid re-attaches conservatively; this probe makes the
+    comparison correct the moment recording is added.
+    """
+    try:
+        import psutil
+    except ImportError:
+        return None
+    try:
+        return format_pid_start_time(psutil.Process(pid).create_time())
+    except psutil.Error:
+        return None
+
+
 def build_production_cycle(
     registry: RegistryPort,
     *,
@@ -171,7 +207,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
     decisions = derive_reattach_decisions(
         list(registry.read_active_runs()),
         pid_alive=_pid_alive,
-        pid_start_time=lambda _pid: None,  # OS start-time probe: inject psutil in deployment
+        pid_start_time=_pid_start_time,  # FR-013 live OS start-time probe (psutil)
     )
     reattached = sum(1 for d in decisions if d.is_reattach)
     orphaned = sum(1 for d in decisions if d.is_orphan)
