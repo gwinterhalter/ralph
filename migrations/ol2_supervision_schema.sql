@@ -12,28 +12,21 @@
 -- ---------------------------------------------------------------------------
 -- §5.2 Project Registry — additive supervision columns (FR-001..008)
 -- ---------------------------------------------------------------------------
+-- FR-008 lifecycle-state legality (the transitions.py STATES set) is declared inline on
+-- the column — matching the canonical code_factory_db migration
+-- (20260604090303_extend_projects_supervision_columns). The CHECK is added only with the
+-- column (ADD COLUMN IF NOT EXISTS), so replay over a pre-existing column no-ops cleanly.
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS folder_path            text;
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS lifecycle_state        text NOT NULL DEFAULT 'candidate';
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS lifecycle_state        text NOT NULL DEFAULT 'candidate'
+    CHECK (lifecycle_state IN (
+        'candidate', 'admitted', 'running',
+        'paused_gate', 'paused_budget', 'paused_safety',
+        'complete', 'failed'
+    ));
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS priority               integer NOT NULL DEFAULT 100;
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS blast_radius_scope     text;
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS blast_radius_scope     jsonb;
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS attention_debt         integer NOT NULL DEFAULT 0;
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS heartbeat_workstream_id text;
-
--- FR-008 lifecycle-state legality (the transitions.py STATES set). Guarded add so the
--- migration is idempotent (ADD CONSTRAINT has no IF NOT EXISTS form pre-PG15).
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint WHERE conname = 'projects_lifecycle_state_check'
-    ) THEN
-        ALTER TABLE projects ADD CONSTRAINT projects_lifecycle_state_check
-            CHECK (lifecycle_state IN (
-                'candidate', 'admitted', 'running',
-                'paused_gate', 'paused_budget', 'paused_safety',
-                'complete', 'failed'
-            ));
-    END IF;
-END $$;
 
 -- ---------------------------------------------------------------------------
 -- §5.4 Run Registry — `ralph_runs` (FR-009..014). seed_path is NOT NULL (the
