@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS ralph_runs (
     project_slug      text NOT NULL,                       -- FR-010 soft reference
     seed_path         text NOT NULL,                       -- FR-021 spawn-row completeness (NOT NULL)
     orchestrator_pid  integer,                             -- FR-009 post-spawn pid
+    orchestrator_start_time text,                           -- FR-013 recorded half (pid-reuse disambiguation)
     status            text NOT NULL DEFAULT 'running'
                           CHECK (status IN ('running', 'complete', 'budget_exhausted', 'failed', 'halted')),
     idempotency_key   text,
@@ -46,6 +47,12 @@ CREATE TABLE IF NOT EXISTS ralph_runs (
     metadata          jsonb,
     updated_at        timestamptz NOT NULL DEFAULT now()
 );
+
+-- FR-013 recorded half: persist the orchestrator's OS start-time at spawn so a
+-- Supervisor restart can disambiguate pid reuse on re-attach. Additive ALTER (not just
+-- the CREATE body above) so an already-existing ralph_runs table gains the column on
+-- replay. Idempotent (IF NOT EXISTS).
+ALTER TABLE ralph_runs ADD COLUMN IF NOT EXISTS orchestrator_start_time text;
 
 -- FR-007 active-run uniqueness: at most one running Run per Project (the partial
 -- unique index the scheduler/admission ceiling + dispatch-idempotency gate on).

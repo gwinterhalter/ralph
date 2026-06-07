@@ -63,16 +63,21 @@ class _Conn:
 
 def test_read_active_runs_selects_and_maps_seed_path() -> None:
     conn = _Conn()
-    # row order must match the SELECT column tuple the implementation issues.
+    # row order must match the SELECT column tuple the implementation issues:
+    # (project_slug, run_id, orchestrator_pid, orchestrator_start_time, spawned_at,
+    #  terminal_cost_usd, seed_path)
     conn.fetchall_result = [
-        ("oltest_d1", "r1", 4242, None, None, "K:/work/oltest_d1/Seed.md"),
+        ("oltest_d1", "r1", 4242, "1717000000.000000", None, None, "K:/work/oltest_d1/Seed.md"),
     ]
     rows = Registry(conn).read_active_runs()
 
     sql, params = conn.executed[0]
     assert "seed_path" in sql, "read_active_runs must SELECT seed_path"
+    assert "orchestrator_start_time" in sql, "read_active_runs must SELECT orchestrator_start_time (FR-013)"
     assert params == ("running",)
     assert rows[0]["seed_path"] == "K:/work/oltest_d1/Seed.md"
+    # FR-013 recorded start-time surfaced for the re-attach disambiguation.
+    assert rows[0]["orchestrator_start_time"] == "1717000000.000000"
     # FR-010 soft reference is surfaced as project_id for the reconcile keying.
     assert rows[0]["project_id"] == "oltest_d1"
 

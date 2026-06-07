@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from supervisor.admission import SpawnResult
+from supervisor.pid_probe import probe_pid_start_time
 from supervisor.safety_gates import BlastRadiusScope
 
 #: Suffix for the captured orchestrator stdout+stderr stream, written alongside
@@ -160,7 +161,17 @@ class OrchestratorSpawnPort:
         self.last_handle = SpawnHandle(
             process=process, stdout_path=stdout_path, seed_path=seed
         )
-        return SpawnResult(ok=True, orchestrator_pid=process.pid)
+        # FR-013 recorded half: capture the spawned orchestrator's OS start-time now,
+        # via the SAME formatter the live re-attach probe uses, so a later
+        # `recorded == live` comparison can positively disambiguate pid reuse. None when
+        # psutil is absent or the child already exited (re-attach then falls back to the
+        # conservative branch — it never reaps a live pid it cannot disprove is ours).
+        start_time = probe_pid_start_time(process.pid)
+        return SpawnResult(
+            ok=True,
+            orchestrator_pid=process.pid,
+            orchestrator_start_time=start_time,
+        )
 
     @staticmethod
     def _confined_cwd(scope: BlastRadiusScope) -> Path | None:

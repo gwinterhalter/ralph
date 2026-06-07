@@ -196,6 +196,7 @@ class Registry:
             "project_slug",
             "run_id",
             "orchestrator_pid",
+            "orchestrator_start_time",
             "spawned_at",
             "terminal_cost_usd",
             "seed_path",
@@ -321,6 +322,25 @@ class Registry:
             "UPDATE ralph_runs SET orchestrator_pid = %s, updated_at = now() "
             "WHERE project_slug = %s AND status = 'running'",
             (orchestrator_pid, project_id),
+        )
+
+    def set_run_orchestrator_start_time(
+        self, project_id: str, start_time: str
+    ) -> None:
+        """Persist the spawned orchestrator's OS start-time on the active Run row
+        (FR-013 recorded half).
+
+        The re-attach pass compares this recorded value against the live OS start-time
+        of the recorded pid to disambiguate pid reuse after a Supervisor restart. Written
+        post-spawn alongside :meth:`set_run_orchestrator_pid`. Concrete-only — deliberately
+        NOT on the ``RegistryPort`` Protocol, so it adds no test-double conformance ripple;
+        the admission terminal step consumes it via the injected ``record_start_time``
+        callable. Targets only the Project's currently-``running`` Run row; the value is
+        parameterised and the column name is a SQL literal (no injection vector)."""
+        self._execute_write(
+            "UPDATE ralph_runs SET orchestrator_start_time = %s, updated_at = now() "
+            "WHERE project_slug = %s AND status = 'running'",
+            (start_time, project_id),
         )
 
     @staticmethod

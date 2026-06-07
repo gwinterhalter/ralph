@@ -35,6 +35,7 @@ REQUIRED_RALPH_RUNS_COLUMNS: frozenset[str] = frozenset(
         "seed_path",
         "status",
         "orchestrator_pid",
+        "orchestrator_start_time",  # FR-013 recorded half (pid-reuse disambiguation)
         "spawned_at",
         "terminated_at",
         "terminal_cost_usd",

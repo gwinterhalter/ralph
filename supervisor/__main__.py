@@ -32,6 +32,7 @@ from supervisor.cycle_wiring import (
     stall_signals_from_actions,
 )
 from supervisor.heartbeats import read_heartbeats_from_log
+from supervisor.pid_probe import format_pid_start_time, probe_pid_start_time
 from supervisor.ports import RegistryPort, RegistryRow
 from supervisor.reattach import derive_reattach_decisions
 from supervisor.reconcile import RunCompletion, derive_reconcile_actions
@@ -70,40 +71,13 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-def format_pid_start_time(create_time: float) -> str:
-    """Canonical string form of an OS process create-time (epoch seconds).
-
-    Shared by the live probe (:func:`_pid_start_time`) and — when spawn-time
-    start-time recording lands — the recorder, so the FR-013 ``recorded == live``
-    comparison can never drift on formatting. Fixed 6-dp so platform float-repr
-    differences don't produce a spurious pid-reuse verdict.
-    """
-    return f"{create_time:.6f}"
-
-
-def _pid_start_time(pid: int) -> str | None:
-    """Live OS process start-time probe for FR-013 pid-reuse disambiguation.
-
-    Returns the canonical start-time string for ``pid`` via :mod:`psutil`, or ``None``
-    when psutil is unavailable or the process is gone — :func:`derive_reattach_decisions`
-    treats ``None`` as 'cannot disambiguate' and conservatively re-attaches (it never
-    reaps a live pid it cannot positively disprove is ours). Replaces the former
-    ``lambda _pid: None`` stub so the live half of FR-013 is real in deployment.
-
-    NOTE: full pid-reuse disambiguation also requires the *recorded* half — the
-    orchestrator's start-time persisted at spawn (run-row ``orchestrator_start_time``,
-    written with :func:`format_pid_start_time`). Until that lands the ``recorded`` side
-    is ``None`` and every live pid re-attaches conservatively; this probe makes the
-    comparison correct the moment recording is added.
-    """
-    try:
-        import psutil
-    except ImportError:
-        return None
-    try:
-        return format_pid_start_time(psutil.Process(pid).create_time())
-    except psutil.Error:
-        return None
+# The FR-013 start-time formatter + live probe live in the shared `pid_probe` module
+# so the recorder (`supervisor.spawn`, at spawn) and this live probe (the re-attach
+# pass) produce the identical format — the recorded/live comparison cannot drift.
+# `_pid_start_time` keeps its private name as the production probe wired into
+# `derive_reattach_decisions`. Both the *recorded* (spawn-time persistence, FR-013) and
+# *live* halves are now real, so a recycled pid is correctly disambiguated.
+_pid_start_time = probe_pid_start_time
 
 
 def build_production_cycle(
@@ -119,6 +93,7 @@ def build_production_cycle(
     hang_timeout_seconds: float = DEFAULT_HANG_TIMEOUT_SECONDS,
     completion_probe: Callable[[RegistryRow], "RunCompletion | None"] = lambda _row: None,
     admitted_source: Callable[[], Sequence[RegistryRow]] = lambda: [],
+    record_start_time: Callable[[str, str], None] | None = None,
 ) -> SupervisionCycle:
     """Assemble a :class:`SupervisionCycle` wired with all five §4.4 step configs.
 
@@ -172,6 +147,7 @@ def build_production_cycle(
         ),
         candidate_enricher=make_seed_candidate_enricher(workspace_root),
         admitted_source=admitted_source,
+        record_start_time=record_start_time,
     )
 
     return SupervisionCycle(
@@ -275,6 +251,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
             events_log_path=events_log,
             completion_probe=_completion_of,
             admitted_source=registry.read_admitted,
+            record_start_time=registry.set_run_orchestrator_start_time,
         )
         cycle.run_once()
         cycles += 1
@@ -289,4 +266,9 @@ if __name__ == "__main__":  # pragma: no cover
     sys.exit(main())
 
 
-__all__ = ["build_production_cycle", "main", "DEFAULT_HANG_TIMEOUT_SECONDS"]
+__all__ = [
+    "build_production_cycle",
+    "main",
+    "DEFAULT_HANG_TIMEOUT_SECONDS",
+    "format_pid_start_time",  # re-exported from pid_probe (FR-013 live-probe call-site)
+]

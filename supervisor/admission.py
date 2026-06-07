@@ -135,12 +135,15 @@ class SpawnResult:
     """The result of a :meth:`SpawnPort.spawn` invocation (Spec v1.3 §6.3).
 
     ``ok`` is the success flag; ``orchestrator_pid`` is the spawned Run's pid (the §6.3
-    active boundary, paired with ``spawned_at``) on success; ``detail`` carries the
-    failure note on the spawn-failure path.
+    active boundary, paired with ``spawned_at``) on success; ``orchestrator_start_time``
+    is that pid's OS start-time captured at spawn (the FR-013 recorded half, used to
+    disambiguate pid reuse on re-attach — ``None`` when the SpawnPort cannot probe it);
+    ``detail`` carries the failure note on the spawn-failure path.
     """
 
     ok: bool
     orchestrator_pid: int | None = None
+    orchestrator_start_time: str | None = None
     detail: str = ""
 
 
@@ -405,6 +408,7 @@ def admit_and_spawn(
     spawn_port: SpawnPort,
     blast_radius_scope: BlastRadiusScope,
     clock: Callable[[], str] = _utc_now_iso,
+    record_start_time: Callable[[str, str], None] | None = None,
 ) -> RunRecord | ReconciledFailure:
     """Transition an admitted Candidate to ``running`` and spawn its orchestrator — the
     single FR-021 terminal step (Spec v1.3 §6.2 FR-021, §6.3).
@@ -420,6 +424,12 @@ def admit_and_spawn(
 
     ``spawn_port.spawn`` failure is taken from EITHER a raised exception OR a returned
     ``SpawnResult(ok=False)``.
+
+    ``record_start_time`` (when supplied by the production wiring) persists the spawned
+    orchestrator's OS start-time on the Run row after a successful spawn — the FR-013
+    recorded half, written via a concrete Registry method that is deliberately NOT on the
+    ``RegistryPort`` Protocol (an injected callable, so the seam stays free of
+    test-double ripple). Omitted (``None``) in the unit suite, where it is skipped.
     """
     project_id = _project_id(candidate)
     seed_path = _seed_path(candidate)
@@ -461,6 +471,13 @@ def admit_and_spawn(
     if result.orchestrator_pid is not None:
         registry_port.set_run_orchestrator_pid(project_id, result.orchestrator_pid)
 
+    # FR-013 recorded half — persist the spawn-time OS start-time (when both the
+    # SpawnPort probed one and the wiring supplied a recorder). Strictly additive after
+    # the pid write; absent either, the re-attach pass falls back to conservative
+    # RE-ATTACH (it never reaps a live pid it cannot disprove is ours).
+    if result.orchestrator_start_time is not None and record_start_time is not None:
+        record_start_time(project_id, result.orchestrator_start_time)
+
     return RunRecord(
         project_id=project_id,
         spawned_at=spawned_at,
@@ -481,6 +498,7 @@ def admit_candidate(
     running_count: int,
     concurrency_ceiling: int = DEFAULT_CONCURRENCY_CEILING,
     clock: Callable[[], str] = _utc_now_iso,
+    record_start_time: Callable[[str, str], None] | None = None,
 ) -> RunRecord | ReconciledFailure | AdmittedHold | AdmissionRejection:
     """Run one Candidate through the §6 Admission Pipeline — the only path Candidate ->
     ``running`` (Spec v1.3 §6.1). Admission ends in exactly one outcome:
@@ -514,6 +532,7 @@ def admit_candidate(
         spawn_port=spawn_port,
         blast_radius_scope=decision.blast_radius_scope,
         clock=clock,
+        record_start_time=record_start_time,
     )
 
 
