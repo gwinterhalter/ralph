@@ -78,7 +78,9 @@ from supervisor.attention import (
 from supervisor.candidate_enrichment import default_candidate_enricher
 from supervisor.reconcile import (
     REASON_STALLED,
+    RUN_COMPLETE,
     ReconcileAction,
+    RunCompletion,
     derive_reconcile_actions,
 )
 from supervisor.run_auditor import (
@@ -266,6 +268,12 @@ class ReconcileConfig:
     project_filter: Callable[["RegistryRow"], bool] = field(
         default_factory=lambda: (lambda row: True)
     )
+    #: Terminal-completion probe (D6 follow-on): reports a clean INITIATIVE_COMPLETE
+    #: for a run (production reads its state-dir artifacts via run_lifecycle). Default
+    #: never-completed → the failed/stall-only behaviour is unchanged.
+    completion_of: Callable[["RegistryRow"], "RunCompletion | None"] = field(
+        default=lambda _row: None
+    )
 
 
 def run_reconcile_step(
@@ -288,20 +296,28 @@ def run_reconcile_step(
         now=now_dt,
         hang_timeout_seconds=config.hang_timeout_seconds,
         progress_at=config.progress_at,
+        completion_of=config.completion_of,
     )
     if not actions:
         return actions
-    terminated_at = now_dt.isoformat()
+    now_iso = now_dt.isoformat()
     cost_by_project = {
         str(row.get("project_id")): row.get("terminal_cost_usd") for row in runs
     }
     for action in actions:
-        raw_cost = cost_by_project.get(action.project_id)
-        cost = raw_cost if isinstance(raw_cost, Decimal) else Decimal("0")
+        if action.run_status == RUN_COMPLETE:
+            # A clean completion carries its own terminal_at + cost (read from the
+            # run's terminal artifacts), not the row's last-known running cost.
+            at = action.terminated_at or now_iso
+            cost = action.terminal_cost_usd or Decimal("0")
+        else:
+            at = now_iso
+            raw_cost = cost_by_project.get(action.project_id)
+            cost = raw_cost if isinstance(raw_cost, Decimal) else Decimal("0")
         registry.reconcile_run(
             action.project_id,
             action.run_status,
-            terminated_at=terminated_at,
+            terminated_at=at,
             terminal_cost_usd=cost,
         )
         registry.set_lifecycle_state(action.project_id, action.lifecycle_state)

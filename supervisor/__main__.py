@@ -34,7 +34,7 @@ from supervisor.cycle_wiring import (
 from supervisor.heartbeats import read_heartbeats_from_log
 from supervisor.ports import RegistryPort, RegistryRow
 from supervisor.reattach import derive_reattach_decisions
-from supervisor.reconcile import derive_reconcile_actions
+from supervisor.reconcile import RunCompletion, derive_reconcile_actions
 
 #: Default stall budget (seconds) for the Reconcile + Guard stall detection.
 DEFAULT_HANG_TIMEOUT_SECONDS = 1800.0
@@ -98,6 +98,7 @@ def build_production_cycle(
     pid_alive: Callable[[int], bool] = _pid_alive,
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     hang_timeout_seconds: float = DEFAULT_HANG_TIMEOUT_SECONDS,
+    completion_probe: Callable[[RegistryRow], "RunCompletion | None"] = lambda _row: None,
 ) -> SupervisionCycle:
     """Assemble a :class:`SupervisionCycle` wired with all five §4.4 step configs.
 
@@ -130,6 +131,7 @@ def build_production_cycle(
         hang_timeout_seconds=hang_timeout_seconds,
         progress_at=_progress_at,
         clock=now,
+        completion_of=completion_probe,
     )
 
     def _stall_signals() -> dict[str, object]:
@@ -223,6 +225,24 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
         Path(os.environ.get("OL_SUPERVISOR_ORCHESTRATOR", "orchestrator.sh"))
     )
 
+    from supervisor.run_lifecycle import detect_initiative_complete, read_terminal_cost
+
+    def _completion_of(row: RegistryRow) -> "RunCompletion | None":
+        """Terminal-completion probe: a run whose orchestrator emitted §13.1
+        INITIATIVE_COMPLETE is reconciled ``complete`` (not mis-reaped ``failed`` on
+        pid-death). Reads the run's state dir (the seed's sibling ``state/`` per the
+        seed ``state_dir_relative`` convention) for the signal + the spend ledger."""
+        seed = row.get("seed_path")
+        if not isinstance(seed, str) or not seed:
+            return None
+        state_dir = Path(seed).parent / "state"
+        if not detect_initiative_complete(state_dir):
+            return None
+        return RunCompletion(
+            terminated_at=datetime.now(timezone.utc).isoformat(),
+            terminal_cost_usd=read_terminal_cost(state_dir),
+        )
+
     cycles = 0
     while args.max_cycles is None or cycles < args.max_cycles:
         cycle = build_production_cycle(
@@ -232,6 +252,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
             active_runs_source=registry.read_active_runs,
             workspace_root=workspace_root,
             events_log_path=events_log,
+            completion_probe=_completion_of,
         )
         cycle.run_once()
         cycles += 1

@@ -13,12 +13,16 @@ import pytest
 
 from supervisor.cycle_wiring import ReconcileConfig, run_reconcile_step
 from supervisor.reconcile import (
+    LIFECYCLE_COMPLETE,
     LIFECYCLE_FAILED,
     LIFECYCLE_PAUSED_GATE,
+    REASON_COMPLETED,
     REASON_DEAD_PID,
     REASON_STALLED,
+    RUN_COMPLETE,
     RUN_FAILED,
     RUN_HALTED,
+    RunCompletion,
     derive_reconcile_actions,
 )
 
@@ -105,6 +109,37 @@ def test_missing_project_id_and_bad_timestamp_skipped() -> None:
     ) == []
 
 
+def test_completion_reconciled_to_complete_over_dead_pid() -> None:
+    # A completed orchestrator has already exited (pid dead). The completion probe
+    # must take precedence so it reconciles `complete` (FR-011/FR-014), not `failed`.
+    runs = [_run("done", pid=99, age_seconds=10)]
+    completion = RunCompletion(
+        terminated_at="2026-01-01T12:00:00+00:00", terminal_cost_usd=Decimal("2.2562")
+    )
+    actions = derive_reconcile_actions(
+        runs,
+        pid_alive=lambda _pid: False,  # pid dead — would otherwise be `failed`
+        now=_NOW,
+        hang_timeout_seconds=_HANG,
+        completion_of=lambda row: completion if row["project_id"] == "done" else None,
+    )
+    assert len(actions) == 1
+    assert actions[0].run_status == RUN_COMPLETE
+    assert actions[0].lifecycle_state == LIFECYCLE_COMPLETE
+    assert actions[0].reason == REASON_COMPLETED
+    assert actions[0].terminated_at == "2026-01-01T12:00:00+00:00"
+    assert actions[0].terminal_cost_usd == Decimal("2.2562")
+
+
+def test_default_completion_probe_preserves_failed_behaviour() -> None:
+    # No completion_of supplied → the failed/stall-only behaviour is unchanged.
+    runs = [_run("p", pid=99, age_seconds=10)]
+    actions = derive_reconcile_actions(
+        runs, pid_alive=lambda _pid: False, now=_NOW, hang_timeout_seconds=_HANG
+    )
+    assert actions[0].run_status == RUN_FAILED
+
+
 # --- run_reconcile_step composition -----------------------------------------
 
 
@@ -152,6 +187,26 @@ def test_run_reconcile_step_noop_when_all_healthy() -> None:
     assert run_reconcile_step(reg, config) == []  # type: ignore[arg-type]
     assert reg.reconciled == []
     assert reg.lifecycle == []
+
+
+def test_run_reconcile_step_completion_uses_probe_cost_and_timestamp() -> None:
+    # The complete path persists the completion's OWN terminated_at + cost (read from
+    # the run's terminal artifacts), not the row's last-known running cost / `now`.
+    reg = _FakeRegistry()
+    runs = [_run("done", pid=99, age_seconds=10, cost="0.0000")]  # row cost is stale 0
+    config = ReconcileConfig(
+        active_runs_source=lambda: runs,
+        pid_alive=lambda _pid: False,
+        clock=lambda: _NOW,
+        completion_of=lambda _row: RunCompletion(
+            terminated_at="2026-01-01T11:59:00+00:00", terminal_cost_usd=Decimal("3.5000")
+        ),
+    )
+    actions = run_reconcile_step(reg, config)  # type: ignore[arg-type]
+
+    assert [a.run_status for a in actions] == [RUN_COMPLETE]
+    assert reg.reconciled == [("done", RUN_COMPLETE, "2026-01-01T11:59:00+00:00", Decimal("3.5000"))]
+    assert reg.lifecycle == [("done", LIFECYCLE_COMPLETE)]
 
 
 def test_run_reconcile_step_project_filter_scopes() -> None:

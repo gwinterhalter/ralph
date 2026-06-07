@@ -32,20 +32,39 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 
 from supervisor.ports import RegistryRow
 
-#: Run status (``ralph_runs.status``) for a reaped orphan / stall.
+#: Run status (``ralph_runs.status``) for a reaped orphan / stall / clean completion.
 RUN_FAILED = "failed"
 RUN_HALTED = "halted"
+RUN_COMPLETE = "complete"
 
 #: Project lifecycle target (``transitions.LEGAL_TRANSITIONS`` from ``running``).
 LIFECYCLE_FAILED = "failed"
 LIFECYCLE_PAUSED_GATE = "paused_gate"
+LIFECYCLE_COMPLETE = "complete"
 
 #: Reason codes (threaded into the action for the operator surface / audit).
 REASON_DEAD_PID = "orchestrator_pid_dead"
 REASON_STALLED = "stalled_past_hang_timeout"
+REASON_COMPLETED = "initiative_complete"
+
+
+@dataclass(frozen=True)
+class RunCompletion:
+    """The terminal outcome of a Run that reached §13.1 INITIATIVE_COMPLETE.
+
+    Returned by the injected ``completion_of`` probe (production reads the
+    orchestrator's terminal artifacts off its state dir — INITIATIVE_COMPLETE signal
+    + ``spend.json`` cost — via :mod:`supervisor.run_lifecycle`). Carries the FR-011
+    ``terminated_at`` + FR-014 exact-``Decimal`` ``terminal_cost_usd`` the complete
+    reconcile persists.
+    """
+
+    terminated_at: str
+    terminal_cost_usd: Decimal
 
 
 @dataclass(frozen=True)
@@ -54,13 +73,18 @@ class ReconcileAction:
 
     ``run_status`` is the terminal ``ralph_runs.status`` to set (releasing the
     active-run slot); ``lifecycle_state`` is the legal post-``running`` Project state;
-    ``reason`` is the audit/operator-surface discriminator.
+    ``reason`` is the audit/operator-surface discriminator. For a clean completion the
+    action also carries ``terminated_at`` + ``terminal_cost_usd`` read from the run's
+    terminal artifacts (None for the failed / stalled paths, which use the row's
+    last-known cost at reconcile time).
     """
 
     project_id: str
     run_status: str
     lifecycle_state: str
     reason: str
+    terminated_at: str | None = None
+    terminal_cost_usd: Decimal | None = None
 
 
 def _default_progress_at(row: RegistryRow) -> str | None:
@@ -86,6 +110,12 @@ def _seconds_since(iso_ts: str, now: datetime) -> float | None:
     return (now - then).total_seconds()
 
 
+def _no_completion(_row: RegistryRow) -> "RunCompletion | None":
+    """Default completion probe: never completed (preserves the failed/stall-only
+    behaviour for callers that don't wire a terminal-artifact probe)."""
+    return None
+
+
 def derive_reconcile_actions(
     active_runs: Sequence[RegistryRow],
     *,
@@ -93,10 +123,14 @@ def derive_reconcile_actions(
     now: datetime,
     hang_timeout_seconds: float,
     progress_at: Callable[[RegistryRow], str | None] = _default_progress_at,
+    completion_of: Callable[[RegistryRow], "RunCompletion | None"] = _no_completion,
 ) -> list[ReconcileAction]:
     """Return the terminal reconciliations owed for ``active_runs``.
 
-    A run with a present ``orchestrator_pid`` that ``pid_alive`` reports dead is an
+    A run whose ``completion_of`` probe reports a clean §13.1 INITIATIVE_COMPLETE is
+    reconciled ``complete`` (checked FIRST — a completed orchestrator has already
+    exited, so its PID is dead; without this it would be mis-reaped as ``failed``). A
+    run with a present ``orchestrator_pid`` that ``pid_alive`` reports dead is an
     orphan -> ``failed``. A run still nominally alive (or with no pid recorded) whose
     last progress is older than ``hang_timeout_seconds`` is a stall -> ``halted`` /
     ``paused_gate``. A run that is alive and progressing yields no action. Rows
@@ -106,6 +140,20 @@ def derive_reconcile_actions(
     for row in active_runs:
         project_id = row.get("project_id")
         if not isinstance(project_id, str) or not project_id:
+            continue
+
+        completion = completion_of(row)
+        if completion is not None:
+            actions.append(
+                ReconcileAction(
+                    project_id=project_id,
+                    run_status=RUN_COMPLETE,
+                    lifecycle_state=LIFECYCLE_COMPLETE,
+                    reason=REASON_COMPLETED,
+                    terminated_at=completion.terminated_at,
+                    terminal_cost_usd=completion.terminal_cost_usd,
+                )
+            )
             continue
 
         pid = row.get("orchestrator_pid")
@@ -138,11 +186,15 @@ def derive_reconcile_actions(
 
 __all__ = [
     "ReconcileAction",
+    "RunCompletion",
     "derive_reconcile_actions",
     "RUN_FAILED",
     "RUN_HALTED",
+    "RUN_COMPLETE",
     "LIFECYCLE_FAILED",
     "LIFECYCLE_PAUSED_GATE",
+    "LIFECYCLE_COMPLETE",
     "REASON_DEAD_PID",
     "REASON_STALLED",
+    "REASON_COMPLETED",
 ]
