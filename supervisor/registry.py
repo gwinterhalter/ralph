@@ -184,19 +184,22 @@ class Registry:
         FR-010 soft ``project_slug`` reference, so it keys straight into
         ``reconcile_run`` / ``set_lifecycle_state``), the ``orchestrator_pid`` to
         probe for liveness, the ``spawned_at`` progress fallback (coerced to an ISO
-        string), the last-known ``terminal_cost_usd``, and ``seed_path`` — the
-        production completion probe resolves the run's terminal artifacts (the §13.1
+        string), the last-known ``terminal_cost_usd``, ``seed_path`` — the production
+        completion probe resolves the run's terminal artifacts (the §13.1
         INITIATIVE_COMPLETE signal + spend ledger) off the seed's sibling ``state/``
         dir, so a clean completion is reconciled ``complete`` rather than mis-reaped as
-        a stall. Additive read — NOT part of the ``RegistryPort`` Protocol, so it adds
-        no test-double conformance ripple; the Reconcile wiring consumes it via the
-        injected ``active_runs_source``.
+        a stall — and ``pid_start_time``, extracted from ``metadata.pid_start_time`` (the
+        FR-013 recorded half; the canonical ``ralph_runs`` convention shared with the
+        Trigger Service FR-005) so the re-attach pass can disambiguate pid reuse.
+        Additive read — NOT part of the ``RegistryPort`` Protocol, so it adds no
+        test-double conformance ripple; the Reconcile wiring consumes it via the injected
+        ``active_runs_source``.
         """
         cols = (
             "project_slug",
             "run_id",
             "orchestrator_pid",
-            "orchestrator_start_time",
+            "metadata",
             "spawned_at",
             "terminal_cost_usd",
             "seed_path",
@@ -216,6 +219,12 @@ class Registry:
             iso = getattr(spawned, "isoformat", None)
             if callable(iso):
                 record["spawned_at"] = iso()
+            # FR-013: surface metadata.pid_start_time as a flat key for the re-attach
+            # pass (psycopg adapts jsonb to a dict; absent/typeless → None).
+            meta = record.pop("metadata", None)
+            record["pid_start_time"] = (
+                meta.get("pid_start_time") if isinstance(meta, dict) else None
+            )
             mapped.append(record)
         return mapped
 
@@ -324,21 +333,27 @@ class Registry:
             (orchestrator_pid, project_id),
         )
 
-    def set_run_orchestrator_start_time(
-        self, project_id: str, start_time: str
-    ) -> None:
-        """Persist the spawned orchestrator's OS start-time on the active Run row
-        (FR-013 recorded half).
+    def record_pid_start_time(self, project_id: str, start_time: str) -> None:
+        """Persist the spawned orchestrator's OS start-time into the active Run's
+        ``metadata.pid_start_time`` (FR-013 recorded half).
 
         The re-attach pass compares this recorded value against the live OS start-time
-        of the recorded pid to disambiguate pid reuse after a Supervisor restart. Written
-        post-spawn alongside :meth:`set_run_orchestrator_pid`. Concrete-only — deliberately
-        NOT on the ``RegistryPort`` Protocol, so it adds no test-double conformance ripple;
-        the admission terminal step consumes it via the injected ``record_start_time``
+        of the recorded pid to disambiguate pid reuse after a Supervisor restart. Stored
+        under the canonical ``ralph_runs`` ``metadata.pid_start_time`` key (the convention
+        the table's design reserves, shared with the Trigger Service FR-005) — NOT a
+        dedicated column — so the shared table keeps one home for the fact. Written
+        post-spawn alongside :meth:`set_run_orchestrator_pid`, merged via ``||`` so any
+        other metadata keys are preserved. Concrete-only — deliberately NOT on the
+        ``RegistryPort`` Protocol, so it adds no test-double conformance ripple; the
+        admission terminal step consumes it via the injected ``record_start_time``
         callable. Targets only the Project's currently-``running`` Run row; the value is
-        parameterised and the column name is a SQL literal (no injection vector)."""
+        parameterised and the JSON key/column names are SQL literals (no injection
+        vector)."""
         self._execute_write(
-            "UPDATE ralph_runs SET orchestrator_start_time = %s, updated_at = now() "
+            "UPDATE ralph_runs SET "
+            "metadata = COALESCE(metadata, '{}'::jsonb) "
+            "|| jsonb_build_object('pid_start_time', %s::text), "
+            "updated_at = now() "
             "WHERE project_slug = %s AND status = 'running'",
             (start_time, project_id),
         )

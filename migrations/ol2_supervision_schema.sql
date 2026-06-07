@@ -36,6 +36,9 @@ ALTER TABLE projects ADD COLUMN IF NOT EXISTS heartbeat_workstream_id text;
 -- (the supervisor's record_run inserts WITHOUT a run_id and relies on this default — a
 -- `text PK` with no default would reject those inserts); `metadata` is NOT NULL DEFAULT
 -- '{}'; `spawned_at` is nullable (admission supplies it explicitly); `created_at` exists.
+-- The FR-013 recorded orchestrator start-time is stored under `metadata.pid_start_time`
+-- (the canonical convention shared with the Trigger Service FR-005) — NOT a dedicated
+-- column — so the shared table keeps a single home for the fact.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS ralph_runs (
     run_id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),  -- canonical: uuid + server default
@@ -48,17 +51,10 @@ CREATE TABLE IF NOT EXISTS ralph_runs (
     spawned_at        timestamptz,                         -- canonical: nullable (admission supplies it)
     terminated_at     timestamptz,                         -- FR-011 terminal reconcile
     terminal_cost_usd numeric(10, 4),                      -- FR-014 exact-decimal money (NFR-007)
-    metadata          jsonb NOT NULL DEFAULT '{}'::jsonb,
+    metadata          jsonb NOT NULL DEFAULT '{}'::jsonb,   -- FR-013: metadata.pid_start_time
     created_at        timestamptz NOT NULL DEFAULT now(),
-    updated_at        timestamptz NOT NULL DEFAULT now(),
-    orchestrator_start_time text                            -- FR-013 recorded half (pid-reuse disambiguation)
+    updated_at        timestamptz NOT NULL DEFAULT now()
 );
-
--- FR-013 recorded half: persist the orchestrator's OS start-time at spawn so a
--- Supervisor restart can disambiguate pid reuse on re-attach. Additive ALTER (not just
--- the CREATE body above) so an already-existing ralph_runs table gains the column on
--- replay. Idempotent (IF NOT EXISTS).
-ALTER TABLE ralph_runs ADD COLUMN IF NOT EXISTS orchestrator_start_time text;
 
 -- FR-007 active-run uniqueness: at most one running Run per Project (the partial
 -- unique index the scheduler/admission ceiling + dispatch-idempotency gate on).

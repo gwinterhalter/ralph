@@ -52,11 +52,12 @@ class ReattachDecision:
 def _default_recorded_start_time(row: RegistryRow) -> str | None:
     """Default recorded start-time accessor: the persisted OS process start-time.
 
-    Production records the orchestrator's OS start-time at spawn (run-row
-    ``orchestrator_start_time``); absent it, no disambiguation is possible and the
-    decision falls through to the conservative RE-ATTACH branch.
+    Production records the orchestrator's OS start-time at spawn under the canonical
+    ``ralph_runs`` ``metadata.pid_start_time`` key; ``Registry.read_active_runs`` surfaces
+    it as the flat ``pid_start_time`` row key. Absent it, no disambiguation is possible and
+    the decision falls through to the conservative RE-ATTACH branch.
     """
-    value = row.get("orchestrator_start_time")
+    value = row.get("pid_start_time")
     return str(value) if isinstance(value, str) and value else None
 
 

@@ -8,7 +8,8 @@ that records the value:
 * the SpawnPort captures the spawned pid's start-time into ``SpawnResult``;
 * ``admit_and_spawn`` forwards it to the injected ``record_start_time`` recorder
   (only when both a value and a recorder are present);
-* the concrete ``Registry.set_run_orchestrator_start_time`` issues the UPDATE.
+* the concrete ``Registry.record_pid_start_time`` merges it into
+  ``metadata.pid_start_time`` (the canonical convention, not a dedicated column).
 
 Hermetic: ``Popen`` is faked to a real pid (this process) so the psutil probe returns
 a real start-time without launching anything; the registry/recorder are fakes.
@@ -91,7 +92,7 @@ class _RecordingRegistry:
     def set_run_orchestrator_pid(self, project_id: str, orchestrator_pid: int) -> None:
         return None
 
-    def set_run_orchestrator_start_time(self, project_id: str, start_time: str) -> None:
+    def record_pid_start_time(self, project_id: str, start_time: str) -> None:
         self.start_time_calls.append((project_id, start_time))
 
 
@@ -127,7 +128,7 @@ def test_admit_and_spawn_records_start_time_when_present() -> None:
         registry_port=registry,  # type: ignore[arg-type]
         spawn_port=spawn_port,  # type: ignore[arg-type]
         blast_radius_scope=_scope(),
-        record_start_time=registry.set_run_orchestrator_start_time,
+        record_start_time=registry.record_pid_start_time,
     )
 
     assert registry.start_time_calls == [("p1", "999.000000")]
@@ -142,7 +143,7 @@ def test_admit_and_spawn_skips_recorder_when_start_time_absent() -> None:
         registry_port=registry,  # type: ignore[arg-type]
         spawn_port=spawn_port,  # type: ignore[arg-type]
         blast_radius_scope=_scope(),
-        record_start_time=registry.set_run_orchestrator_start_time,
+        record_start_time=registry.record_pid_start_time,
     )
 
     assert registry.start_time_calls == []  # nothing to record → recorder not called
@@ -191,13 +192,17 @@ class _Conn:
         self.commits += 1
 
 
-def test_set_run_orchestrator_start_time_updates_running_row_and_commits() -> None:
+def test_record_pid_start_time_merges_into_metadata_and_commits() -> None:
     conn = _Conn()
-    Registry(conn).set_run_orchestrator_start_time("p1", "1717000000.000000")
+    Registry(conn).record_pid_start_time("p1", "1717000000.000000")
 
     sql, params = conn.executed[0]
     norm = " ".join(sql.split())
-    assert norm.startswith("UPDATE ralph_runs SET orchestrator_start_time")
+    assert norm.startswith("UPDATE ralph_runs SET metadata =")
+    # Stored under metadata.pid_start_time (canonical convention), merged via || so
+    # existing keys survive — NOT a dedicated column.
+    assert "jsonb_build_object('pid_start_time', %s::text)" in norm
+    assert "COALESCE(metadata, '{}'::jsonb) ||" in norm
     assert "status = 'running'" in norm
     assert params == ("1717000000.000000", "p1")
     assert conn.commits == 1

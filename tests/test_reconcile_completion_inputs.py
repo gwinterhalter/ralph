@@ -64,22 +64,37 @@ class _Conn:
 def test_read_active_runs_selects_and_maps_seed_path() -> None:
     conn = _Conn()
     # row order must match the SELECT column tuple the implementation issues:
-    # (project_slug, run_id, orchestrator_pid, orchestrator_start_time, spawned_at,
+    # (project_slug, run_id, orchestrator_pid, metadata, spawned_at,
     #  terminal_cost_usd, seed_path)
     conn.fetchall_result = [
-        ("oltest_d1", "r1", 4242, "1717000000.000000", None, None, "K:/work/oltest_d1/Seed.md"),
+        (
+            "oltest_d1",
+            "r1",
+            4242,
+            {"pid_start_time": "1717000000.000000"},  # psycopg adapts jsonb → dict
+            None,
+            None,
+            "K:/work/oltest_d1/Seed.md",
+        ),
     ]
     rows = Registry(conn).read_active_runs()
 
     sql, params = conn.executed[0]
     assert "seed_path" in sql, "read_active_runs must SELECT seed_path"
-    assert "orchestrator_start_time" in sql, "read_active_runs must SELECT orchestrator_start_time (FR-013)"
+    assert "metadata" in sql, "read_active_runs must SELECT metadata (FR-013 pid_start_time home)"
     assert params == ("running",)
     assert rows[0]["seed_path"] == "K:/work/oltest_d1/Seed.md"
-    # FR-013 recorded start-time surfaced for the re-attach disambiguation.
-    assert rows[0]["orchestrator_start_time"] == "1717000000.000000"
+    # FR-013 recorded start-time surfaced flat from metadata.pid_start_time.
+    assert rows[0]["pid_start_time"] == "1717000000.000000"
     # FR-010 soft reference is surfaced as project_id for the reconcile keying.
     assert rows[0]["project_id"] == "oltest_d1"
+
+
+def test_read_active_runs_pid_start_time_none_when_metadata_absent() -> None:
+    conn = _Conn()
+    conn.fetchall_result = [("p", "r", None, None, None, None, "/s")]  # metadata NULL
+    rows = Registry(conn).read_active_runs()
+    assert rows[0]["pid_start_time"] is None
 
 
 # --- (2) PID-liveness probes are read-only on Windows ----------------------------

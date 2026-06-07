@@ -51,14 +51,14 @@ def test_wired_probe_disambiguates_a_reused_pid() -> None:
     pid = os.getpid()
     live = format_pid_start_time(psutil.Process(pid).create_time())
 
-    matches = [{"project_id": "p", "orchestrator_pid": pid, "orchestrator_start_time": live}]
+    matches = [{"project_id": "p", "orchestrator_pid": pid, "pid_start_time": live}]
     d = derive_reattach_decisions(
         matches, pid_alive=lambda _p: True, pid_start_time=_pid_start_time
     )
     assert d[0].decision == DECISION_REATTACH
 
     mismatch = [
-        {"project_id": "p", "orchestrator_pid": pid, "orchestrator_start_time": "0.000000"}
+        {"project_id": "p", "orchestrator_pid": pid, "pid_start_time": "0.000000"}
     ]
     d2 = derive_reattach_decisions(
         mismatch, pid_alive=lambda _p: True, pid_start_time=_pid_start_time

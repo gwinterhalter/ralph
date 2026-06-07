@@ -251,7 +251,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
             events_log_path=events_log,
             completion_probe=_completion_of,
             admitted_source=registry.read_admitted,
-            record_start_time=registry.set_run_orchestrator_start_time,
+            record_start_time=registry.record_pid_start_time,
         )
         cycle.run_once()
         cycles += 1

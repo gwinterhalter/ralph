@@ -35,7 +35,7 @@ REQUIRED_RALPH_RUNS_COLUMNS: frozenset[str] = frozenset(
         "seed_path",
         "status",
         "orchestrator_pid",
-        "orchestrator_start_time",  # FR-013 recorded half (pid-reuse disambiguation)
+        "metadata",  # FR-013 recorded half lives in metadata.pid_start_time
         "spawned_at",
         "terminated_at",
         "terminal_cost_usd",

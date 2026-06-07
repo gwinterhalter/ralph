@@ -362,9 +362,10 @@ class ScheduleConfig:
     #: never appears in its input, so a held Project would be orphaned.
     admitted_source: Callable[[], "Sequence[RegistryRow]"] = field(default=lambda: [])
     #: FR-013 recorded-half recorder: persists the spawned orchestrator's OS start-time
-    #: on the Run row post-spawn (production wires ``Registry.set_run_orchestrator_start_time``).
-    #: An injected callable, NOT a RegistryPort method, so the seam stays free of
-    #: test-double ripple. Default ``None`` → start-time recording is skipped.
+    #: into the Run's ``metadata.pid_start_time`` post-spawn (production wires
+    #: ``Registry.record_pid_start_time``). An injected callable, NOT a RegistryPort
+    #: method, so the seam stays free of test-double ripple. Default ``None`` →
+    #: start-time recording is skipped.
     record_start_time: Callable[[str, str], None] | None = None
     # The fleet-scoping predicate applied to both the Candidate and running reads.
     # Defaults to accept-all — the production global fleet (the §3 Concurrency Ceiling
