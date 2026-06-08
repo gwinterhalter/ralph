@@ -182,6 +182,47 @@ def render_learnings(findings: Sequence[Mapping[str, object]]) -> str:
     return "\n".join(lines)
 
 
+def render_correction_summary(rows: Sequence[Mapping[str, object]]) -> str:
+    """Render the per-item correction-churn pane (pure; over read_correction_summary rows)."""
+    if not rows:
+        return "corrections: none captured yet (the Learn step records correction_attempts)."
+    lines = [f"corrections: {len(rows)} item(s) entered the correction loop:"]
+    for row in rows:
+        lines.append(
+            f"  {row.get('item_id', '?')}: {row.get('attempts', 0)} attempt(s) "
+            f"across {row.get('projects', 0)} project(s), deepest {row.get('max_level', '?')}"
+        )
+    return "\n".join(lines)
+
+
+def build_dispatch_command(
+    finding: Mapping[str, object], *, skills_dir: str
+) -> list[str]:
+    """Build the ``claude -p`` argv that dispatches a promoted finding to its authoring skill (pure).
+
+    The promoter's adoption step: invoke the skill named in the finding's ``authoring_skill`` with
+    the finding's ``recommendation`` as the instruction, resolving the skill from ``skills_dir``
+    (the FUP-0743 ``--add-dir <skills> -- /slash`` form). The supervisor never edits the spec itself
+    — the named cf-* skill applies the change under its own review. Returns the argv only; the CLI
+    `apply` runs it."""
+    skill = str(finding.get("authoring_skill") or "").strip()
+    recommendation = str(finding.get("recommendation") or "").strip()
+    if not skill:
+        raise ValueError(
+            f"finding {finding.get('finding_key')!r} has no authoring_skill to dispatch to"
+        )
+    return [
+        "claude",
+        "-p",
+        "--output-format",
+        "json",
+        "--add-dir",
+        skills_dir,
+        "--",
+        f"/{skill} {recommendation}",
+    ]
+
+
 def run_status_panel(
     fetch_snapshot: Callable[[], FullFleetSnapshot],
     *,
@@ -238,6 +279,13 @@ def _main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI entry
         "--interval", type=float, default=30.0, help="bounded refresh interval (seconds)"
     )
     sub.add_parser("learnings", help="list the captured Run-Auditor learnings (run_audit_findings)")
+    sub.add_parser("corrections", help="list per-item correction-loop churn (correction_attempts)")
+    promote_p = sub.add_parser("promote", help="accept a learning (queue it for adoption)")
+    promote_p.add_argument("finding_key")
+    reject_p = sub.add_parser("reject", help="reject a learning (suppress re-surfacing)")
+    reject_p.add_argument("finding_key")
+    apply_p = sub.add_parser("apply", help="dispatch an accepted learning to its authoring skill")
+    apply_p.add_argument("finding_key")
     for p in (parser,):
         p.add_argument("--by", default=os.environ.get("USER", "operator"))
 
@@ -286,6 +334,61 @@ def _main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI entry
         print(render_learnings(registry.read_audit_findings()))
         return 0
 
+    if args.cmd in ("corrections", "promote", "reject", "apply"):
+        dsn = os.environ.get("OL_SUPERVISOR_DB_URL")
+        if not dsn:
+            print(f"control_panel {args.cmd}: OL_SUPERVISOR_DB_URL is not set.")
+            return 1
+        from supervisor.registry import Registry
+
+        registry = Registry.from_env()
+
+        if args.cmd == "corrections":
+            print(render_correction_summary(registry.read_correction_summary()))
+            return 0
+
+        if args.cmd == "reject":
+            registry.set_finding_status(args.finding_key, "rejected", decided_by=args.by)
+            print(f"rejected {args.finding_key} (will not be re-surfaced).")
+            return 0
+
+        if args.cmd == "promote":
+            registry.set_finding_status(args.finding_key, "accepted", decided_by=args.by)
+            print(
+                f"accepted {args.finding_key} — queued for adoption. "
+                f"Run `control_panel apply {args.finding_key}` to dispatch it to its authoring skill."
+            )
+            return 0
+
+        # apply: dispatch the accepted finding to its authoring skill (live; spawns claude).
+        findings = {str(f.get("finding_key")): f for f in registry.read_audit_findings()}
+        finding = findings.get(args.finding_key)
+        if finding is None:
+            print(f"control_panel apply: no finding {args.finding_key!r}.")
+            return 1
+        if str(finding.get("status")) != "accepted":
+            print(
+                f"control_panel apply: {args.finding_key} is '{finding.get('status')}', not "
+                f"'accepted' — promote it first."
+            )
+            return 1
+        skills_dir = os.environ.get("CLAUDE_SKILLS_DIR", "")
+        argv_cmd = build_dispatch_command(finding, skills_dir=skills_dir)
+        print("dispatching to authoring skill:\n  " + " ".join(argv_cmd))
+        import subprocess  # noqa: PLC0415 - lazy; only the live apply path needs it
+
+        try:
+            completed = subprocess.run(argv_cmd, check=False)  # noqa: S603 - argv is built, not shell
+        except FileNotFoundError:
+            print("control_panel apply: `claude` not on PATH — cannot dispatch.")
+            return 1
+        if completed.returncode == 0:
+            registry.set_finding_status(args.finding_key, "applied", decided_by=args.by)
+            print(f"applied {args.finding_key}.")
+            return 0
+        print(f"control_panel apply: dispatch exited {completed.returncode}; left 'accepted'.")
+        return 1
+
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     cid = f"{args.cmd}_{uuid.uuid4().hex[:12]}"
     ctype = {"pause": "pause", "query": "query_register_state", "bump": "bump_budget"}[args.cmd]
@@ -317,4 +420,6 @@ __all__ = [
     "read_events",
     "render_metrics",
     "render_learnings",
+    "render_correction_summary",
+    "build_dispatch_command",
 ]

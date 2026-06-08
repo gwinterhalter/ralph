@@ -12,7 +12,9 @@ from datetime import datetime, timedelta, timezone
 
 from supervisor.control_panel import (
     EventMetrics,
+    build_dispatch_command,
     read_events,
+    render_correction_summary,
     render_learnings,
     render_metrics,
     run_status_panel,
@@ -169,3 +171,27 @@ def test_render_learnings_lists_findings() -> None:
     assert "[verification_binding:over_verification] cf-x" in out
     assert "add an Answerer rule for g1" in out
     assert "adopt: operator + cf-seed-producer" in out
+
+
+def test_render_correction_summary() -> None:
+    assert "none captured yet" in render_correction_summary([])
+    rows = [{"item_id": "OLB-07", "attempts": 5, "projects": 2, "max_level": "L4"}]
+    out = render_correction_summary(rows)
+    assert "OLB-07: 5 attempt(s) across 2 project(s), deepest L4" in out
+
+
+def test_build_dispatch_command() -> None:
+    finding = {
+        "finding_key": "answerer_dsl_candidate:g1",
+        "authoring_skill": "cf-spec-writer",
+        "recommendation": "add a rule for g1",
+    }
+    argv = build_dispatch_command(finding, skills_dir="K:/skills")
+    assert argv[0] == "claude"
+    assert "K:/skills" in argv
+    assert argv[-1] == "/cf-spec-writer add a rule for g1"
+
+
+def test_build_dispatch_command_requires_skill() -> None:
+    with pytest.raises(ValueError, match="no authoring_skill"):
+        build_dispatch_command({"finding_key": "k", "recommendation": "r"}, skills_dir="x")
