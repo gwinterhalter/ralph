@@ -7,6 +7,9 @@ progress.txt
 # channel written by control_panel.write_command); runtime state, never tracked.
 commands/
 state/
+# Learn-step runtime output (learning_corpus.jsonl, run_auditor_report.md) written
+# when workspace_root defaults to the repo during a local --once run; never tracked.
+logs/
 
 # Archive is optional to commit
 # archive/

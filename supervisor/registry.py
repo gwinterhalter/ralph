@@ -27,6 +27,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Protocol, cast
 
 from supervisor import transitions
+from supervisor.effect_measure import EffectRecord
 from supervisor.learn_assembly import CorrectionAttempt, LearningRecord
 from supervisor.run_auditor import AuditFinding, finding_key
 
@@ -431,6 +432,50 @@ class Registry:
         cols = ("run_id", "project_slug", "status", "cost_usd", "duration_seconds", "items_closed")
         col_list = ", ".join(cols)
         sql = f"SELECT {col_list} FROM learning_records"  # nosec B608 — fixed allowlist
+        with self._conn.cursor() as cur:
+            cur.execute(sql)
+            rows = cur.fetchall()
+        return [dict(zip(cols, row)) for row in rows]
+
+    def upsert_audit_effect(self, record: "EffectRecord") -> None:
+        """UPSERT a measured learning effect (ol7), recomputed per measure pass (keyed by finding_key)."""
+        self._execute_write(
+            "INSERT INTO run_audit_effects (finding_key, kind, subject, applied_at, before_metric, "
+            "after_metric, post_adoption_runs, outcome, detail, measured_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now()) "
+            "ON CONFLICT (finding_key) DO UPDATE SET kind = EXCLUDED.kind, "
+            "subject = EXCLUDED.subject, applied_at = EXCLUDED.applied_at, "
+            "before_metric = EXCLUDED.before_metric, after_metric = EXCLUDED.after_metric, "
+            "post_adoption_runs = EXCLUDED.post_adoption_runs, outcome = EXCLUDED.outcome, "
+            "detail = EXCLUDED.detail, measured_at = now()",
+            (
+                record.finding_key,
+                record.kind,
+                record.subject,
+                record.applied_at,
+                record.before_metric,
+                record.after_metric,
+                record.post_adoption_runs,
+                record.outcome,
+                record.detail,
+            ),
+        )
+
+    def read_audit_effects(self) -> Sequence[RegistryRow]:
+        """Return all measured learning effects, most-recently-measured first (control-panel read)."""
+        cols = (
+            "finding_key",
+            "kind",
+            "subject",
+            "applied_at",
+            "before_metric",
+            "after_metric",
+            "post_adoption_runs",
+            "outcome",
+            "detail",
+        )
+        col_list = ", ".join(cols)
+        sql = f"SELECT {col_list} FROM run_audit_effects ORDER BY measured_at DESC"  # nosec B608
         with self._conn.cursor() as cur:
             cur.execute(sql)
             rows = cur.fetchall()

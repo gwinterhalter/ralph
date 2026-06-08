@@ -15,6 +15,7 @@ from supervisor.control_panel import (
     build_dispatch_command,
     read_events,
     render_correction_summary,
+    render_effects,
     render_events,
     render_learnings,
     render_metrics,
@@ -222,3 +223,12 @@ def test_dispatch_succeeded_guards_false_success() -> None:
     assert _dispatch_succeeded(0, '{"is_error":true,"result":"boom"}') is False
     # empty output, exit 0 → applied (no evidence of failure)
     assert _dispatch_succeeded(0, "") is True
+
+
+def test_render_effects() -> None:
+    assert "none measured yet" in render_effects([])
+    rows = [{"finding_key":"answerer_dsl_candidate:g1","outcome":"confirmed",
+             "before_metric":1.0,"after_metric":0.0,"post_adoption_runs":4,"detail":"d"}]
+    out = render_effects(rows)
+    assert "[confirmed] answerer_dsl_candidate:g1" in out
+    assert "1.000 → 0.000 over 4 post-run(s)" in out

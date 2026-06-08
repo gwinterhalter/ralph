@@ -308,6 +308,13 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
     # §4.4(6) Learn wiring (Item 2): the live completed-Run source + report/corpus sinks.
     from supervisor.attention import ESCALATION_KIND_ROUTINE, Escalation, intake_escalation
     from supervisor.cost_forecast import forecast_breaches, forecast_fleet
+    from supervisor.effect_measure import (
+        DEFAULT_MIN_POST_RUNS,
+        NO_EFFECT,
+        REGRESSED,
+        measure_effect,
+        relevant_project_ids,
+    )
     from supervisor.event_ingest import events_file_for
     from supervisor.learn_assembly import (
         build_correction_attempts,
@@ -505,6 +512,102 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
     if not isinstance(notification_port, NullNotificationPort):
         print("supervisor: notification delivery ENABLED (OL_SUPERVISOR_SMTP_* configured).")
 
+    def _effect_parse_ts(value: object) -> "datetime | None":
+        # events read from the DB carry a tz-aware datetime ts_utc (timestamptz); runs carry
+        # ISO strings. Handle BOTH — a str-only parser silently disabled the run-window filter
+        # (events DB ts is a datetime), putting every event in every bucket (live-found 2026-06-08).
+        if isinstance(value, datetime):
+            return value
+        if not isinstance(value, str) or not value:
+            return None
+        text = value[:-1] + "+00:00" if value.endswith("Z") else value
+        try:
+            return datetime.fromisoformat(text)
+        except ValueError:
+            return None
+
+    _effect_escalated: set[str] = set()
+
+    def _measure_learning_effects() -> None:
+        """Measure each APPLIED finding's before/after effect from the events table (read-only) and
+        persist it; escalate ONCE on a non-confirmed outcome (D1 surface-only — never auto-revert)."""
+        try:
+            applied = [
+                f for f in registry.read_audit_findings() if str(f.get("status")) == "applied"
+            ]
+            if not applied:
+                return
+            all_events = [dict(e) for e in registry.read_events_db(limit=100000)]
+            runs = list(registry.read_completed_runs())
+        except Exception as exc:  # noqa: BLE001 - best-effort; never abort the cycle
+            print(f"supervisor: effect measure skipped ({exc}).")
+            return
+        # Pre-bucket each completed run's events by its [spawned_at, terminated_at] window (D2).
+        buckets: list[tuple[str, "datetime | None", "datetime | None", list[dict[str, object]]]] = []
+        for run in runs:
+            pid = run.get("project_id")
+            if not isinstance(pid, str):
+                continue
+            start = _effect_parse_ts(run.get("spawned_at"))
+            end = _effect_parse_ts(run.get("terminated_at"))
+            evs = []
+            for e in all_events:
+                if e.get("project_id") != pid:
+                    continue
+                ts = _effect_parse_ts(e.get("ts_utc"))
+                if start is not None and ts is not None and ts < start:
+                    continue
+                if end is not None and ts is not None and ts > end:
+                    continue
+                evs.append(e)
+            buckets.append((pid, start, end, evs))
+        for finding in applied:
+            kind = str(finding.get("kind"))
+            subject = str(finding.get("subject"))
+            bclass = finding.get("binding_class")
+            bclass = str(bclass) if isinstance(bclass, str) else None
+            fkey = str(finding.get("finding_key"))
+            applied_raw = finding.get("decided_at")
+            applied_at = _effect_parse_ts(applied_raw if isinstance(applied_raw, str) else (applied_raw.isoformat() if hasattr(applied_raw, "isoformat") else None))
+            relevant = relevant_project_ids(kind, subject, all_events, binding_class=bclass)
+            before_runs: list[list[dict[str, object]]] = []
+            after_runs: list[list[dict[str, object]]] = []
+            for pid, _start, end, evs in buckets:
+                if pid not in relevant:
+                    continue
+                is_after = applied_at is not None and end is not None and end > applied_at
+                (after_runs if is_after else before_runs).append(evs)
+            record = measure_effect(
+                kind, subject, before_runs=before_runs, after_runs=after_runs,
+                binding_class=bclass, finding_key=fkey,
+                applied_at=applied_raw.isoformat() if hasattr(applied_raw, "isoformat") else (applied_raw if isinstance(applied_raw, str) else None),
+            )
+            try:
+                registry.upsert_audit_effect(record)
+            except Exception as exc:  # noqa: BLE001 - best-effort
+                print(f"supervisor: effect upsert for {fkey} skipped ({exc}).")
+            if (
+                record.outcome in (NO_EFFECT, REGRESSED)
+                and record.post_adoption_runs >= DEFAULT_MIN_POST_RUNS
+                and f"{fkey}:{record.outcome}" not in _effect_escalated
+            ):
+                escalation = Escalation(
+                    project_id="*fleet*",
+                    gate_id=f"effect:{fkey}",
+                    kind=ESCALATION_KIND_ROUTINE,
+                    reversible=True,
+                    suggested_option=(
+                        f"adopted learning '{fkey}' shows {record.outcome} "
+                        f"({record.detail}) — consider reverting via cf-* / re-propose"
+                    ),
+                    confidence=0.9,
+                    raised_at=datetime.now(timezone.utc),
+                )
+                state = attention_store.load()
+                attention_store.save(intake_escalation(state, escalation))
+                _effect_escalated.add(f"{fkey}:{record.outcome}")
+                print(f"supervisor: EFFECT — '{fkey}' {record.outcome}; raised an operator offer.")
+
     cycles = 0
     while args.max_cycles is None or cycles < args.max_cycles:
         # Re-read the kill-switch each cycle: the operator can engage/disengage between
@@ -544,6 +647,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
         cycle.run_once()
         _ingest_fleet_events()  # Fleet Analytics §1: ship all projects' events.jsonl to the DB
         _forecast_guard()  # Fleet Analytics §2: warn-only projected-spend guard
+        _measure_learning_effects()  # Effect-Measurement Loop: did adopted learnings help?
         cycles += 1
         if args.once or (args.max_cycles is not None and cycles >= args.max_cycles):
             break

@@ -447,6 +447,30 @@ def test_prune_events_deletes_before_cutoff(registry: Registry, conn: _FakeConn)
 
 
 @pytest.mark.unit
+def test_upsert_and_read_audit_effects(registry: Registry, conn: _FakeConn) -> None:
+    from supervisor.effect_measure import EffectRecord
+
+    registry.upsert_audit_effect(
+        EffectRecord(
+            finding_key="answerer_dsl_candidate:g1", kind="answerer_dsl_candidate", subject="g1",
+            applied_at="2026-06-08T00:00:00+00:00", before_metric=1.0, after_metric=0.0,
+            post_adoption_runs=4, outcome="confirmed", detail="confirmed",
+        )
+    )
+    sql, params = conn.executed[0]
+    assert "INSERT INTO run_audit_effects" in sql
+    assert "ON CONFLICT (finding_key) DO UPDATE" in sql
+    assert params[0] == "answerer_dsl_candidate:g1" and params[7] == "confirmed"
+
+    conn.fetchall_result = [
+        ("k", "session_shape", "s", "2026-06-08T00:00:00+00:00", 0.8, 0.2, 5, "confirmed", "d")
+    ]
+    rows = registry.read_audit_effects()
+    assert rows[0]["finding_key"] == "k" and rows[0]["outcome"] == "confirmed"
+    assert rows[0]["after_metric"] == 0.2
+
+
+@pytest.mark.unit
 def test_read_all_projects(registry: Registry, conn: _FakeConn) -> None:
     row = ("p1", "P1", "/p1", "k", "active", "candidate", 100, None, 0, None, [])
     conn.fetchall_result = [row]

@@ -182,6 +182,25 @@ def render_learnings(findings: Sequence[Mapping[str, object]]) -> str:
     return "\n".join(lines)
 
 
+def render_effects(rows: Sequence[Mapping[str, object]]) -> str:
+    """Render the learning effect-measurement pane (pure; over read_audit_effects rows)."""
+    if not rows:
+        return "effects: none measured yet (adopt a learning, then post-adoption runs accrue)."
+    lines = [f"effects: {len(rows)} adopted learning(s) measured:"]
+    for row in rows:
+        before = row.get("before_metric")
+        after = row.get("after_metric")
+        b = f"{before:.3f}" if isinstance(before, (int, float)) else "?"
+        a = f"{after:.3f}" if isinstance(after, (int, float)) else "?"
+        lines.append(
+            f"  [{row.get('outcome', '?')}] {row.get('finding_key', '?')}  "
+            f"{b} → {a} over {row.get('post_adoption_runs', 0)} post-run(s)"
+        )
+        if row.get("detail"):
+            lines.append(f"    {row.get('detail')}")
+    return "\n".join(lines)
+
+
 def render_correction_summary(rows: Sequence[Mapping[str, object]]) -> str:
     """Render the per-item correction-churn pane (pure; over read_correction_summary rows)."""
     if not rows:
@@ -330,6 +349,7 @@ def _main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI entry
     )
     sub.add_parser("learnings", help="list the captured Run-Auditor learnings (run_audit_findings)")
     sub.add_parser("corrections", help="list per-item correction-loop churn (correction_attempts)")
+    sub.add_parser("effects", help="list measured before/after effects of adopted learnings")
     promote_p = sub.add_parser("promote", help="accept a learning (queue it for adoption)")
     promote_p.add_argument("finding_key")
     reject_p = sub.add_parser("reject", help="reject a learning (suppress re-surfacing)")
@@ -475,6 +495,17 @@ def _main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI entry
         print(render_forecast(forecast, ceiling_usd=ceiling))
         return 0
 
+    if args.cmd == "effects":
+        dsn = os.environ.get("OL_SUPERVISOR_DB_URL")
+        if not dsn:
+            print("control_panel effects: OL_SUPERVISOR_DB_URL is not set.")
+            return 1
+        from supervisor.registry import Registry
+
+        registry = Registry.from_env()
+        print(render_effects(registry.read_audit_effects()))
+        return 0
+
     if args.cmd in ("corrections", "promote", "reject", "apply"):
         dsn = os.environ.get("OL_SUPERVISOR_DB_URL")
         if not dsn:
@@ -572,5 +603,6 @@ __all__ = [
     "render_learnings",
     "render_correction_summary",
     "render_events",
+    "render_effects",
     "build_dispatch_command",
 ]
