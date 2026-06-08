@@ -78,6 +78,7 @@ def _restore(conn: psycopg.Connection) -> None:
     cur.execute("DELETE FROM ralph_runs WHERE project_slug = %s", (SLUG,))
     cur.execute("DELETE FROM learning_records WHERE project_slug = %s", (SLUG,))
     cur.execute("DELETE FROM run_audit_findings WHERE finding_key = %s", (_TEST_FINDING_KEY,))
+    cur.execute("DELETE FROM correction_attempts WHERE project_slug = %s", (SLUG,))
     conn.commit()
 
 
@@ -154,6 +155,48 @@ def test_item2_db_capture_round_trip_live() -> None:
         found = {row["finding_key"]: row for row in registry.read_audit_findings()}
         assert _TEST_FINDING_KEY in found
         assert found[_TEST_FINDING_KEY]["runs_audited"] == 4  # refreshed by the 2nd upsert
+    finally:
+        _restore(verify)
+        verify.close()
+        live.close()
+
+
+def test_item2_corrections_and_lifecycle_round_trip_live() -> None:
+    """ol4 live: correction_attempts capture + summary, and the finding lifecycle status write."""
+    from supervisor.learn_assembly import CorrectionAttempt
+    from supervisor.run_auditor import AuditFinding, FindingKind
+
+    verify = _connect(autocommit=True)
+    live = _connect()
+    try:
+        registry = Registry(cast(DBConnection, live))
+
+        # correction_attempts: idempotent capture by event_uuid + per-item summary.
+        ca = CorrectionAttempt("oltest_learn_uuid1", SLUG, 1, 2, "L3", "oltest_item", None)
+        registry.upsert_correction_attempts([ca])
+        registry.upsert_correction_attempts([ca])  # idempotent (ON CONFLICT DO NOTHING)
+        summary = {row["item_id"]: row for row in registry.read_correction_summary()}
+        assert "oltest_item" in summary
+        assert int(summary["oltest_item"]["attempts"]) == 1  # not double-counted
+
+        # finding lifecycle: capture proposed -> promote (accepted) is recorded + authoring_skill set.
+        registry.upsert_audit_findings(
+            [
+                AuditFinding(
+                    kind=FindingKind.ANSWERER_DSL_CANDIDATE,
+                    subject="oltest_learn_gate",
+                    evidence="e",
+                    recommendation="r",
+                    routes_to="operator + cf-spec-writer",
+                )
+            ],
+            runs_audited=3,
+        )
+        registry.set_finding_status(_TEST_FINDING_KEY, "accepted", decided_by="live-test")
+        found = {r["finding_key"]: r for r in registry.read_audit_findings()}
+        assert found[_TEST_FINDING_KEY]["status"] == "accepted"
+        assert found[_TEST_FINDING_KEY]["authoring_skill"] == "cf-spec-writer"
+        assert found[_TEST_FINDING_KEY]["decided_by"] == "live-test"
     finally:
         _restore(verify)
         verify.close()
