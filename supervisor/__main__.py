@@ -307,11 +307,13 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
 
     # §4.4(6) Learn wiring (Item 2): the live completed-Run source + report/corpus sinks.
     from supervisor.attention import intake_escalation
+    from supervisor.event_ingest import events_file_for
     from supervisor.learn_assembly import (
         build_correction_attempts,
         completed_run_records,
         findings_to_escalations,
         learning_records,
+        read_events_jsonl,
         render_learning_corpus,
         run_facts_from_run,
         scoped_events_for_run,
@@ -324,6 +326,31 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
     )
 
     _correction_records: list[CorrectionRecord] = []
+
+    def _ingest_fleet_events() -> None:
+        """Ship every project's events.jsonl into the DB `events` table (Fleet Analytics §1).
+
+        Best-effort, idempotent (upsert by event_uuid) — never aborts the cycle. The outer loop is
+        the log-shipper the bash hooks could not be (it holds the psycopg connection)."""
+        try:
+            projects = list(registry.read_all_projects())
+        except Exception as exc:  # noqa: BLE001 - best-effort
+            print(f"supervisor: event ingest skipped ({exc}).")
+            return
+        total_new = 0
+        for project in projects:
+            path = events_file_for(project, workspace_root=workspace_root)
+            if path is None:
+                continue
+            events = read_events_jsonl(path)
+            if not events:
+                continue
+            try:
+                total_new += registry.upsert_events(events)
+            except Exception as exc:  # noqa: BLE001 - best-effort per project
+                print(f"supervisor: event ingest for {project.get('project_id')} skipped ({exc}).")
+        if total_new:
+            print(f"supervisor: ingested {total_new} new event(s) to the fleet events table.")
 
     logs_dir = Path(state_dir) / "logs"
 
@@ -460,6 +487,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
             delivered_keys=delivered_keys,
         )
         cycle.run_once()
+        _ingest_fleet_events()  # Fleet Analytics §1: ship all projects' events.jsonl to the DB
         cycles += 1
         if args.once or (args.max_cycles is not None and cycles >= args.max_cycles):
             break

@@ -353,6 +353,56 @@ def test_read_correction_summary_maps_rows(registry: Registry, conn: _FakeConn) 
     assert result[0]["max_level"] == "L4"
 
 
+# --- ol5: fleet event persistence ---
+
+
+@pytest.mark.unit
+def test_upsert_events_idempotent_and_counts_new(
+    registry: Registry, conn: _FakeConn
+) -> None:
+    conn.fetchall_result = [("u1",)]  # u1 already exists; u2 is new
+    events = [
+        {"event_uuid": "u1", "event_type": "gate_fire", "project_id": "p", "payload": {"a": 1}},
+        {"event_uuid": "u2", "event_type": "llm_call", "project_id": "p", "payload": {"cost_usd": "1.0"}},
+        {"event_type": "no_uuid"},  # skipped (no event_uuid)
+    ]
+    new_count = registry.upsert_events(events)
+    assert new_count == 1  # only u2 was new
+    inserts = [(q, p) for q, p in conn.executed if "INSERT INTO events" in q]
+    assert len(inserts) == 2  # u1 + u2 both issued (u1 ON CONFLICT DO NOTHING)
+    assert "ON CONFLICT (event_uuid) DO NOTHING" in inserts[0][0]
+    assert "%s::jsonb" in inserts[0][0]  # payload cast to jsonb
+    assert any('"a": 1' in str(p) for _q, p in inserts)  # payload serialised to JSON
+
+
+@pytest.mark.unit
+def test_upsert_events_empty_is_noop(registry: Registry, conn: _FakeConn) -> None:
+    assert registry.upsert_events([]) == 0
+    assert conn.executed == []
+
+
+@pytest.mark.unit
+def test_read_events_db_filters(registry: Registry, conn: _FakeConn) -> None:
+    conn.fetchall_result = [
+        ("u1", 1, "p", "p", 2, "gate", "gate_fire", "2026-06-07T10:00:00Z", {}, None, "g", "gate")
+    ]
+    result = registry.read_events_db(project_id="p", event_type="gate_fire", limit=10)
+    assert result[0]["event_uuid"] == "u1" and result[0]["event_type"] == "gate_fire"
+    sql, params = conn.executed[0]
+    assert "WHERE project_id = %s AND event_type = %s" in sql
+    assert params == ("p", "gate_fire", 10)
+
+
+@pytest.mark.unit
+def test_read_all_projects(registry: Registry, conn: _FakeConn) -> None:
+    row = ("p1", "P1", "/p1", "k", "active", "candidate", 100, None, 0, None, [])
+    conn.fetchall_result = [row]
+    result = registry.read_all_projects()
+    assert result[0]["project_id"] == "p1"
+    sql, _params = conn.executed[0]
+    assert "FROM projects" in sql and "WHERE" not in sql
+
+
 @pytest.mark.unit
 def test_set_lifecycle_state_persists_a_legal_transition(
     registry: Registry, conn: _FakeConn

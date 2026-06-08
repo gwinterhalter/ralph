@@ -15,6 +15,7 @@ from supervisor.control_panel import (
     build_dispatch_command,
     read_events,
     render_correction_summary,
+    render_events,
     render_learnings,
     render_metrics,
     run_status_panel,
@@ -195,3 +196,14 @@ def test_build_dispatch_command() -> None:
 def test_build_dispatch_command_requires_skill() -> None:
     with pytest.raises(ValueError, match="no authoring_skill"):
         build_dispatch_command({"finding_key": "k", "recommendation": "r"}, skills_dir="x")
+
+
+def test_render_events() -> None:
+    assert "none in the fleet" in render_events([])
+    rows = [
+        {"ts_utc": "2026-06-07T10:00:00Z", "project_id": "p1", "role": "gate",
+         "event_type": "gate_fire", "subject_id": "g1"},
+    ]
+    out = render_events(rows)
+    assert "events: 1" in out
+    assert "p1  gate/gate_fire g1" in out

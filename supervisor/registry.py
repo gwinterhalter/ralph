@@ -20,8 +20,9 @@ database.
 """
 from __future__ import annotations
 
+import json
 import os
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from decimal import Decimal
 from typing import TYPE_CHECKING, Protocol, cast
 
@@ -449,6 +450,91 @@ class Registry:
             cur.execute(sql)
             rows = cur.fetchall()
         return [dict(zip(cols, row)) for row in rows]
+
+    # --- Fleet event persistence (Fleet Analytics §1; ol5 events table) ---
+
+    #: The events-envelope columns (§4.1) the ingest writes / reads — fixed allowlist.
+    _EVENT_COLUMNS: tuple[str, ...] = (
+        "event_uuid",
+        "schema_version",
+        "project_id",
+        "initiative_slug",
+        "iteration_index",
+        "role",
+        "event_type",
+        "ts_utc",
+        "payload",
+        "duration_ms",
+        "subject_id",
+        "subject_kind",
+    )
+
+    def read_all_projects(self) -> Sequence[RegistryRow]:
+        """Return every ``projects`` row (all lifecycle states) — the event-ingest fleet scope."""
+        cols = ", ".join(PROJECT_COLUMNS)
+        sql = f"SELECT {cols} FROM projects"  # nosec B608 — fixed allowlist, no caller input
+        with self._conn.cursor() as cur:
+            cur.execute(sql)
+            rows = cur.fetchall()
+        return [dict(zip(PROJECT_COLUMNS, row)) for row in rows]
+
+    def upsert_events(self, events: "Sequence[Mapping[str, object]]") -> int:
+        """Ingest event-envelope dicts into the ``events`` table; return the count newly inserted.
+
+        Idempotent: keyed by ``event_uuid`` (``ON CONFLICT DO NOTHING``), so re-reading an
+        append-only ``events.jsonl`` never duplicates. ``payload`` is serialised to JSON and cast
+        to jsonb. Events lacking an ``event_uuid`` are skipped. One commit for the batch."""
+        rows = [e for e in events if isinstance(e.get("event_uuid"), str) and e.get("event_uuid")]
+        if not rows:
+            return 0
+        uuids = [str(e["event_uuid"]) for e in rows]
+        with self._conn.cursor() as cur:
+            cur.execute("SELECT event_uuid FROM events WHERE event_uuid = ANY(%s)", (uuids,))
+            existing = {str(r[0]) for r in cur.fetchall()}
+        cols = self._EVENT_COLUMNS
+        # payload takes a jsonb cast in its own position; every other value is a plain bind.
+        marks = ", ".join("%s::jsonb" if c == "payload" else "%s" for c in cols)
+        sql = (  # nosec B608 — fixed allowlist columns; values parameterised
+            f"INSERT INTO events ({', '.join(cols)}) VALUES ({marks}) "
+            "ON CONFLICT (event_uuid) DO NOTHING"
+        )
+        with self._conn.cursor() as cur:
+            for event in rows:
+                payload = event.get("payload")
+                payload_json = json.dumps(payload if payload is not None else {})
+                values = [
+                    event.get(col) if col != "payload" else payload_json for col in cols
+                ]
+                cur.execute(sql, tuple(values))
+        self._conn.commit()
+        return sum(1 for u in uuids if u not in existing)
+
+    def read_events_db(
+        self,
+        *,
+        project_id: str | None = None,
+        event_type: str | None = None,
+        limit: int = 200,
+    ) -> Sequence[RegistryRow]:
+        """Read persisted events (most recent first), optionally filtered by project / type."""
+        cols = ", ".join(self._EVENT_COLUMNS)
+        clauses: list[str] = []
+        params: list[object] = []
+        if project_id is not None:
+            clauses.append("project_id = %s")
+            params.append(project_id)
+        if event_type is not None:
+            clauses.append("event_type = %s")
+            params.append(event_type)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        sql = (  # nosec B608 — fixed allowlist columns; filters + limit parameterised
+            f"SELECT {cols} FROM events{where} ORDER BY ts_utc DESC LIMIT %s"
+        )
+        params.append(int(limit))
+        with self._conn.cursor() as cur:
+            cur.execute(sql, tuple(params))
+            rows = cur.fetchall()
+        return [dict(zip(self._EVENT_COLUMNS, row)) for row in rows]
 
     # --- Writes (Spec v1.3 §5.2-§5.5; sole write surface, NFR-006) ---
 

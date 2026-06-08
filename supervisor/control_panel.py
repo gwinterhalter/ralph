@@ -195,6 +195,21 @@ def render_correction_summary(rows: Sequence[Mapping[str, object]]) -> str:
     return "\n".join(lines)
 
 
+def render_events(rows: Sequence[Mapping[str, object]]) -> str:
+    """Render a fleet event list (pure; over read_events_db rows), most-recent first."""
+    if not rows:
+        return "events: none in the fleet events table."
+    lines = [f"events: {len(rows)} (most recent first):"]
+    for row in rows:
+        subject = row.get("subject_id")
+        suffix = f" {subject}" if subject else ""
+        lines.append(
+            f"  {row.get('ts_utc', '?')}  {row.get('project_id', '?')}  "
+            f"{row.get('role', '?')}/{row.get('event_type', '?')}{suffix}"
+        )
+    return "\n".join(lines)
+
+
 def build_dispatch_command(
     finding: Mapping[str, object], *, skills_dir: str
 ) -> list[str]:
@@ -268,7 +283,14 @@ def _main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI entry
         help="the orchestrator state dir (commands/, logs/events.jsonl).",
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("metrics", help="summarise logs/events.jsonl")
+    metrics_p = sub.add_parser("metrics", help="summarise events (a state-dir log, or --fleet from DB)")
+    metrics_p.add_argument(
+        "--fleet", action="store_true", help="summarise the whole fleet from the DB events table"
+    )
+    events_p = sub.add_parser("events", help="list persisted fleet events (DB)")
+    events_p.add_argument("--project", default=None)
+    events_p.add_argument("--type", dest="event_type", default=None)
+    events_p.add_argument("--limit", type=int, default=50)
     sub.add_parser("pause", help="write a pause command")
     sub.add_parser("query", help="write a query_register_state command")
     bump = sub.add_parser("bump", help="write a bump_budget command")
@@ -291,6 +313,35 @@ def _main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI entry
 
     args = parser.parse_args(argv)
     state_dir = Path(args.state_dir)
+
+    if args.cmd == "metrics" and getattr(args, "fleet", False):
+        dsn = os.environ.get("OL_SUPERVISOR_DB_URL")
+        if not dsn:
+            print("control_panel metrics --fleet: OL_SUPERVISOR_DB_URL is not set.")
+            return 1
+        from supervisor.registry import Registry
+
+        registry = Registry.from_env()
+        events = [dict(r) for r in registry.read_events_db(limit=100000)]
+        print(render_metrics(summarize_events(events)))
+        return 0
+
+    if args.cmd == "events":
+        dsn = os.environ.get("OL_SUPERVISOR_DB_URL")
+        if not dsn:
+            print("control_panel events: OL_SUPERVISOR_DB_URL is not set.")
+            return 1
+        from supervisor.registry import Registry
+
+        registry = Registry.from_env()
+        print(
+            render_events(
+                registry.read_events_db(
+                    project_id=args.project, event_type=args.event_type, limit=args.limit
+                )
+            )
+        )
+        return 0
 
     if args.cmd == "metrics":
         events_path = state_dir / "logs" / "events.jsonl"
@@ -421,5 +472,6 @@ __all__ = [
     "render_metrics",
     "render_learnings",
     "render_correction_summary",
+    "render_events",
     "build_dispatch_command",
 ]
