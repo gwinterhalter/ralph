@@ -22,6 +22,15 @@ logs/
 __pycache__/
 *.pyc
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Control-panel GUI (webui/app) JS build + test artifacts — never tracked.
+webui/app/node_modules/
+webui/app/dist/
+webui/app/test-results/
+webui/app/playwright-report/
+webui/app/.vite/
 
 #Claude
 # Exclude .claude/ CONTENTS (not the dir itself — required for the negation below to

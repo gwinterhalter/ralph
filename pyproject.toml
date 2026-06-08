@@ -18,6 +18,16 @@ dependencies = [
     "psutil>=5.9",
 ]
 
+[project.optional-dependencies]
+# Control-panel GUI server (webui/server/app.py). A thin FastAPI adapter over the supervisor
+# reads/write-seams; kept OUTSIDE the core deps + the strict mypy gate (files = ["supervisor"]) so
+# the hermetic unit suite and the headless CLI need none of it. Install with: pip install -e .[web]
+web = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "httpx>=0.27",
+]
+
 [tool.mypy]
 # FUP-0856: the enforced `mypy --strict` gate is PRODUCTION-only — the
 # `supervisor/` package. The `tests/` tree carries pre-existing strict-mode
