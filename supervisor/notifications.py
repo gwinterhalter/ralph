@@ -40,24 +40,38 @@ class SmtpConfig:
 
     @classmethod
     def from_env(cls) -> "SmtpConfig | None":
-        """Build from ``OL_SUPERVISOR_SMTP_*`` env, or None when not configured.
+        """Build from env, or None when not configured.
 
-        Requires at least ``HOST``, ``FROM``, and a non-empty comma-separated ``TO``;
-        returns None otherwise so the caller falls back to the no-op port.
+        Prefers explicit ``OL_SUPERVISOR_SMTP_*`` overrides, then falls back to the proven
+        inner-loop ``F_GMAIL_SMTP_*`` config the RL orchestrator's ``lib/notify.sh`` already
+        uses (review F-2) — so the supervisor delivers via the operator's existing gmail
+        app-password with NO redundant setup. The gmail defaults (``smtp.gmail.com`` / ``587`` /
+        STARTTLS) apply when only the identity vars are present. Requires at least a sender and a
+        non-empty recipient list; returns None otherwise so the caller falls back to the no-op
+        port. The app-password value is read from env and never logged.
         """
-        host = os.environ.get("OL_SUPERVISOR_SMTP_HOST")
-        sender = os.environ.get("OL_SUPERVISOR_SMTP_FROM")
-        raw_to = os.environ.get("OL_SUPERVISOR_SMTP_TO", "")
-        recipients = tuple(r.strip() for r in raw_to.split(",") if r.strip())
-        if not host or not sender or not recipients:
+        def _env(*names: str) -> str | None:
+            for name in names:
+                value = os.environ.get(name)
+                if value:
+                    return value
             return None
+
+        sender = _env("OL_SUPERVISOR_SMTP_FROM", "F_GMAIL_SMTP_USER")
+        raw_to = _env("OL_SUPERVISOR_SMTP_TO", "F_GMAIL_SMTP_TO") or ""
+        recipients = tuple(r.strip() for r in raw_to.split(",") if r.strip())
+        if not sender or not recipients:
+            return None
+        host = _env("OL_SUPERVISOR_SMTP_HOST", "F_GMAIL_SMTP_HOST") or "smtp.gmail.com"
+        port = int(_env("OL_SUPERVISOR_SMTP_PORT", "F_GMAIL_SMTP_PORT") or "587")
         return cls(
             host=host,
-            port=int(os.environ.get("OL_SUPERVISOR_SMTP_PORT", "587")),
+            port=port,
             sender=sender,
             recipients=recipients,
-            username=os.environ.get("OL_SUPERVISOR_SMTP_USER"),
-            password=os.environ.get("OL_SUPERVISOR_SMTP_PASSWORD"),
+            # login user defaults to the gmail account (F_GMAIL_SMTP_USER is both sender + login).
+            username=_env("OL_SUPERVISOR_SMTP_USER", "F_GMAIL_SMTP_USER"),
+            password=_env("OL_SUPERVISOR_SMTP_PASSWORD", "F_GMAIL_SMTP_APP_PASSWORD"),
             use_tls=os.environ.get("OL_SUPERVISOR_SMTP_TLS", "1") != "0",
         )
 

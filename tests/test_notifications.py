@@ -127,15 +127,25 @@ def test_smtp_port_skips_tls_and_login_when_unset() -> None:
     assert fake.logged_in is None
 
 
+_ALL_SMTP_ENV = (
+    "OL_SUPERVISOR_SMTP_HOST",
+    "OL_SUPERVISOR_SMTP_FROM",
+    "OL_SUPERVISOR_SMTP_TO",
+    "OL_SUPERVISOR_SMTP_PORT",
+    "OL_SUPERVISOR_SMTP_USER",
+    "OL_SUPERVISOR_SMTP_PASSWORD",
+    "F_GMAIL_SMTP_USER",
+    "F_GMAIL_SMTP_TO",
+    "F_GMAIL_SMTP_APP_PASSWORD",
+    "F_GMAIL_SMTP_HOST",
+    "F_GMAIL_SMTP_PORT",
+)
+
+
 def test_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    for var in (
-        "OL_SUPERVISOR_SMTP_HOST",
-        "OL_SUPERVISOR_SMTP_FROM",
-        "OL_SUPERVISOR_SMTP_TO",
-        "OL_SUPERVISOR_SMTP_PORT",
-    ):
+    for var in _ALL_SMTP_ENV:
         monkeypatch.delenv(var, raising=False)
-    assert SmtpConfig.from_env() is None  # unconfigured
+    assert SmtpConfig.from_env() is None  # unconfigured (neither OL_* nor F_GMAIL_*)
 
     monkeypatch.setenv("OL_SUPERVISOR_SMTP_HOST", "smtp.x")
     monkeypatch.setenv("OL_SUPERVISOR_SMTP_FROM", "s@x")
@@ -145,10 +155,27 @@ def test_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cfg.recipients == ("a@x", "b@x")
 
 
+def test_from_env_falls_back_to_f_gmail(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review F-2: with no OL_SUPERVISOR_SMTP_* but the proven F_GMAIL_SMTP_* set, the
+    supervisor builds a working gmail config (zero redundant setup)."""
+    for var in _ALL_SMTP_ENV:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("F_GMAIL_SMTP_USER", "rl@gmail.com")
+    monkeypatch.setenv("F_GMAIL_SMTP_TO", "greg@example.com")
+    monkeypatch.setenv("F_GMAIL_SMTP_APP_PASSWORD", "app-pw")
+    cfg = SmtpConfig.from_env()
+    assert cfg is not None
+    assert cfg.sender == "rl@gmail.com"
+    assert cfg.username == "rl@gmail.com"
+    assert cfg.password == "app-pw"
+    assert cfg.recipients == ("greg@example.com",)
+    assert cfg.host == "smtp.gmail.com"  # gmail default
+    assert cfg.port == 587  # gmail default
+
+
 def test_build_notification_port_falls_back_to_null(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("OL_SUPERVISOR_SMTP_HOST", raising=False)
-    monkeypatch.delenv("OL_SUPERVISOR_SMTP_FROM", raising=False)
-    monkeypatch.delenv("OL_SUPERVISOR_SMTP_TO", raising=False)
+    for var in _ALL_SMTP_ENV:
+        monkeypatch.delenv(var, raising=False)
     port = build_notification_port()
     assert isinstance(port, NullNotificationPort)
     assert port.deliver(_plan(NotificationBatch(tier=UrgencyTier.TOP, escalations=(_esc("p1"),)))) == 0
