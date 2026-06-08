@@ -50,7 +50,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -71,12 +71,17 @@ from supervisor.attention import (
     ESCALATION_KIND_SAFETY_GATE,
     AttentionState,
     Escalation,
+    NotificationBatch,
     NotificationPlan,
     QuietHours,
     intake_escalation,
     plan_notifications,
 )
 from supervisor.candidate_enrichment import default_candidate_enricher
+from supervisor.notifications import (
+    NotificationPort,
+    NullNotificationPort,
+)
 from supervisor.pid_probe import pid_alive
 from supervisor.reconcile import (
     REASON_STALLED,
@@ -398,6 +403,15 @@ class AttendConfig:
     incoming: Callable[[], Sequence[Escalation]] = field(
         default_factory=lambda: (lambda: ())
     )
+    #: Item 3 delivery: the notification port the planned batches are dispatched to (SMTP when
+    #: ``OL_SUPERVISOR_SMTP_*`` is configured, else the no-op :class:`NullNotificationPort`).
+    #: Default no-op → planning stays observable-free unless a real port is wired.
+    notification_port: NotificationPort = field(default_factory=NullNotificationPort)
+    #: Item 3 dedup ledger: ``(project_id, gate_id, raised_at-iso)`` keys already delivered, so an
+    #: unresolved escalation is paged once, not re-sent every cycle. An injected mutable set shared
+    #: across cycles by the production wiring. ``None`` (the default) disables dedup — the plan is
+    #: delivered as-is (back-compat for callers/tests that don't supply a ledger).
+    delivered_keys: "set[tuple[str, str, str]] | None" = None
 
 
 # --- RegistryRow -> ProjectRecord adaptation (the OLB-11 wiring step) ---------
@@ -573,12 +587,47 @@ def run_attend_step(registry: RegistryPort, config: AttendConfig) -> Notificatio
     for escalation in config.incoming():
         state = intake_escalation(state, escalation)
     config.attention_store.save(state)
-    return plan_notifications(
+    plan = plan_notifications(
         state,
         now=config.clock(),
         quiet_hours=config.quiet_hours,
         batch_window=config.batch_window,
     )
+    _deliver_notifications(config, plan)
+    return plan
+
+
+def _escalation_key(escalation: Escalation) -> tuple[str, str, str]:
+    """The dedup ledger key for an escalation: project + gate + raised-at instant."""
+    return (escalation.project_id, escalation.gate_id, escalation.raised_at.isoformat())
+
+
+def _deliver_notifications(config: AttendConfig, plan: NotificationPlan) -> None:
+    """Dispatch the planned batches through the notification port (Item 3).
+
+    With no dedup ledger (``delivered_keys is None``) the plan is delivered as-is. With a ledger,
+    each batch is filtered to escalations whose key is not already delivered; if any remain, the
+    filtered plan is delivered and — only when the port reports a send (``> 0``, so the no-op
+    NullNotificationPort never marks) — those keys are recorded so an unresolved escalation is
+    paged once, not re-sent every cycle.
+    """
+    ledger = config.delivered_keys
+    if ledger is None:
+        config.notification_port.deliver(plan)
+        return
+
+    fresh_batches: list[NotificationBatch] = []
+    fresh_keys: list[tuple[str, str, str]] = []
+    for batch in plan.batches:
+        fresh = tuple(e for e in batch.escalations if _escalation_key(e) not in ledger)
+        if fresh:
+            fresh_batches.append(replace(batch, escalations=fresh))
+            fresh_keys.extend(_escalation_key(e) for e in fresh)
+    if not fresh_batches:
+        return
+    filtered = NotificationPlan(batches=tuple(fresh_batches), deferred=plan.deferred)
+    if config.notification_port.deliver(filtered) > 0:
+        ledger.update(fresh_keys)
 
 
 # --- §4.4 step-5 Guard composition (OLB-14 / Spec v1.3 §9 / §10 / §11) --------

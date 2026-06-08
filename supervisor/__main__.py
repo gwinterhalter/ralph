@@ -29,11 +29,17 @@ from supervisor.candidate_enrichment import (
 from supervisor.cycle import SupervisionCycle
 from supervisor.cycle_wiring import (
     AttendConfig,
+    AttentionStateStore,
     GuardConfig,
     LearnConfig,
     ReconcileConfig,
     ScheduleConfig,
     stall_signals_from_actions,
+)
+from supervisor.notifications import (
+    NotificationPort,
+    NullNotificationPort,
+    build_notification_port,
 )
 from supervisor.heartbeats import read_heartbeats_from_log
 from supervisor.pid_probe import format_pid_start_time, pid_alive, probe_pid_start_time
@@ -87,6 +93,9 @@ def build_production_cycle(
     completed_project_ids: Callable[[], frozenset[str]] = lambda: frozenset(),
     learn_runs_source: Callable[[], Sequence[AuditRunRecord]] | None = None,
     learn_report_sink: Callable[[RunAuditReport], None] | None = None,
+    attention_store: AttentionStateStore | None = None,
+    notification_port: NotificationPort | None = None,
+    delivered_keys: "set[tuple[str, str, str]] | None" = None,
 ) -> SupervisionCycle:
     """Assemble a :class:`SupervisionCycle` wired with all five §4.4 step configs.
 
@@ -171,12 +180,28 @@ def build_production_cycle(
             runs_source=learn_runs_source, report_sink=learn_report_sink
         )
 
+    # Item 3: share ONE attention store across Attend + Guard so escalations the Guard raises
+    # (FR-038 safety trips, breaker trips, repair escalations) reach the Attend step's plan and
+    # get delivered. Attend runs before Guard, so a Guard-raised escalation is delivered next
+    # cycle (acceptable one-cycle latency). Default no-op port → delivery is off unless wired.
+    store = attention_store if attention_store is not None else AttentionStateStore()
+    attend_config = AttendConfig(
+        attention_store=store,
+        notification_port=(
+            notification_port if notification_port is not None else NullNotificationPort()
+        ),
+        delivered_keys=delivered_keys,
+    )
+
     return SupervisionCycle(
         registry,
         reconcile_config=reconcile_config,
         schedule_config=schedule_config,
-        attend_config=AttendConfig(),
-        guard_config=GuardConfig(stall_signals=_stall_signals),  # type: ignore[arg-type]
+        attend_config=attend_config,
+        guard_config=GuardConfig(
+            stall_signals=_stall_signals,  # type: ignore[arg-type]
+            attention_store=store,
+        ),
         learn_config=learn_config,
     )
 
@@ -317,6 +342,17 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
             f"{report.runs_audited} completed Run(s)."
         )
 
+    # Item 3 notification dispatch: build the attention store, the notification port, and the
+    # dedup ledger ONCE here so they persist across cycles (build_production_cycle is re-invoked
+    # every cycle). The port is SMTP when OL_SUPERVISOR_SMTP_* is configured, else a no-op — so
+    # delivery is safe/off by default. The shared store carries Guard-raised escalations into the
+    # next cycle's Attend plan; the ledger pages each unresolved escalation once.
+    attention_store = AttentionStateStore()
+    notification_port = build_notification_port()
+    delivered_keys: set[tuple[str, str, str]] = set()
+    if not isinstance(notification_port, NullNotificationPort):
+        print("supervisor: notification delivery ENABLED (OL_SUPERVISOR_SMTP_* configured).")
+
     cycles = 0
     while args.max_cycles is None or cycles < args.max_cycles:
         # Re-read the kill-switch each cycle: the operator can engage/disengage between
@@ -349,6 +385,9 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
             completed_project_ids=registry.read_completed_project_ids,
             learn_runs_source=_learn_runs_source,
             learn_report_sink=_learn_report_sink,
+            attention_store=attention_store,
+            notification_port=notification_port,
+            delivered_keys=delivered_keys,
         )
         cycle.run_once()
         cycles += 1
