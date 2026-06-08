@@ -171,6 +171,23 @@ def test_read_running_filters_to_running_state(
 
 
 @pytest.mark.unit
+def test_read_completed_project_ids_filters_to_complete_state(
+    registry: Registry, conn: _FakeConn
+) -> None:
+    """Item 1: read_completed_project_ids issues a parameterised SELECT filtered to the
+    ``complete`` lifecycle state and returns the project_ids as a frozenset."""
+    conn.fetchall_result = [("A",), ("B",)]
+
+    result = registry.read_completed_project_ids()
+
+    assert result == frozenset({"A", "B"})
+    sql, params = conn.executed[0]
+    assert "WHERE lifecycle_state = %s" in sql
+    assert "project_id" in sql
+    assert params == ("complete",)
+
+
+@pytest.mark.unit
 def test_set_lifecycle_state_persists_a_legal_transition(
     registry: Registry, conn: _FakeConn
 ) -> None:

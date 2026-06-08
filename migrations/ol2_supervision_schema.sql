@@ -27,6 +27,12 @@ ALTER TABLE projects ADD COLUMN IF NOT EXISTS priority               integer NOT
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS blast_radius_scope     jsonb;
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS attention_debt         integer NOT NULL DEFAULT 0;
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS heartbeat_workstream_id text;
+-- Cross-initiative dependency gating (Item 1): the prerequisite project_ids a Candidate must wait
+-- on. The admission gate HOLDS a Candidate (left `candidate`, retried each cycle — not rejected,
+-- not spawned) while any listed prerequisite is not yet `complete`. Defaults to the empty array, so
+-- every single-initiative project is unblocked unless it declares prerequisites (zero behaviour
+-- change for existing rows). FR-022/FR-019 admission-precondition family.
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS depends_on             text[] NOT NULL DEFAULT '{}';
 
 -- ---------------------------------------------------------------------------
 -- §5.4 Run Registry — `ralph_runs` (FR-009..014). seed_path is NOT NULL (the

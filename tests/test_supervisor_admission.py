@@ -28,12 +28,14 @@ import pytest
 
 from supervisor.admission import (
     EMPTY_REGISTRY,
+    PREREQUISITE_INCOMPLETE,
     SEED_INVALID,
     SLUG_COLLISION,
     UNRESOLVABLE_BLAST_RADIUS,
     AdmissionRejection,
     AdmitDecision,
     AdmittedHold,
+    DependencyHold,
     ReconciledFailure,
     RunRecord,
     SeedFinding,
@@ -44,6 +46,7 @@ from supervisor.admission import (
     admit_and_spawn,
     admit_candidate,
     discover_candidates,
+    unmet_prerequisites,
 )
 from supervisor.ports import RegistryPort, RegistryRow
 from supervisor.safety_gates import (
@@ -527,3 +530,93 @@ def test_fr021_spawn_raises_is_reconciled_not_propagated() -> None:
     assert isinstance(result, ReconciledFailure)
     assert ("projA", "failed") in port.run_status_updates
     assert ("projA", "failed") in port.lifecycle_writes
+
+
+# --- Item 1: cross-initiative dependency gating -------------------------------
+
+
+@pytest.mark.unit
+def test_item1_unmet_prerequisites_predicate() -> None:
+    """``unmet_prerequisites`` returns the depends_on entries not in the completed set.
+
+    Covers the list / bare-string / absent shapes the ``depends_on`` text[] column may
+    surface, and that a fully-satisfied / no-dependency Candidate yields ``()``.
+    """
+    completed = frozenset({"A", "B"})
+    assert unmet_prerequisites({"depends_on": ["A", "C"]}, completed) == ("C",)
+    assert unmet_prerequisites({"depends_on": ["A", "B"]}, completed) == ()
+    assert unmet_prerequisites({"depends_on": "C"}, completed) == ("C",)  # bare string
+    assert unmet_prerequisites({}, completed) == ()  # no depends_on
+    assert unmet_prerequisites({"depends_on": None}, completed) == ()
+
+
+@pytest.mark.unit
+def test_item1_unmet_prerequisite_holds_candidate_without_writes() -> None:
+    """A Candidate whose ``depends_on`` names a not-yet-complete prerequisite is HELD:
+    a :class:`DependencyHold` (reason ``prerequisite_incomplete``), left ``candidate`` with
+    NO registry write — and the costlier seed validation is never even consulted."""
+    port = _RecordingRegistryPort()
+    seed = _FakeSeedValidator()
+    result = _admit_dependent(port, seed, completed=frozenset())  # prerequisite NOT complete
+
+    assert isinstance(result, DependencyHold)
+    assert result.reason == PREREQUISITE_INCOMPLETE
+    assert result.unmet_prerequisites == ("prereq",)
+    # HELD with no write at all — not moved to `admitted`, not spawned, not rejected.
+    assert port.calls == []
+    assert port.lifecycle_writes == []
+    assert port.runs_recorded == []
+    # The dependency hold short-circuits BEFORE seed validation.
+    assert seed.calls == []
+
+
+@pytest.mark.unit
+def test_item1_met_prerequisite_admits_and_spawns() -> None:
+    """The same dependent Candidate, once its prerequisite is ``complete``, admits + spawns."""
+    port = _RecordingRegistryPort()
+    seed = _FakeSeedValidator()
+    result = _admit_dependent(port, seed, completed=frozenset({"prereq"}))
+
+    assert isinstance(result, RunRecord)
+    assert ("dependent", "running") in port.lifecycle_writes
+    assert seed.calls == ["validate_seed"]  # the gate proceeded past the dependency check
+
+
+@pytest.mark.unit
+def test_item1_no_depends_on_is_unchanged() -> None:
+    """A Candidate that declares no ``depends_on`` is never dependency-held — the gate
+    behaves exactly as before regardless of the completed set (back-compat)."""
+    port = _RecordingRegistryPort()
+    result = admit_candidate(
+        _candidate(project_id="solo"),
+        seed_validator=_FakeSeedValidator(),
+        registry_port=port,
+        spawn_port=_FakeSpawnPort(),
+        kill_switch=KillSwitch(),
+        running_count=0,
+        concurrency_ceiling=CEILING,
+        completed_project_ids=frozenset(),  # empty completed set, but no deps → unaffected
+    )
+    assert isinstance(result, RunRecord)
+
+
+def _admit_dependent(
+    port: _RecordingRegistryPort,
+    seed: _FakeSeedValidator,
+    *,
+    completed: frozenset[str],
+) -> object:
+    """Run a Candidate that ``depends_on`` 'prereq' through the pipeline."""
+    candidate = dict(_candidate(project_id="dependent"))
+    candidate["depends_on"] = ["prereq"]
+    return admit_candidate(
+        candidate,
+        seed_validator=seed,
+        registry_port=port,
+        spawn_port=_FakeSpawnPort(),
+        kill_switch=KillSwitch(),
+        running_count=0,
+        concurrency_ceiling=CEILING,
+        clock=_fixed_clock,
+        completed_project_ids=completed,
+    )

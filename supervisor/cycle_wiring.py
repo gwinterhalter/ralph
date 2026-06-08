@@ -59,11 +59,13 @@ from typing import TYPE_CHECKING, Callable
 from supervisor.admission import (
     AdmissionRejection,
     AdmittedHold,
+    DependencyHold,
     ReconciledFailure,
     RunRecord,
     SeedValidatorPort,
     SpawnPort,
     admit_candidate,
+    unmet_prerequisites,
 )
 from supervisor.attention import (
     ESCALATION_KIND_SAFETY_GATE,
@@ -125,7 +127,9 @@ if TYPE_CHECKING:
 # §6.1). A RunRecord is a spawned Run; AdmittedHold is the FR-019 ceiling hold;
 # ReconciledFailure / AdmissionRejection are the non-spawn terminals. Named once
 # so the spawn-arm return annotation cannot drift from admit_candidate's.
-DispatchOutcome = RunRecord | ReconciledFailure | AdmittedHold | AdmissionRejection
+DispatchOutcome = (
+    RunRecord | ReconciledFailure | AdmittedHold | DependencyHold | AdmissionRejection
+)
 
 
 # --- Persisted scheduler round-state (FR-025 / FR-026) ------------------------
@@ -349,6 +353,15 @@ class ScheduleConfig:
     #: Without this an ``admitted`` Project is dispatched-eligible per the scheduler but
     #: never appears in its input, so a held Project would be orphaned.
     admitted_source: Callable[[], "Sequence[RegistryRow]"] = field(default=lambda: [])
+    #: Item 1 cross-initiative dependency gating: the set of ``complete`` project_ids a
+    #: Candidate's ``depends_on`` is checked against (production wires
+    #: ``Registry.read_completed_project_ids``). A Candidate with any unmet prerequisite is
+    #: filtered out of the dispatch pool this cycle (so it never consumes the single dispatch
+    #: slot) AND held by admission as a safety net. Default empty → nothing is dependency-blocked
+    #: (a single-initiative fleet is unchanged).
+    completed_project_ids: Callable[[], frozenset[str]] = field(
+        default=lambda: frozenset()
+    )
     #: FR-013 recorded-half recorder: persists the spawned orchestrator's OS start-time
     #: into the Run's ``metadata.pid_start_time`` post-spawn (production wires
     #: ``Registry.record_pid_start_time``). An injected callable, NOT a RegistryPort
@@ -452,7 +465,12 @@ def run_schedule_step(
     spawn-or-hold decision is admission's on the live ``running_count`` — the §9.3
     precedence that the safety floor, not the scheduler, is the hard ceiling.
     """
-    candidates = [row for row in registry.read_candidates() if config.project_filter(row)]
+    completed = config.completed_project_ids()
+    candidates = [
+        row
+        for row in registry.read_candidates()
+        if config.project_filter(row) and not unmet_prerequisites(row, completed)
+    ]
     admitted = [row for row in config.admitted_source() if config.project_filter(row)]
     running = [row for row in registry.read_running() if config.project_filter(row)]
     running_count = len(running)
@@ -460,7 +478,10 @@ def run_schedule_step(
 
     # Candidates AND ceiling-held `admitted` Projects are both spawn-eligible (FR-019
     # hold → spawn once headroom frees); both are presented to the scheduler as
-    # ADMITTED records and are the lookup pool for the spawn step.
+    # ADMITTED records and are the lookup pool for the spawn step. Item 1: dependency-blocked
+    # Candidates were already excluded above, so a blocked Project never consumes the single
+    # per-cycle dispatch slot (`admitted` Projects already cleared the gate, dependency
+    # included, so they need no re-filter here).
     dispatchable = [*candidates, *admitted]
     records = to_project_records(
         dispatchable, running, open_work_counts=config.open_work_counts
@@ -480,7 +501,9 @@ def run_schedule_step(
     config.round_state_store.save(decision.round_state)
 
     if decision.dispatch_kind == "spawn":
-        _spawn_selected(registry, config, decision.project_id, dispatchable, running_count)
+        _spawn_selected(
+            registry, config, decision.project_id, dispatchable, running_count, completed
+        )
     # The resume arm (a `running` Project's next iteration) is OLB-16; it is never
     # selected here because every `running` Project is FR-027 in-flight-excluded.
     return decision
@@ -492,6 +515,7 @@ def _spawn_selected(
     project_id: str,
     candidates: Sequence[RegistryRow],
     running_count: int,
+    completed_project_ids: frozenset[str] = frozenset(),
 ) -> DispatchOutcome:
     """Run the scheduler-selected Candidate through the §6 Admission Pipeline.
 
@@ -522,6 +546,7 @@ def _spawn_selected(
         concurrency_ceiling=config.concurrency_ceiling,
         clock=config.clock,
         record_start_time=config.record_start_time,
+        completed_project_ids=completed_project_ids,
     )
 
 

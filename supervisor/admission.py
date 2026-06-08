@@ -68,6 +68,10 @@ EMPTY_REGISTRY = "empty_registry"
 SLUG_COLLISION = "slug_collision"
 #: FR-020 — no Blast-Radius Scope is derivable from the Candidate's seed.
 UNRESOLVABLE_BLAST_RADIUS = "unresolvable_blast_radius"
+#: Item 1 (cross-initiative dependency gating) — a prerequisite in the Candidate's ``depends_on``
+#: is not yet ``complete``. This is a HOLD reason (carried on :class:`DependencyHold`), NOT a
+#: rejection: the Candidate is left ``candidate`` and retried each cycle, never rejected.
+PREREQUISITE_INCOMPLETE = "prerequisite_incomplete"
 
 #: The admission-side reasons. A §9.3 safety-gate refusal additionally passes its own
 #: canonical reason through (:data:`~supervisor.safety_gates.REFUSAL_REASONS`).
@@ -228,6 +232,26 @@ class AdmittedHold:
 
 
 @dataclass(frozen=True)
+class DependencyHold:
+    """Item 1 dependency hold — a prerequisite in the Candidate's ``depends_on`` is not yet
+    ``complete``, so the Candidate is HELD: left in ``candidate`` (NOT moved to ``admitted``,
+    NOT rejected) and retried every cycle until its prerequisites clear (cross-initiative
+    dependency gating — the ABS Phase 0→1→2 chain).
+
+    Distinct from :class:`AdmittedHold` (the FR-019 ceiling hold, which writes
+    ``candidate -> admitted``): a :class:`DependencyHold` issues NO registry write at all.
+    Carries the ``unmet_prerequisites`` for the surface / audit. Falsey — nothing was spawned.
+    """
+
+    project_id: str
+    unmet_prerequisites: tuple[str, ...]
+    reason: str = PREREQUISITE_INCOMPLETE
+
+    def __bool__(self) -> bool:
+        return False
+
+
+@dataclass(frozen=True)
 class RunRecord:
     """The FR-021 admit-and-spawn SUCCESS result (Spec v1.3 §6.2 FR-021).
 
@@ -288,12 +312,18 @@ def admission_gate(
     kill_switch: KillSwitch,
     running_count: int,
     concurrency_ceiling: int = DEFAULT_CONCURRENCY_CEILING,
-) -> AdmitDecision | AdmittedHold | AdmissionRejection:
+    completed_project_ids: frozenset[str] = frozenset(),
+) -> AdmitDecision | AdmittedHold | DependencyHold | AdmissionRejection:
     """Evaluate the §6 Admission Gate for one Candidate — a PURE decision (no write).
 
     The preconditions are evaluated in a fixed order, short-circuiting to the first
     failing precondition's recorded reason:
 
+    0. **Item 1 cross-initiative dependency** — if the Candidate's ``depends_on`` names any
+       prerequisite project not in ``completed_project_ids``, return a :class:`DependencyHold`
+       (left ``candidate``, retried each cycle — not rejected, not spawned). Checked first so a
+       dependency-blocked Candidate skips the more expensive seed/blast-radius work. A Candidate
+       with no ``depends_on`` (the default empty array) is never held here.
     1. **FR-016 / FR-054 seed-validity** — a SEVERE ``SS-*`` finding blocks ``candidate
        -> admitted`` with reason :data:`SEED_INVALID` (the finding recorded);
     2. **FR-017 non-empty-registry** — no ``open`` item -> :data:`EMPTY_REGISTRY`;
@@ -313,6 +343,13 @@ def admission_gate(
     :class:`AdmittedHold` at the ceiling, or an :class:`AdmissionRejection` otherwise.
     """
     project_id = _project_id(candidate)
+
+    # 0. Item 1 — cross-initiative dependency hold: any unmet (not-yet-complete) prerequisite
+    #    holds the Candidate (left `candidate`, retried). Checked before the costlier seed /
+    #    blast-radius work; a no-`depends_on` Candidate (default) is never held here.
+    unmet = unmet_prerequisites(candidate, completed_project_ids)
+    if unmet:
+        return DependencyHold(project_id=project_id, unmet_prerequisites=unmet)
 
     # 1. FR-016 / FR-054 — the seed-validation admission hook blocks candidate->admitted.
     severe = _first_severe_finding(seed_validator.validate_seed(candidate))
@@ -499,13 +536,16 @@ def admit_candidate(
     concurrency_ceiling: int = DEFAULT_CONCURRENCY_CEILING,
     clock: Callable[[], str] = _utc_now_iso,
     record_start_time: Callable[[str, str], None] | None = None,
-) -> RunRecord | ReconciledFailure | AdmittedHold | AdmissionRejection:
+    completed_project_ids: frozenset[str] = frozenset(),
+) -> RunRecord | ReconciledFailure | AdmittedHold | DependencyHold | AdmissionRejection:
     """Run one Candidate through the §6 Admission Pipeline — the only path Candidate ->
     ``running`` (Spec v1.3 §6.1). Admission ends in exactly one outcome:
 
     * :class:`RunRecord` — admitted-and-spawned (FR-021 success);
     * :class:`ReconciledFailure` — admitted but the spawn failed, reconciled (FR-021);
     * :class:`AdmittedHold` — admitted and HELD at the ceiling, nothing spawned (FR-019);
+    * :class:`DependencyHold` — a prerequisite is not yet ``complete``; the Candidate is left
+      ``candidate`` and retried, nothing written or spawned (Item 1 dependency gating);
     * :class:`AdmissionRejection` — rejected with a recorded reason (FR-016–020 / §9.3).
 
     Never partially admits: the gate decision wholly determines which single terminal
@@ -518,8 +558,13 @@ def admit_candidate(
         kill_switch=kill_switch,
         running_count=running_count,
         concurrency_ceiling=concurrency_ceiling,
+        completed_project_ids=completed_project_ids,
     )
     if isinstance(decision, AdmissionRejection):
+        return decision
+    if isinstance(decision, DependencyHold):
+        # Item 1 — a prerequisite is incomplete: HOLD with NO registry write (the Candidate
+        # stays `candidate` and is re-evaluated next cycle once its prerequisite completes).
         return decision
     if isinstance(decision, AdmittedHold):
         # FR-019 — transition candidate -> admitted and HOLD: no Run row, no spawn.
@@ -556,6 +601,37 @@ def _slug(candidate: RegistryRow) -> str:
 def _seed_path(candidate: RegistryRow) -> str:
     """The Candidate's seed path — the §6.3 spawn target."""
     return str(candidate.get("seed_path", ""))
+
+
+def _depends_on(candidate: RegistryRow) -> tuple[str, ...]:
+    """The Candidate's prerequisite ``project_id``s (Item 1), or empty.
+
+    Reads the ``depends_on`` ``projects`` column (a ``text[]`` surfaced as a list). A bare
+    string is treated as one prerequisite (not iterated char-by-char); ``None`` / absent /
+    a non-collection yields no prerequisites — so a project that declares none is never held.
+    """
+    value = candidate.get("depends_on")
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return (value,) if value else ()
+    if isinstance(value, (Sequence, frozenset, set)) and not isinstance(value, Mapping):
+        return tuple(str(item) for item in value if str(item))
+    return ()
+
+
+def unmet_prerequisites(
+    candidate: RegistryRow, completed_project_ids: frozenset[str]
+) -> tuple[str, ...]:
+    """The Candidate's prerequisite ``project_id``s that are NOT yet ``complete`` (Item 1).
+
+    The single predicate behind both the §6 admission dependency hold and the Schedule step's
+    dependency filter, so the two cannot drift. Empty iff the Candidate declares no ``depends_on``
+    or every listed prerequisite is in ``completed_project_ids``.
+    """
+    return tuple(
+        prereq for prereq in _depends_on(candidate) if prereq not in completed_project_ids
+    )
 
 
 def _open_item_count(candidate: RegistryRow) -> int:
@@ -629,6 +705,7 @@ __all__ = [
     "EMPTY_REGISTRY",
     "SLUG_COLLISION",
     "UNRESOLVABLE_BLAST_RADIUS",
+    "PREREQUISITE_INCOMPLETE",
     "SEVERITY_SEVERE",
     "SeedFinding",
     "SeedValidatorPort",
@@ -637,9 +714,11 @@ __all__ = [
     "AdmissionRejection",
     "AdmitDecision",
     "AdmittedHold",
+    "DependencyHold",
     "RunRecord",
     "ReconciledFailure",
     "discover_candidates",
+    "unmet_prerequisites",
     "admission_gate",
     "admit_and_spawn",
     "admit_candidate",

@@ -77,6 +77,7 @@ PROJECT_COLUMNS: tuple[str, ...] = (
     "blast_radius_scope",
     "attention_debt",
     "heartbeat_workstream_id",
+    "depends_on",
 )
 
 # The ``ralph_runs`` columns a spawn row may carry (Spec v1.3 §5.4). ``project_slug``
@@ -227,6 +228,24 @@ class Registry:
             )
             mapped.append(record)
         return mapped
+
+    def read_completed_project_ids(self) -> frozenset[str]:
+        """Return the ``project_id``s of every Project in the ``complete`` lifecycle state
+        (Item 1 cross-initiative dependency gating).
+
+        The set of finished prerequisites the §6 admission dependency precondition checks a
+        Candidate's ``depends_on`` against: a Candidate is held (left ``candidate``) while any
+        listed prerequisite is absent from this set. Concrete-only — deliberately NOT on the
+        ``RegistryPort`` Protocol (no test-double ripple); the Schedule wiring consumes it via an
+        injected ``completed_project_ids`` callable. The ``complete`` value is a SQL literal here,
+        never caller input — no injection vector."""
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT project_id FROM projects WHERE lifecycle_state = %s",
+                ("complete",),
+            )
+            rows = cur.fetchall()
+        return frozenset(str(row[0]) for row in rows)
 
     def read_cumulative_spend_usd(self) -> Decimal:
         """Fleet cumulative spend — the sum of recorded ``terminal_cost_usd`` across all

@@ -77,6 +77,7 @@ def build_production_cycle(
     admitted_source: Callable[[], Sequence[RegistryRow]] = lambda: [],
     record_start_time: Callable[[str, str], None] | None = None,
     kill_switch: KillSwitch | None = None,
+    completed_project_ids: Callable[[], frozenset[str]] = lambda: frozenset(),
 ) -> SupervisionCycle:
     """Assemble a :class:`SupervisionCycle` wired with all five §4.4 step configs.
 
@@ -144,6 +145,10 @@ def build_production_cycle(
         # FR-036: an engaged Kill-Switch makes admission refuse ALL new dispatch this
         # cycle (running Runs untouched). Default disengaged → normal scheduling.
         kill_switch=kill_switch if kill_switch is not None else KillSwitch(),
+        # Item 1 cross-initiative dependency gating: the live `complete` project set a
+        # Candidate's depends_on is checked against (production wires
+        # registry.read_completed_project_ids). Default empty → nothing is blocked.
+        completed_project_ids=completed_project_ids,
     )
 
     return SupervisionCycle(
@@ -284,6 +289,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
             admitted_source=registry.read_admitted,
             record_start_time=registry.record_pid_start_time,
             kill_switch=kill_switch,
+            completed_project_ids=registry.read_completed_project_ids,
         )
         cycle.run_once()
         cycles += 1

@@ -26,7 +26,14 @@ from supervisor.registry import DB_URL_ENV, DBConnection
 
 #: Columns the supervisor reads off a ``projects`` row (subset that must exist).
 REQUIRED_PROJECT_COLUMNS: frozenset[str] = frozenset(
-    {"project_id", "lifecycle_state", "folder_path", "priority", "attention_debt"}
+    {
+        "project_id",
+        "lifecycle_state",
+        "folder_path",
+        "priority",
+        "attention_debt",
+        "depends_on",  # Item 1 cross-initiative dependency gating
+    }
 )
 #: Columns the supervisor reads/writes on a ``ralph_runs`` row (must exist).
 REQUIRED_RALPH_RUNS_COLUMNS: frozenset[str] = frozenset(
