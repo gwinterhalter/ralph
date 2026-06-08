@@ -116,6 +116,11 @@ def _no_completion(_row: RegistryRow) -> "RunCompletion | None":
     return None
 
 
+def _no_hang_override(_row: RegistryRow) -> "float | None":
+    """Default per-run hang-budget override: none (use the scalar ``hang_timeout_seconds``)."""
+    return None
+
+
 def derive_reconcile_actions(
     active_runs: Sequence[RegistryRow],
     *,
@@ -124,6 +129,7 @@ def derive_reconcile_actions(
     hang_timeout_seconds: float,
     progress_at: Callable[[RegistryRow], str | None] = _default_progress_at,
     completion_of: Callable[[RegistryRow], "RunCompletion | None"] = _no_completion,
+    hang_timeout_of: Callable[[RegistryRow], "float | None"] = _no_hang_override,
 ) -> list[ReconcileAction]:
     """Return the terminal reconciliations owed for ``active_runs``.
 
@@ -132,9 +138,14 @@ def derive_reconcile_actions(
     exited, so its PID is dead; without this it would be mis-reaped as ``failed``). A
     run with a present ``orchestrator_pid`` that ``pid_alive`` reports dead is an
     orphan -> ``failed``. A run still nominally alive (or with no pid recorded) whose
-    last progress is older than ``hang_timeout_seconds`` is a stall -> ``halted`` /
+    last progress is older than its hang budget is a stall -> ``halted`` /
     ``paused_gate``. A run that is alive and progressing yields no action. Rows
     missing a ``project_id`` are skipped (nothing to reconcile against).
+
+    The stall budget is per-run: ``hang_timeout_of(row)`` (the production wiring reads
+    the run's seed ``budget.hang_timeout_seconds``) when it returns a value, else the
+    fleet-default ``hang_timeout_seconds``. Default probe returns ``None`` for every
+    row, so the scalar applies uniformly (unchanged behaviour for existing callers).
     """
     actions: list[ReconcileAction] = []
     for row in active_runs:
@@ -171,8 +182,10 @@ def derive_reconcile_actions(
         ts = progress_at(row)
         if ts is None:
             continue
+        override = hang_timeout_of(row)
+        budget = override if override is not None else hang_timeout_seconds
         elapsed = _seconds_since(ts, now)
-        if elapsed is not None and elapsed > hang_timeout_seconds:
+        if elapsed is not None and elapsed > budget:
             actions.append(
                 ReconcileAction(
                     project_id=project_id,

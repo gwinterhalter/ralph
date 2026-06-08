@@ -263,6 +263,13 @@ class ReconcileConfig:
     completion_of: Callable[["RegistryRow"], "RunCompletion | None"] = field(
         default=lambda _row: None
     )
+    #: Per-run hang-budget override (F-4): returns the run's seed
+    #: ``budget.hang_timeout_seconds`` (production reads it off ``seed_path``), else
+    #: ``None`` → the fleet-default ``hang_timeout_seconds`` applies. Default never
+    #: overrides → unchanged behaviour.
+    hang_timeout_of: Callable[["RegistryRow"], "float | None"] = field(
+        default=lambda _row: None
+    )
 
 
 def run_reconcile_step(
@@ -286,6 +293,7 @@ def run_reconcile_step(
         hang_timeout_seconds=config.hang_timeout_seconds,
         progress_at=config.progress_at,
         completion_of=config.completion_of,
+        hang_timeout_of=config.hang_timeout_of,
     )
     if not actions:
         return actions

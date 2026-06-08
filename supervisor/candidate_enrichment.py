@@ -170,6 +170,28 @@ def _resolve_workspace_root(workspace_root: str | os.PathLike[str] | None) -> Pa
     return Path(str(root))
 
 
+def seed_hang_timeout_seconds(seed_path: str | os.PathLike[str]) -> float | None:
+    """Read ``budget.hang_timeout_seconds`` from the seed at ``seed_path`` (or ``None``).
+
+    The per-project stall budget the §4.4(1) Reconcile step honors (resolving review
+    finding F-4: the field was declared in every seed but read nowhere). Fault-tolerant:
+    returns ``None`` when the seed is unreadable, has no frontmatter, or declares no
+    numeric value — the caller then falls back to the fleet-default hang timeout. Booleans
+    are rejected (``isinstance(True, int)`` is True in Python). Never raises.
+    """
+    try:
+        text = Path(seed_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    budget = _parse_frontmatter(text).get("budget")
+    if not isinstance(budget, dict):
+        return None
+    value = budget.get("hang_timeout_seconds")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
 def enrich_candidate_from_seed(
     row: RegistryRow,
     *,
@@ -338,6 +360,7 @@ __all__ = [
     "WORKSPACE_ROOT_ENV",
     "enrich_candidate_from_seed",
     "open_work_counts_for",
+    "seed_hang_timeout_seconds",
     "make_seed_candidate_enricher",
     "default_candidate_enricher",
 ]

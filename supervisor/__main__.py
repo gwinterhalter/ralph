@@ -21,7 +21,11 @@ import sys
 from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
 
-from supervisor.candidate_enrichment import make_seed_candidate_enricher, open_work_counts_for
+from supervisor.candidate_enrichment import (
+    make_seed_candidate_enricher,
+    open_work_counts_for,
+    seed_hang_timeout_seconds,
+)
 from supervisor.cycle import SupervisionCycle
 from supervisor.cycle_wiring import (
     AttendConfig,
@@ -99,6 +103,14 @@ def build_production_cycle(
         spawned = row.get("spawned_at")  # coarse fallback (D4 docstring)
         return str(spawned) if isinstance(spawned, str) and spawned else None
 
+    def _hang_timeout_of(row: RegistryRow) -> "float | None":
+        """Per-run stall budget (F-4): the run's seed ``budget.hang_timeout_seconds``
+        off its recorded ``seed_path``, else ``None`` → the fleet default applies."""
+        seed = row.get("seed_path")
+        if isinstance(seed, str) and seed:
+            return seed_hang_timeout_seconds(seed)
+        return None
+
     reconcile_config = ReconcileConfig(
         active_runs_source=active_runs_source,
         pid_alive=pid_alive,
@@ -106,6 +118,7 @@ def build_production_cycle(
         progress_at=_progress_at,
         clock=now,
         completion_of=completion_probe,
+        hang_timeout_of=_hang_timeout_of,
     )
 
     def _stall_signals() -> dict[str, object]:
@@ -115,6 +128,7 @@ def build_production_cycle(
             now=now(),
             hang_timeout_seconds=hang_timeout_seconds,
             progress_at=_progress_at,
+            hang_timeout_of=_hang_timeout_of,
         )
         return dict(stall_signals_from_actions(actions))
 
