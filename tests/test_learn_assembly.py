@@ -7,6 +7,7 @@ from decimal import Decimal
 
 import pytest
 
+from supervisor.attention import auto_pick_eligible
 from supervisor.learn_assembly import (
     LearningRecord,
     RunFacts,
@@ -15,6 +16,7 @@ from supervisor.learn_assembly import (
     build_gate_events,
     build_shape_usages,
     completed_run_records,
+    findings_to_escalations,
     gate_events_from_run,
     learning_records,
     read_events_jsonl,
@@ -23,6 +25,7 @@ from supervisor.learn_assembly import (
 )
 from supervisor.run_auditor import (
     AuditConfig,
+    AuditFinding,
     BindingFindingClass,
     FindingKind,
     GateEvent,
@@ -287,6 +290,60 @@ def test_fr051_and_fr052_findings_fire() -> None:
     binding_classes = {f.binding_class for f in report.findings if f.kind is FindingKind.VERIFICATION_BINDING}
     assert BindingFindingClass.OVER_VERIFICATION in binding_classes
     assert BindingFindingClass.BINDING_DEFECT in binding_classes
+
+
+# --- Auto-feedback bridge: findings -> one-confirm operator escalations -------
+
+
+def test_findings_to_escalations_surfaces_only_new_keys() -> None:
+    from datetime import datetime, timezone
+
+    findings = [
+        AuditFinding(
+            kind=FindingKind.ANSWERER_DSL_CANDIDATE,
+            subject="g1",
+            evidence="e",
+            recommendation="add an Answerer rule pre-resolving 'g1' to 'A'",
+            routes_to="operator + cf-spec-writer",
+        ),
+        AuditFinding(
+            kind=FindingKind.SESSION_SHAPE,
+            subject="migration_author",
+            evidence="e",
+            recommendation="tune the shape",
+            routes_to="operator + cf-session-plan-reviewer",
+        ),
+    ]
+    now = datetime(2026, 6, 8, 9, 0, tzinfo=timezone.utc)
+    # Only g1 is NEW (the shape finding is already-known → not re-surfaced).
+    escalations = findings_to_escalations(
+        findings, new_keys={"answerer_dsl_candidate:g1"}, now=now
+    )
+
+    assert len(escalations) == 1
+    esc = escalations[0]
+    assert esc.gate_id == "learning:answerer_dsl_candidate:g1"
+    assert esc.kind == "routine"  # not urgent
+    assert esc.reversible is True
+    assert esc.suggested_option == "add an Answerer rule pre-resolving 'g1' to 'A'"
+    assert esc.confidence >= 0.7
+    # The escalation is eligible for the FR-032 one-confirm accept path.
+    assert auto_pick_eligible(esc) is True
+
+
+def test_findings_to_escalations_empty_when_no_new() -> None:
+    from datetime import datetime, timezone
+
+    findings = [
+        AuditFinding(
+            kind=FindingKind.ANSWERER_DSL_CANDIDATE,
+            subject="g1",
+            evidence="e",
+            recommendation="r",
+            routes_to="x",
+        )
+    ]
+    assert findings_to_escalations(findings, new_keys=set(), now=datetime.now(timezone.utc)) == []
 
 
 def test_read_events_jsonl_missing_file(tmp_path: object) -> None:

@@ -32,13 +32,16 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
+from supervisor.attention import ESCALATION_KIND_ROUTINE, Escalation
 from supervisor.ports import RegistryRow
 from supervisor.run_auditor import (
     TERMINAL_RUN_STATUSES,
+    AuditFinding,
     BindingOutcome,
     GateEvent,
     RunRecord,
     ShapeUsage,
+    finding_key,
 )
 
 # --- Event-stream gate-fact assembly (FR-050 Answerer-DSL candidates) ----------
@@ -406,10 +409,49 @@ def render_learning_corpus(records: "list[LearningRecord] | tuple[LearningRecord
     return "\n".join(lines)
 
 
+def findings_to_escalations(
+    findings: "list[AuditFinding] | tuple[AuditFinding, ...]",
+    *,
+    new_keys: set[str],
+    now: datetime,
+    project_id: str = "*fleet*",
+    confidence: float = 0.85,
+) -> list[Escalation]:
+    """Convert NEW Run-Auditor findings into routine one-confirm operator escalations (auto-feedback).
+
+    Only findings whose :func:`~supervisor.run_auditor.finding_key` is in ``new_keys`` are surfaced
+    (the ``run_audit_findings`` table dedups across passes → each learning is raised exactly once).
+    Each becomes a ROUTINE :class:`~supervisor.attention.Escalation` (batched / Quiet-Hours-deferrable
+    — a learning is not urgent) carrying the finding's ``recommendation`` as the ``suggested_option``
+    and a ``confidence`` the FR-032 one-confirm path reads; ``reversible=True`` (adopting a learning is
+    a reversible config edit). The next Attend pass delivers it via the notification port (Item 3), so
+    the operator is told the learning + a suggested action and can one-confirm. Pure — ``now`` injected,
+    no I/O. The findings already cleared the FR-050/051/052 consistency thresholds, hence the
+    confidence default sits above the seed one-confirm threshold (0.7)."""
+    escalations: list[Escalation] = []
+    for finding in findings:
+        key = finding_key(finding)
+        if key not in new_keys:
+            continue
+        escalations.append(
+            Escalation(
+                project_id=project_id,
+                gate_id=f"learning:{key}",
+                kind=ESCALATION_KIND_ROUTINE,
+                reversible=True,
+                suggested_option=finding.recommendation,
+                confidence=confidence,
+                raised_at=now,
+            )
+        )
+    return escalations
+
+
 __all__ = [
     "LearningRecord",
     "RunFacts",
     "assemble_run_facts",
+    "findings_to_escalations",
     "build_binding_outcomes",
     "build_gate_events",
     "build_shape_usages",

@@ -163,6 +163,18 @@ class AuditFinding:
     binding_class: BindingFindingClass | None = None
 
 
+def finding_key(finding: "AuditFinding") -> str:
+    """Stable identity for a finding: ``<kind>:<subject>[:<binding_class>]``.
+
+    The same pattern recurring across audit passes maps to one key (one persisted row; one
+    operator offer). Used by the DB capture (``run_audit_findings`` primary key) and the
+    auto-feedback bridge (a freshly-seen key is a NEW learning to surface once)."""
+    key = f"{finding.kind.value}:{finding.subject}"
+    if finding.binding_class is not None:
+        key = f"{key}:{finding.binding_class.value}"
+    return key
+
+
 @dataclass(frozen=True)
 class RunAuditReport:
     """The FR-049 pass result: the findings plus the window / threshold metadata."""

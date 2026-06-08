@@ -306,8 +306,10 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
         )
 
     # §4.4(6) Learn wiring (Item 2): the live completed-Run source + report/corpus sinks.
+    from supervisor.attention import intake_escalation
     from supervisor.learn_assembly import (
         completed_run_records,
+        findings_to_escalations,
         learning_records,
         render_learning_corpus,
         run_facts_from_run,
@@ -317,20 +319,27 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
     logs_dir = Path(state_dir) / "logs"
 
     def _learn_runs_source() -> list[AuditRunRecord]:
-        """Read the live terminal Runs, persist the cost/duration learning corpus snapshot
-        (best-effort), and hand the Run-Auditor its records."""
+        """Read the live terminal Runs, persist the cost/duration learning corpus (file +
+        DB, best-effort), and hand the Run-Auditor its records."""
         rows = list(registry.read_completed_runs())
+        records = learning_records(rows)
         try:
             logs_dir.mkdir(parents=True, exist_ok=True)
             (logs_dir / "learning_corpus.jsonl").write_text(
-                render_learning_corpus(learning_records(rows)), encoding="utf-8"
+                render_learning_corpus(records), encoding="utf-8"
             )
         except OSError:
             pass
+        try:
+            registry.upsert_learning_records(records)  # Item 2 DB capture (ol3)
+        except Exception as exc:  # noqa: BLE001 - capture is best-effort; never abort the cycle
+            print(f"supervisor: learning_records DB capture skipped ({exc}).")
         return completed_run_records(rows, facts_for=run_facts_from_run)
 
     def _learn_report_sink(report: RunAuditReport) -> None:
-        """Persist the findings-only Run-Auditor report (FR-053 — no registry write)."""
+        """Persist the findings-only Run-Auditor report (file + DB capture), then surface any NEW
+        findings to the operator via the attention queue (auto-feedback). FR-053 — the auditor
+        itself writes nothing; this persists its OWN findings + raises operator offers."""
         try:
             logs_dir.mkdir(parents=True, exist_ok=True)
             (logs_dir / "run_auditor_report.md").write_text(
@@ -338,6 +347,25 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
             )
         except OSError:
             pass
+        new_keys: list[str] = []
+        try:
+            new_keys = registry.upsert_audit_findings(
+                report.findings, runs_audited=report.runs_audited
+            )  # Item 2 DB capture (ol3); returns the finding_keys not seen before
+        except Exception as exc:  # noqa: BLE001 - capture is best-effort; never abort the cycle
+            print(f"supervisor: run_audit_findings DB capture skipped ({exc}).")
+        # Auto-feedback: surface only the NEW findings as one-confirm operator offers (deduped by
+        # the DB table → each learning is raised exactly once), intaken into the SHARED attention
+        # store so the next Attend pass delivers them via the notification port (Item 3).
+        if new_keys:
+            escalations = findings_to_escalations(
+                report.findings, new_keys=set(new_keys), now=datetime.now(timezone.utc)
+            )
+            state = attention_store.load()
+            for escalation in escalations:
+                state = intake_escalation(state, escalation)
+            attention_store.save(state)
+            print(f"supervisor: Learn pass — raised {len(escalations)} new learning offer(s).")
         print(
             f"supervisor: Learn pass — {len(report.findings)} finding(s) over "
             f"{report.runs_audited} completed Run(s)."

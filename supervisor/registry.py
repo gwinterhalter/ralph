@@ -26,6 +26,8 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Protocol, cast
 
 from supervisor import transitions
+from supervisor.learn_assembly import LearningRecord
+from supervisor.run_auditor import AuditFinding, finding_key
 
 if TYPE_CHECKING:
     from supervisor.ports import RegistryRow
@@ -300,6 +302,86 @@ class Registry:
             row = cur.fetchone()
         raw = row[0] if row else 0
         return raw if isinstance(raw, Decimal) else Decimal(str(raw))
+
+    # --- Learning capture (Item 2 DB capture; ol3 tables) ---
+    # The §4.4(6) Learn step's outputs persisted to queryable tables. These are the auditor's OWN
+    # outputs (surfacing), NOT a mutation of any audited artifact — the Run-Auditor stays read-only
+    # (FR-053). Concrete-only — NOT on the RegistryPort Protocol (no test-double ripple); the
+    # production Learn wiring consumes them. Column names are SQL literals; values parameterised.
+
+    def upsert_learning_records(self, records: "Sequence[LearningRecord]") -> None:
+        """UPSERT the per-completed-Run cost/duration/status corpus (keyed by run_id; idempotent)."""
+        for rec in records:
+            self._execute_write(
+                "INSERT INTO learning_records "
+                "(run_id, project_slug, status, cost_usd, duration_seconds) "
+                "VALUES (%s, %s, %s, %s, %s) "
+                "ON CONFLICT (run_id) DO UPDATE SET project_slug = EXCLUDED.project_slug, "
+                "status = EXCLUDED.status, cost_usd = EXCLUDED.cost_usd, "
+                "duration_seconds = EXCLUDED.duration_seconds, updated_at = now()",
+                (rec.run_id, rec.project_slug, rec.status, rec.cost_usd, rec.duration_seconds),
+            )
+
+    def upsert_audit_findings(
+        self, findings: "Sequence[AuditFinding]", *, runs_audited: int
+    ) -> list[str]:
+        """UPSERT the Run-Auditor findings (keyed by finding_key) and return the NEW finding_keys.
+
+        A finding_key absent from the table before this pass is NEW — returned so the auto-feedback
+        bridge surfaces it to the operator exactly once. Recurring findings refresh
+        evidence/recommendation/runs_audited + last_seen_at; first_seen_at is preserved."""
+        keys = [finding_key(f) for f in findings]
+        if not keys:
+            return []
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT finding_key FROM run_audit_findings WHERE finding_key = ANY(%s)", (keys,)
+            )
+            existing = {str(r[0]) for r in cur.fetchall()}
+        for finding, key in zip(findings, keys):
+            binding_class = (
+                finding.binding_class.value if finding.binding_class is not None else None
+            )
+            self._execute_write(
+                "INSERT INTO run_audit_findings (finding_key, kind, subject, binding_class, "
+                "evidence, recommendation, routes_to, runs_audited) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT (finding_key) DO UPDATE SET evidence = EXCLUDED.evidence, "
+                "recommendation = EXCLUDED.recommendation, runs_audited = EXCLUDED.runs_audited, "
+                "last_seen_at = now()",
+                (
+                    key,
+                    finding.kind.value,
+                    finding.subject,
+                    binding_class,
+                    finding.evidence,
+                    finding.recommendation,
+                    finding.routes_to,
+                    runs_audited,
+                ),
+            )
+        return [k for k in keys if k not in existing]
+
+    def read_audit_findings(self) -> Sequence[RegistryRow]:
+        """Return all persisted Run-Auditor findings, most-recently-seen first (control-panel read)."""
+        cols = (
+            "finding_key",
+            "kind",
+            "subject",
+            "binding_class",
+            "evidence",
+            "recommendation",
+            "routes_to",
+            "runs_audited",
+        )
+        col_list = ", ".join(cols)
+        sql = (  # nosec B608 — column names are the fixed allowlist above; no caller input
+            f"SELECT {col_list} FROM run_audit_findings ORDER BY last_seen_at DESC"
+        )
+        with self._conn.cursor() as cur:
+            cur.execute(sql)
+            rows = cur.fetchall()
+        return [dict(zip(cols, row)) for row in rows]
 
     # --- Writes (Spec v1.3 §5.2-§5.5; sole write surface, NFR-006) ---
 

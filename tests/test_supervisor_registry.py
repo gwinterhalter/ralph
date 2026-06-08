@@ -216,6 +216,81 @@ def test_read_completed_runs_filters_terminal_and_maps(
     assert "status IN ('complete', 'failed')" in sql
 
 
+# --- Item 2 DB capture (ol3) ---
+
+
+@pytest.mark.unit
+def test_upsert_learning_records_issues_upsert_per_record(
+    registry: Registry, conn: _FakeConn
+) -> None:
+    from decimal import Decimal
+
+    from supervisor.learn_assembly import LearningRecord
+
+    registry.upsert_learning_records(
+        [
+            LearningRecord("r1", "p", "complete", Decimal("1.25"), 300.0),
+            LearningRecord("r2", "p", "failed", None, None),
+        ]
+    )
+    statements = conn.statements()
+    inserts = [s for s in statements if "INSERT INTO LEARNING_RECORDS" in s]
+    assert len(inserts) == 2
+    assert "ON CONFLICT (RUN_ID) DO UPDATE" in inserts[0]
+    assert conn.commits == 2  # one commit per record
+
+
+@pytest.mark.unit
+def test_upsert_audit_findings_returns_new_keys(
+    registry: Registry, conn: _FakeConn
+) -> None:
+    from supervisor.run_auditor import AuditFinding, BindingFindingClass, FindingKind
+
+    findings = [
+        AuditFinding(
+            kind=FindingKind.ANSWERER_DSL_CANDIDATE,
+            subject="g1",
+            evidence="e",
+            recommendation="add a rule",
+            routes_to="operator + cf-spec-writer",
+        ),
+        AuditFinding(
+            kind=FindingKind.VERIFICATION_BINDING,
+            subject="cf-x",
+            evidence="e",
+            recommendation="r",
+            routes_to="operator + cf-seed-producer",
+            binding_class=BindingFindingClass.OVER_VERIFICATION,
+        ),
+    ]
+    # The pre-INSERT existence SELECT reports g1 already present → only the binding key is NEW.
+    conn.fetchall_result = [("answerer_dsl_candidate:g1",)]
+
+    new_keys = registry.upsert_audit_findings(findings, runs_audited=4)
+
+    assert new_keys == ["verification_binding:cf-x:over_verification"]
+    statements = conn.statements()
+    assert any("SELECT FINDING_KEY FROM RUN_AUDIT_FINDINGS" in s for s in statements)
+    assert sum("INSERT INTO RUN_AUDIT_FINDINGS" in s for s in statements) == 2
+
+
+@pytest.mark.unit
+def test_upsert_audit_findings_empty_is_noop(registry: Registry, conn: _FakeConn) -> None:
+    assert registry.upsert_audit_findings([], runs_audited=0) == []
+    assert conn.executed == []
+
+
+@pytest.mark.unit
+def test_read_audit_findings_maps_rows(registry: Registry, conn: _FakeConn) -> None:
+    conn.fetchall_result = [
+        ("k1", "session_shape", "spec_review_loop", None, "ev", "rec", "operator + x", 5)
+    ]
+    result = registry.read_audit_findings()
+    assert result[0]["finding_key"] == "k1"
+    assert result[0]["subject"] == "spec_review_loop"
+    assert result[0]["runs_audited"] == 5
+
+
 @pytest.mark.unit
 def test_set_lifecycle_state_persists_a_legal_transition(
     registry: Registry, conn: _FakeConn
