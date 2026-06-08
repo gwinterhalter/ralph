@@ -5,9 +5,16 @@ from pathlib import Path
 
 import pytest
 
-from supervisor.event_ingest import events_file_for
+from supervisor.event_ingest import WORKSPACE_ROOT_ENV, events_file_for
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def _no_workspace_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    # These cases assert the no-root fallback path; clear the ambient env so they are deterministic
+    # whether or not the live OL_SUPERVISOR_WORKSPACE_ROOT is set in the session.
+    monkeypatch.delenv(WORKSPACE_ROOT_ENV, raising=False)
 
 
 def test_absolute_folder() -> None:
