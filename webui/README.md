@@ -49,8 +49,14 @@ python -m webui.server   # UI at http://127.0.0.1:8787/
 | Inbox aggregation core (pure) | pytest (hermetic suite) | `python -m pytest tests/test_inbox.py` |
 | API (HTTP → fake Registry) | pytest + FastAPI TestClient | `python -m pytest webui/server/tests` |
 | UI components (pure views) | Vitest + Testing Library | `cd webui/app && npm test` |
-| End-to-end (browser) | Playwright | `cd webui/app && npx playwright install chromium && npm run e2e` |
+| E2E — mocked API (fast) | Playwright | `cd webui/app && npx playwright install chromium && npm run e2e` |
+| E2E — live backend (full contract) | Playwright + real FastAPI | `cd webui/app && npx playwright test -c playwright.live.config.ts` |
 
-The Playwright smoke mocks `/api/*` via route interception, so it needs neither the Python server
-nor a DB — it verifies the real browser render + interaction + fetch wiring. A live-backend E2E is a
-later phase.
+Two E2E modes:
+- **Mocked** (`e2e/smoke.spec.ts`): `/api/*` is stubbed via route interception — needs neither the
+  Python server nor a DB; verifies the browser render + interaction + fetch wiring fast.
+- **Live backend** (`e2e-live/live.spec.ts`): drives the UI against the REAL FastAPI server
+  (`webui.server.demo`) over a seeded in-memory registry — NO mocking. Proves the genuine
+  UI ↔ API ↔ pure-core JSON contract and a full action round-trip (Adopt → real `/promote` →
+  the finding moves proposed→accepted in the UI). The server static-mounts the built UI, so it
+  needs `npm run build` first (the config's webServer runs uvicorn against `dist`).
