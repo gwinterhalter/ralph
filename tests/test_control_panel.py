@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from supervisor.control_panel import (
     EventMetrics,
     read_events,
+    render_learnings,
     render_metrics,
     run_status_panel,
     summarize_events,
@@ -135,3 +136,36 @@ def test_run_status_panel_rejects_nonpositive_interval() -> None:
         run_status_panel(
             lambda: _snapshot(t0), once=True, interval_seconds=0.0, emit=lambda _s: None
         )
+
+
+def test_render_learnings_empty() -> None:
+    assert "none captured yet" in render_learnings([])
+
+
+def test_render_learnings_lists_findings() -> None:
+    rows = [
+        {
+            "finding_key": "answerer_dsl_candidate:g1",
+            "kind": "answerer_dsl_candidate",
+            "subject": "g1",
+            "binding_class": None,
+            "recommendation": "add an Answerer rule for g1",
+            "routes_to": "operator + cf-spec-writer",
+            "runs_audited": 4,
+        },
+        {
+            "finding_key": "verification_binding:cf-x:over_verification",
+            "kind": "verification_binding",
+            "subject": "cf-x",
+            "binding_class": "over_verification",
+            "recommendation": "drop cf-x",
+            "routes_to": "operator + cf-seed-producer",
+            "runs_audited": 3,
+        },
+    ]
+    out = render_learnings(rows)
+    assert "2 finding(s) captured" in out
+    assert "[answerer_dsl_candidate] g1" in out
+    assert "[verification_binding:over_verification] cf-x" in out
+    assert "add an Answerer rule for g1" in out
+    assert "adopt: operator + cf-seed-producer" in out

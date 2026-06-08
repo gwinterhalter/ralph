@@ -17,7 +17,7 @@ OLB-16 surface.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -160,6 +160,28 @@ def render_metrics(metrics: EventMetrics) -> str:
     return "\n".join(lines)
 
 
+def render_learnings(findings: Sequence[Mapping[str, object]]) -> str:
+    """Render the persisted Run-Auditor learnings pane (pure; over read_audit_findings rows).
+
+    Groups by finding kind and lists each subject with its recommendation + adoption route, so the
+    operator sees the accumulated cross-run/cross-project learnings (Item 2 DB capture). An empty
+    set renders a clear 'no learnings yet' line."""
+    if not findings:
+        return "learnings: none captured yet (the Learn step records findings to run_audit_findings)."
+    lines = [f"learnings: {len(findings)} finding(s) captured (run_audit_findings):"]
+    for finding in findings:
+        kind = str(finding.get("kind", "?"))
+        binding_class = finding.get("binding_class")
+        if binding_class:
+            kind = f"{kind}:{binding_class}"
+        subject = str(finding.get("subject", "?"))
+        runs = finding.get("runs_audited", "?")
+        lines.append(f"  [{kind}] {subject}  (across {runs} runs)")
+        lines.append(f"    → {finding.get('recommendation', '')}")
+        lines.append(f"    adopt: {finding.get('routes_to', '')}")
+    return "\n".join(lines)
+
+
 def run_status_panel(
     fetch_snapshot: Callable[[], FullFleetSnapshot],
     *,
@@ -215,6 +237,7 @@ def _main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI entry
     status_p.add_argument(
         "--interval", type=float, default=30.0, help="bounded refresh interval (seconds)"
     )
+    sub.add_parser("learnings", help="list the captured Run-Auditor learnings (run_audit_findings)")
     for p in (parser,):
         p.add_argument("--by", default=os.environ.get("USER", "operator"))
 
@@ -252,6 +275,17 @@ def _main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI entry
 
         return run_status_panel(_fetch, interval_seconds=args.interval, once=args.once)
 
+    if args.cmd == "learnings":
+        dsn = os.environ.get("OL_SUPERVISOR_DB_URL")
+        if not dsn:
+            print("control_panel learnings: OL_SUPERVISOR_DB_URL is not set — cannot read learnings.")
+            return 1
+        from supervisor.registry import Registry
+
+        registry = Registry.from_env()
+        print(render_learnings(registry.read_audit_findings()))
+        return 0
+
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     cid = f"{args.cmd}_{uuid.uuid4().hex[:12]}"
     ctype = {"pause": "pause", "query": "query_register_state", "bump": "bump_budget"}[args.cmd]
@@ -282,4 +316,5 @@ __all__ = [
     "summarize_events",
     "read_events",
     "render_metrics",
+    "render_learnings",
 ]
