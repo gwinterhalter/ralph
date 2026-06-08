@@ -17,6 +17,8 @@ export default defineConfig({
     env: {
       PYTHONPATH: "../..",
       OL_SUPERVISOR_WEBUI_STATIC: "dist",
+      OL_SUPERVISOR_STATE_DIR: ".e2e-state",
+      OL_SUPERVISOR_BUDGET_CEILING_USD: "5.00",
       PYTHONIOENCODING: "utf-8",
     },
   },

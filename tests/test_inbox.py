@@ -87,6 +87,30 @@ def test_non_confirmed_effects_become_regressed_cards() -> None:
     assert all("revert" in c.actions for c in cards)
 
 
+def test_pending_gates_become_rich_gate_cards_and_dedupe_lifecycle() -> None:
+    rows = [_row("pg", lifecycle="paused_gate")]  # would emit a generic gate card...
+    gates = [{
+        "request_file": "gate_request_0012_0000.json", "gate_id": "abs-phase-boundary",
+        "project_id": "pg", "question_text": "proceed to Phase 1?",
+        "options": [{"id": "proceed", "label": "Proceed"}, {"id": "hold", "label": "Hold"}],
+    }]
+    cards = build_inbox(fleet_rows=rows, gates=gates)
+    gate_cards = [c for c in cards if c.kind == KIND_GATE]
+    # ...but the rich gate (same project_id) dedupes the generic lifecycle card.
+    assert len(gate_cards) == 1
+    g = gate_cards[0]
+    assert g.subject == "gate_request_0012_0000.json"
+    assert g.detail == "proceed to Phase 1?"
+    assert g.actions == ("proceed", "hold", "details")
+
+
+def test_lifecycle_gate_card_kept_when_no_request_file() -> None:
+    rows = [_row("pg", lifecycle="paused_gate")]
+    cards = build_inbox(fleet_rows=rows, gates=[])  # no surfaced request file
+    assert [c.kind for c in cards] == [KIND_GATE]
+    assert cards[0].subject == "pg"
+
+
 def test_churn_threshold() -> None:
     corrections = [
         {"item_id": "OLB-07", "attempts": 5, "projects": 2, "max_level": "L4"},

@@ -10,8 +10,11 @@ Run:  OL_SUPERVISOR_WEBUI_STATIC=<app/dist> python -m uvicorn webui.server.demo:
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Mapping, Sequence
+from decimal import Decimal
+from pathlib import Path
 
 from webui.server.app import create_app
 
@@ -30,12 +33,13 @@ class _SeededRegistry:
         ]
 
     def read_candidates(self) -> Sequence[Mapping[str, object]]:
-        return []
+        # oltest_c2 is a candidate (shows in Fleet); its gate is surfaced via the seeded
+        # gate_request file below, so resolving it cleanly removes the gate card.
+        return [{"project_id": "oltest_c2", "display_name": "oltest_c2", "lifecycle_state": "candidate",
+                 "attention_debt": 0}]
 
     def read_running(self) -> Sequence[Mapping[str, object]]:
         return [
-            {"project_id": "oltest_c2", "display_name": "oltest_c2", "lifecycle_state": "paused_gate",
-             "attention_debt": 1},
             {"project_id": "oltest_d2", "display_name": "oltest_d2", "lifecycle_state": "running",
              "attention_debt": 0},
         ]
@@ -53,6 +57,29 @@ class _SeededRegistry:
 
     def read_correction_summary(self) -> Sequence[Mapping[str, object]]:
         return [{"item_id": "OLB-07", "attempts": 5, "projects": 2, "max_level": "L4"}]
+
+    def read_all_projects(self) -> Sequence[Mapping[str, object]]:
+        return [
+            {"project_id": "oltest_c2", "display_name": "oltest_c2", "folder_path": "oltest_c2",
+             "lifecycle_state": "paused_gate", "attention_debt": 1},
+            {"project_id": "oltest_d2", "display_name": "oltest_d2", "folder_path": "oltest_d2",
+             "lifecycle_state": "running", "attention_debt": 0},
+        ]
+
+    def read_learning_records(self) -> Sequence[Mapping[str, object]]:
+        return [{"project_slug": "oltest_d2", "cost_usd": "2.50"}]
+
+    def read_cumulative_spend_usd(self) -> Decimal:
+        return Decimal("5.30")
+
+    def prune_events(self, *, before_iso: str) -> int:
+        return 0
+
+    def upsert_project(
+        self, project_id: str, *, folder_path: str, priority: int,
+        depends_on: Sequence[str], lifecycle_state: str = "candidate"
+    ) -> bool:
+        return True
 
     def read_events_db(
         self, *, project_id: str | None = None, event_type: str | None = None, limit: int = 50
@@ -73,9 +100,32 @@ class _SeededRegistry:
                 f["status"] = status
 
 
+def _seed_pending_gate(state_dir: Path) -> None:
+    """Reset the demo E2E state on each fresh server start: clear the prior gate response + action
+    log (so the run is deterministic) and write a pending gate_request to exercise resolution."""
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "gate_response_0012_0000.json").unlink(missing_ok=True)
+    (state_dir / "operator_actions.jsonl").unlink(missing_ok=True)
+    (state_dir / "gate_request_0012_0000.json").write_text(
+        json.dumps({
+            "gate_id": "abs-phase-boundary",
+            "question_text": "proceed to Phase 1?",
+            "project_id": "oltest_c2",
+            "options": [
+                {"id": "proceed", "label": "Proceed", "consequence": "advance to Phase 1"},
+                {"id": "hold", "label": "Hold", "consequence": "stay in Phase 0"},
+            ],
+        }),
+        encoding="utf-8",
+    )
+
+
+_STATE_DIR = Path(os.environ.get("OL_SUPERVISOR_STATE_DIR", "."))
+_seed_pending_gate(_STATE_DIR)
 _REGISTRY = _SeededRegistry()
 
 app = create_app(
     registry_provider=lambda: _REGISTRY,
+    state_dir=_STATE_DIR,
     static_dir=os.environ.get("OL_SUPERVISOR_WEBUI_STATIC"),
 )

@@ -31,6 +31,7 @@ webui/app/dist/
 webui/app/test-results/
 webui/app/playwright-report/
 webui/app/.vite/
+webui/app/.e2e-state/
 
 #Claude
 # Exclude .claude/ CONTENTS (not the dir itself — required for the negation below to

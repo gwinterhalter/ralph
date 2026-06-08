@@ -26,6 +26,11 @@ test.beforeEach(async ({ page }) => {
   );
   await page.route("**/api/learnings*", (r) => r.fulfill({ json: { findings: [], by_status: {} } }));
   await page.route("**/api/effects", (r) => r.fulfill({ json: { effects: [], by_outcome: {} } }));
+  await page.route("**/api/forecast", (r) =>
+    r.fulfill({ json: { projects: [], fleet_spent_usd: "0", fleet_projected_remaining_usd: "0", fleet_projected_total_usd: "0" } }),
+  );
+  await page.route("**/api/events*", (r) => r.fulfill({ json: { events: [], metrics: { total: 0, failures: 0 } } }));
+  await page.route("**/api/actions", (r) => r.fulfill({ json: { actions: [] } }));
 });
 
 test("home renders the needs-you inbox and Adopt fires a promote POST", async ({ page }) => {

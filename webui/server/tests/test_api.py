@@ -7,6 +7,7 @@ summarize_*) and the FastAPI wiring run for real. Run with:  python -m pytest we
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -44,13 +45,26 @@ class FakeRegistry:
             {"ts_utc": "2026-06-08T10:00:00+00:00", "project_id": "p1", "role": "gate",
              "event_type": "gate_fire", "subject_id": "g1", "payload": {"cls": "gate_dc"}},
         ]
+        self.learning_rows: list[dict[str, object]] = [
+            {"project_slug": "p1", "cost_usd": "2.50"},
+        ]
+        self.projects: list[dict[str, object]] = [
+            {"project_id": "p1", "display_name": "Proj One", "folder_path": "p1",
+             "lifecycle_state": "running", "attention_debt": 0},
+        ]
+        self.cumulative_spend = Decimal("12.00")
         self.status_calls: list[tuple[str, str, str]] = []
+        self.pruned: list[str] = []
+        self.upserted: list[str] = []
 
     def read_candidates(self): return self.candidates
     def read_running(self): return self.running
+    def read_all_projects(self): return self.projects
     def read_audit_findings(self): return self.findings
     def read_audit_effects(self): return self.effects
     def read_correction_summary(self): return self.corrections_rows
+    def read_learning_records(self): return self.learning_rows
+    def read_cumulative_spend_usd(self): return self.cumulative_spend
 
     def read_events_db(self, *, project_id=None, event_type=None, limit=50):
         rows = self.events
@@ -66,12 +80,41 @@ class FakeRegistry:
             if f["finding_key"] == finding_key_value:
                 f["status"] = status
 
+    def prune_events(self, *, before_iso):
+        self.pruned.append(before_iso)
+        return 7
+
+    def upsert_project(self, project_id, *, folder_path, priority, depends_on, lifecycle_state="candidate"):
+        self.upserted.append(project_id)
+        return True
+
 
 @pytest.fixture()
 def client(tmp_path: Path) -> tuple[TestClient, FakeRegistry]:
     reg = FakeRegistry()
-    app = create_app(registry_provider=lambda: reg, state_dir=tmp_path)
-    return TestClient(app), reg
+    # capture apply dispatches instead of spawning claude
+    dispatched: list[list[str]] = []
+
+    def _fake_dispatch(argv: list[str]) -> tuple[int, str]:
+        dispatched.append(argv)
+        return 0, "ok"
+
+    app = create_app(registry_provider=lambda: reg, state_dir=tmp_path, dispatcher=_fake_dispatch)
+    tc = TestClient(app)
+    tc.dispatched = dispatched  # type: ignore[attr-defined]
+    tc.state_dir = tmp_path  # type: ignore[attr-defined]
+    return tc, reg
+
+
+def _seed_gate(state_dir: Path) -> str:
+    name = "gate_request_0012_0000.json"
+    (state_dir / name).write_text(json.dumps({
+        "gate_id": "abs-phase-boundary",
+        "question_text": "proceed to Phase 1?",
+        "project_id": "p1",
+        "options": [{"id": "proceed", "label": "Proceed"}, {"id": "hold", "label": "Hold"}],
+    }), encoding="utf-8")
+    return name
 
 
 def test_health(client: tuple[TestClient, FakeRegistry]) -> None:
@@ -148,13 +191,99 @@ def test_promote_and_reject_call_registry(client: tuple[TestClient, FakeRegistry
     assert ("session_shape:s", "rejected", "greg") in reg.status_calls
 
 
-def test_apply_requires_accepted(client: tuple[TestClient, FakeRegistry]) -> None:
-    c, _ = client
-    # 'session_shape:s' starts accepted -> returns the argv it would dispatch.
+def test_apply_dispatches_and_marks_applied(client: tuple[TestClient, FakeRegistry]) -> None:
+    c, reg = client
+    # 'session_shape:s' starts accepted -> the injected dispatcher runs, finding -> applied.
     ok = c.post("/api/findings/session_shape:s/apply", json={"by": "greg"})
-    assert ok.status_code == 200 and ok.json()["would_dispatch"][0] == "claude"
+    assert ok.status_code == 200 and ok.json()["status"] == "applied"
+    assert c.dispatched and c.dispatched[0][0] == "claude"  # type: ignore[attr-defined]
+    assert ("session_shape:s", "applied", "greg") in reg.status_calls
     # a proposed finding is not yet applyable.
-    conflict = c.post("/api/findings/answerer_dsl_candidate:g1/apply", json={"by": "greg"})
-    assert conflict.status_code == 409
+    assert c.post("/api/findings/answerer_dsl_candidate:g1/apply", json={"by": "greg"}).status_code == 409
     # an unknown key 404s.
     assert c.post("/api/findings/nope/apply", json={"by": "greg"}).status_code == 404
+
+
+def test_apply_failure_leaves_accepted(tmp_path: Path) -> None:
+    reg = FakeRegistry()
+
+    def _bad_dispatch(_argv: list[str]) -> tuple[int, str]:
+        return 0, "Unknown command: /cf-session-plan-reviewer"  # exit 0 but no-op
+
+    c = TestClient(create_app(registry_provider=lambda: reg, state_dir=tmp_path, dispatcher=_bad_dispatch))
+    r = c.post("/api/findings/session_shape:s/apply", json={"by": "greg"})
+    assert r.status_code == 502  # not falsely 'applied'
+    assert ("session_shape:s", "applied", "greg") not in reg.status_calls
+
+
+def test_gates_list_and_resolve(client: tuple[TestClient, FakeRegistry]) -> None:
+    c, _ = client
+    name = _seed_gate(c.state_dir)  # type: ignore[attr-defined]
+    listed = c.get("/api/gates").json()["gates"]
+    assert listed and listed[0]["gate_id"] == "abs-phase-boundary"
+    assert {o["id"] for o in listed[0]["options"]} == {"proceed", "hold"}
+    # resolve writes a gate_response_*.json the orchestrator consumes
+    r = c.post("/api/gates/resolve", json={"request_file": name, "selected_option": "proceed", "by": "greg"})
+    assert r.status_code == 200
+    resp = json.loads((c.state_dir / "gate_response_0012_0000.json").read_text())  # type: ignore[attr-defined]
+    assert resp["gate_id"] == "abs-phase-boundary" and resp["selected_option"] == "proceed"
+    # once answered, it's no longer pending
+    assert c.get("/api/gates").json()["gates"] == []
+
+
+def test_gate_resolve_rejects_bad_option(client: tuple[TestClient, FakeRegistry]) -> None:
+    c, _ = client
+    name = _seed_gate(c.state_dir)  # type: ignore[attr-defined]
+    bad = c.post("/api/gates/resolve", json={"request_file": name, "selected_option": "nonsense"})
+    assert bad.status_code == 400
+    missing = c.post("/api/gates/resolve", json={"request_file": "gate_request_9999_0.json", "selected_option": "x"})
+    assert missing.status_code == 404
+
+
+def test_inbox_includes_gate_card_and_budget_breach(client: tuple[TestClient, FakeRegistry], monkeypatch) -> None:
+    c, _ = client
+    _seed_gate(c.state_dir)  # type: ignore[attr-defined]
+    monkeypatch.setenv("OL_SUPERVISOR_BUDGET_CEILING_USD", "5.00")  # spend 12 >= 5 -> breach
+    cards = c.get("/api/inbox").json()["cards"]
+    kinds = [card["kind"] for card in cards]
+    assert "budget" in kinds and kinds[0] == "budget"  # most urgent
+    gate = next(card for card in cards if card["kind"] == "gate")
+    assert gate["detail"] == "proceed to Phase 1?" and "proceed" in gate["actions"]
+
+
+def test_forecast(client: tuple[TestClient, FakeRegistry]) -> None:
+    c, _ = client
+    body = c.get("/api/forecast").json()
+    assert isinstance(body, dict)  # serialized FleetForecast (shape-agnostic)
+
+
+def test_onramp_dry_run_then_apply(client: tuple[TestClient, FakeRegistry]) -> None:
+    c, reg = client
+    dry = c.post("/api/onramp-abs").json()
+    assert dry["applied"] is False and len(dry["plan"]) == 3
+    applied = c.post("/api/onramp-abs", params={"apply": "true"}).json()
+    assert applied["applied"] is True and "abs_phase0" in applied["created"]
+    assert "abs_phase0" in reg.upserted
+
+
+def test_events_prune(client: tuple[TestClient, FakeRegistry]) -> None:
+    c, reg = client
+    body = c.post("/api/events-prune", params={"days": 30}).json()
+    assert body["deleted"] == 7 and reg.pruned
+
+
+def test_actions_log_records_every_action(client: tuple[TestClient, FakeRegistry]) -> None:
+    c, _ = client
+    c.post("/api/projects/p1/pause", json={"by": "greg"})
+    c.post("/api/findings/answerer_dsl_candidate:g1/promote", json={"by": "greg"})
+    acts = c.get("/api/actions").json()["actions"]
+    kinds = {a["action"] for a in acts}
+    assert {"pause", "promote"} <= kinds
+    assert acts[0]["action"] == "promote"  # most recent first
+
+
+def test_commands_lists_pending(client: tuple[TestClient, FakeRegistry]) -> None:
+    c, _ = client
+    c.post("/api/projects/p1/pause", json={"by": "greg"})
+    pending = c.get("/api/commands").json()
+    assert pending["count"] == 1 and pending["pending"][0]["command_type"] == "pause"

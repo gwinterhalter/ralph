@@ -1,5 +1,7 @@
 // Presentational views — pure functions of props (no fetching), so they unit-test cleanly.
-import type { InboxCard, FleetSnapshot, Finding, EffectRow } from "./api";
+import type {
+  InboxCard, FleetSnapshot, Finding, EffectRow, Forecast, EventRow, ActionRow,
+} from "./api";
 
 const KIND_ICON: Record<string, string> = {
   budget: "🔴",
@@ -148,4 +150,78 @@ export function EffectsView(props: { effects: EffectRow[]; byOutcome: Record<str
 
 function fmt(v: number | null): string {
   return typeof v === "number" ? v.toFixed(3) : "?";
+}
+
+export function SpendView(props: {
+  forecast: Forecast | null;
+  onProvision: () => void;
+  onPrune: (days: number) => void;
+}) {
+  const f = props.forecast;
+  return (
+    <div>
+      <h2>Spend</h2>
+      {!f ? <p>Loading forecast…</p> : (
+        <>
+          <p className="rollup">
+            Fleet spent ${f.fleet_spent_usd} · projected remaining ${f.fleet_projected_remaining_usd} ·
+            projected total ${f.fleet_projected_total_usd}
+          </p>
+          <table className="fleet" aria-label="Forecast">
+            <thead>
+              <tr><th>Project</th><th>Basis</th><th>Open</th><th>Spent</th><th>Proj. remaining</th><th>Conf</th></tr>
+            </thead>
+            <tbody>
+              {f.projects.map((p) => (
+                <tr key={p.project_id}>
+                  <td>{p.project_id}</td><td>{p.basis}</td><td>{p.open_work_count}</td>
+                  <td>${p.total_spent_usd}</td><td>${p.projected_remaining_usd}</td>
+                  <td>{(p.confidence * 100).toFixed(0)}%</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
+      <div className="admin-actions">
+        <button onClick={props.onProvision}>Provision ABS chain…</button>
+        <button onClick={() => props.onPrune(30)}>Prune events &gt; 30d</button>
+      </div>
+    </div>
+  );
+}
+
+export function EventsView(props: { events: EventRow[]; total: number; failures: number }) {
+  return (
+    <div>
+      <h2>Events</h2>
+      <p className="rollup">{props.total} event(s) · {props.failures} failures/halts</p>
+      <ul className="events" aria-label="Events">
+        {props.events.map((e, i) => (
+          <li key={`${e.ts_utc}:${i}`}>
+            <span className="e-ts">{e.ts_utc}</span> {e.project_id} · {e.role}/{e.event_type}
+            {e.subject_id ? ` · ${e.subject_id}` : ""}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+export function ActionsView(props: { actions: ActionRow[] }) {
+  return (
+    <div>
+      <h2>Operator actions</h2>
+      {props.actions.length === 0 ? <p>No actions recorded yet.</p> : (
+        <ul className="events" aria-label="Operator actions">
+          {props.actions.map((a, i) => (
+            <li key={`${a.ts}:${i}`}>
+              <span className="e-ts">{a.ts}</span> <strong>{a.action}</strong> {a.target}
+              {a.detail ? ` (${a.detail})` : ""} — {a.by}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
 }

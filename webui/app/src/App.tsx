@@ -1,15 +1,18 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "./api";
-import type { InboxCard, FleetSnapshot, Finding, EffectRow } from "./api";
-import { InboxView, FleetView, ImproveView, EffectsView } from "./views";
+import type { InboxCard, FleetSnapshot, Finding, EffectRow, Forecast, EventRow, ActionRow } from "./api";
+import { InboxView, FleetView, ImproveView, EffectsView, SpendView, EventsView, ActionsView } from "./views";
 
-type Tab = "home" | "fleet" | "improve" | "effects";
+type Tab = "home" | "fleet" | "improve" | "effects" | "spend" | "events" | "actions";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "home", label: "Home" },
   { id: "fleet", label: "Fleet" },
   { id: "improve", label: "Improve" },
   { id: "effects", label: "Effects" },
+  { id: "spend", label: "Spend" },
+  { id: "events", label: "Events" },
+  { id: "actions", label: "Actions" },
 ];
 
 export default function App() {
@@ -19,19 +22,27 @@ export default function App() {
   const [findings, setFindings] = useState<Finding[]>([]);
   const [effects, setEffects] = useState<EffectRow[]>([]);
   const [byOutcome, setByOutcome] = useState<Record<string, number>>({});
+  const [forecast, setForecast] = useState<Forecast | null>(null);
+  const [events, setEvents] = useState<EventRow[]>([]);
+  const [eventMeta, setEventMeta] = useState<{ total: number; failures: number }>({ total: 0, failures: 0 });
+  const [actions, setActions] = useState<ActionRow[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
       setError(null);
-      const [inbox, fl, learn, eff] = await Promise.all([
-        api.inbox(), api.fleet(), api.learnings(), api.effects(),
+      const [inbox, fl, learn, eff, fc, ev, acts] = await Promise.all([
+        api.inbox(), api.fleet(), api.learnings(), api.effects(), api.forecast(), api.events(), api.actions(),
       ]);
       setCards(inbox.cards);
       setFleet(fl);
       setFindings(learn.findings);
       setEffects(eff.effects);
       setByOutcome(eff.by_outcome);
+      setForecast(fc);
+      setEvents(ev.events);
+      setEventMeta(ev.metrics);
+      setActions(acts.actions);
     } catch (e) {
       setError(String(e));
     }
@@ -45,9 +56,11 @@ export default function App() {
 
   const onCardAction = useCallback(
     async (card: InboxCard, action: string) => {
-      if (card.kind === "learning" && action === "adopt") await api.promote(card.subject);
+      if (card.kind === "gate" && action !== "details") await api.resolveGate(card.subject, action);
+      else if (card.kind === "learning" && action === "adopt") await api.promote(card.subject);
       else if (card.kind === "learning" && action === "reject") await api.reject(card.subject);
       else if (card.kind === "stall" && action === "pause") await api.pause(card.subject);
+      else if (card.kind === "budget" && action === "pause") await api.pause(card.subject);
       await refresh();
     },
     [refresh],
@@ -62,13 +75,8 @@ export default function App() {
       </header>
       <nav className="rail">
         {TABS.map((t) => (
-          <button
-            key={t.id}
-            className={tab === t.id ? "active" : ""}
-            onClick={() => setTab(t.id)}
-          >
-            {t.label}
-            {t.id === "home" && cards.length > 0 ? ` (${cards.length})` : ""}
+          <button key={t.id} className={tab === t.id ? "active" : ""} onClick={() => setTab(t.id)}>
+            {t.label}{t.id === "home" && cards.length > 0 ? ` (${cards.length})` : ""}
           </button>
         ))}
       </nav>
@@ -96,10 +104,25 @@ export default function App() {
             effects={effects}
             onPromote={(k) => void api.promote(k).then(refresh)}
             onReject={(k) => void api.reject(k).then(refresh)}
-            onApply={(k) => void api.apply(k).then(refresh)}
+            onApply={(k) => void api.apply(k).then(refresh).catch((e) => setError(String(e)))}
           />
         )}
         {tab === "effects" && <EffectsView effects={effects} byOutcome={byOutcome} />}
+        {tab === "spend" && (
+          <SpendView
+            forecast={forecast}
+            onProvision={() => {
+              if (window.confirm("Provision the ABS Phase 0→1→2 chain as candidate projects?"))
+                void api.onramp(true).then(refresh);
+            }}
+            onPrune={(days) => {
+              if (window.confirm(`Delete events older than ${days} days?`))
+                void api.prune(days).then(refresh);
+            }}
+          />
+        )}
+        {tab === "events" && <EventsView events={events} total={eventMeta.total} failures={eventMeta.failures} />}
+        {tab === "actions" && <ActionsView actions={actions} />}
       </main>
     </div>
   );

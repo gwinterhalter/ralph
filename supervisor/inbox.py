@@ -80,14 +80,20 @@ def build_inbox(
     findings: Sequence[Mapping[str, object]] = (),
     effects: Sequence[Mapping[str, object]] = (),
     corrections: Sequence[Mapping[str, object]] = (),
+    gates: Sequence[Mapping[str, object]] = (),
     budget_breach: Mapping[str, object] | None = None,
     churn_threshold: int = DEFAULT_CHURN_THRESHOLD,
 ) -> list[InboxCard]:
-    """Aggregate the fleet/learning/effect/churn signals into a priority-ordered Needs-You queue.
+    """Aggregate the fleet/gate/learning/effect/churn signals into a priority-ordered Needs-You queue.
 
     Pure: every argument is already-read substrate; returns the cards sorted by ``(urgency, subject)``
     so the most urgent (and, within a tier, a stable subject order) leads. A clean fleet with no
-    proposed findings and no non-confirmed effects yields ``[]`` (the home screen reads 'all clear')."""
+    proposed findings and no non-confirmed effects yields ``[]`` (the home screen reads 'all clear').
+
+    ``gates`` are pending gate-request dicts (``request_file``/``gate_id``/``question_text``/
+    ``options``); each becomes a rich gate card whose actions ARE the gate's option ids (the UI
+    resolves it by writing the matching gate_response). The lifecycle-based gate card (a Project in
+    ``paused_gate``) is the fallback for a paused Project with no surfaced request file."""
     cards: list[InboxCard] = []
 
     if budget_breach is not None:
@@ -103,8 +109,29 @@ def build_inbox(
             )
         )
 
+    gated_projects: set[str] = set()
+    for gate in gates:
+        options = gate.get("options")
+        option_ids = tuple(
+            str(o.get("id")) for o in options if isinstance(o, Mapping) and o.get("id")
+        ) if isinstance(options, list) else ()
+        pid = str(gate.get("project_id") or "")
+        if pid:
+            gated_projects.add(pid)
+        gid = str(gate.get("gate_id") or gate.get("request_file") or "?")
+        cards.append(
+            InboxCard(
+                kind=KIND_GATE,
+                urgency=_URGENCY[KIND_GATE],
+                title=f"Gate · {gid}" + (f" · {pid}" if pid else ""),
+                subject=str(gate.get("request_file") or gid),
+                detail=str(gate.get("question_text") or "operator decision required"),
+                actions=(*option_ids, "details"),
+            )
+        )
+
     for row in fleet_rows:
-        if row.lifecycle_state == _PAUSED_GATE_STATE:
+        if row.lifecycle_state == _PAUSED_GATE_STATE and row.project_id not in gated_projects:
             cards.append(
                 InboxCard(
                     kind=KIND_GATE,

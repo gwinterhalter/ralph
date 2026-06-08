@@ -14,13 +14,21 @@ webui/
   app/      React + Vite single-page console (TypeScript)
 ```
 
-## Status (Phase 1)
+## Status
 
-Implemented and tested: **Home** (Needs-You inbox), **Fleet** (table + pause/bump), **Improve**
-(proposed→accepted→applied→measured board), **Effects** (outcome rollup). The API exposes the read
-endpoints (fleet/inbox/learnings/effects/corrections/events) and the safe action endpoints
-(pause/bump/promote/reject; `apply` returns the argv it would dispatch — the live spawn is a later
-phase). SSE live-push, the dependency graph, and the operator action log are future phases.
+Implemented and tested: **Home** (Needs-You inbox — gates, stalls, budget breach, learnings,
+regressions, churn), **Fleet** (table + pause/bump), **Improve** (proposed→accepted→applied→measured
+board), **Effects**, **Spend** (forecast + provision ABS chain + prune), **Events** (timeline),
+**Actions** (operator action log). Endpoints: reads
+(fleet/inbox/gates/learnings/effects/corrections/events/forecast/commands/actions) + actions
+(pause/bump/**gate-resolve**/promote/reject/**apply** (real dispatch)/onramp-abs/events-prune). Gate
+resolution writes a real `gate_response_*.json`; `apply` actually dispatches the authoring skill
+(injectable; guarded against false success); every action is recorded to the operator action log;
+the budget-breach card wires `read_cumulative_spend_usd` vs `OL_SUPERVISOR_BUDGET_CEILING_USD`.
+
+Still future: SSE live-push (the UI polls every 5s), a browser-through-real-DB E2E (the live E2E
+uses a seeded in-memory registry), the dependency-graph view, fleet-row drill-down, and CI wiring
+for the JS/Playwright tests.
 
 ## Run
 

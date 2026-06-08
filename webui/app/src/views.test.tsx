@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { InboxView, ImproveView, EffectsView } from "./views";
-import type { InboxCard, Finding, EffectRow } from "./api";
+import { InboxView, ImproveView, EffectsView, SpendView, ActionsView } from "./views";
+import type { InboxCard, Finding, EffectRow, Forecast, ActionRow } from "./api";
 
 describe("InboxView", () => {
   it("shows the all-clear when there are no cards", () => {
@@ -41,6 +41,32 @@ describe("ImproveView", () => {
     // proposed column has the Adopt action; applied card carries its measured effect
     expect(screen.getByRole("button", { name: "Adopt" })).toBeInTheDocument();
     expect(screen.getByText("effect: regressed")).toBeInTheDocument();
+  });
+});
+
+describe("SpendView", () => {
+  it("shows the fleet rollup + per-project forecast rows and admin actions", () => {
+    const forecast: Forecast = {
+      projects: [{ project_id: "p1", basis: "per_item", open_work_count: 3, total_spent_usd: "5.00",
+        projected_remaining_usd: "10.00", projected_total_usd: "15.00", confidence: 0.8 }],
+      fleet_spent_usd: "5.00", fleet_projected_remaining_usd: "10.00", fleet_projected_total_usd: "15.00",
+    };
+    const provision = vi.fn();
+    render(<SpendView forecast={forecast} onProvision={provision} onPrune={() => {}} />);
+    expect(screen.getByText(/projected total \$15\.00/)).toBeInTheDocument();
+    expect(screen.getByRole("cell", { name: "per_item" })).toBeInTheDocument();
+  });
+});
+
+describe("ActionsView", () => {
+  it("lists recorded operator actions", () => {
+    const actions: ActionRow[] = [
+      { ts: "2026-06-08T10:00:00Z", action: "gate-resolve", target: "gate_request_0012_0000.json",
+        by: "greg", detail: "proceed" },
+    ];
+    render(<ActionsView actions={actions} />);
+    expect(screen.getByText(/gate-resolve/)).toBeInTheDocument();
+    expect(screen.getByText(/proceed/)).toBeInTheDocument();
   });
 });
 

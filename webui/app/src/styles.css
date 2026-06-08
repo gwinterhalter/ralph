@@ -46,3 +46,8 @@ table.fleet { border-collapse: collapse; width: 100%; max-width: 900px; backgrou
 .effects { list-style: none; padding: 0; }
 .effects li { background: #fff; padding: 8px 10px; border-radius: 6px; margin-bottom: 6px; }
 .e-detail { color: #666; font-size: 0.85em; }
+.events { list-style: none; padding: 0; max-width: 900px; }
+.events li { background: #fff; padding: 6px 10px; border-radius: 6px; margin-bottom: 4px; font-size: 0.85em; }
+.e-ts { color: #64748b; font-variant-numeric: tabular-nums; }
+.admin-actions { margin-top: 16px; display: flex; gap: 8px; }
+.admin-actions button { padding: 6px 14px; border: 1px solid #cbd5e1; background: #fff; border-radius: 6px; cursor: pointer; }
