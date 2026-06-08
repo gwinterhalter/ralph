@@ -247,6 +247,46 @@ class Registry:
             rows = cur.fetchall()
         return frozenset(str(row[0]) for row in rows)
 
+    def read_completed_runs(self) -> Sequence[RegistryRow]:
+        """Return the terminal (``complete`` / ``failed``) ``ralph_runs`` rows (Item 2 Learn).
+
+        The §4.4(6) Learn step's live source: each row carries ``run_id``, ``project_id`` (the
+        FR-010 soft ``project_slug``), the terminal ``status``, the summed ``terminal_cost_usd``
+        (FR-014), the ``spawned_at`` / ``terminated_at`` boundaries (coerced to ISO strings) for
+        duration, and ``metadata``. The ``supervisor.learn_assembly`` adapter maps these into the
+        Run-Auditor's :class:`~supervisor.run_auditor.RunRecord` facts + the cost/duration learning
+        corpus. Additive read — NOT part of the ``RegistryPort`` Protocol (no test-double ripple);
+        the Learn wiring consumes it via the injected ``runs_source``. The status values are SQL
+        literals here, never caller input — no injection vector."""
+        cols = (
+            "run_id",
+            "project_slug",
+            "status",
+            "terminal_cost_usd",
+            "spawned_at",
+            "terminated_at",
+            "metadata",
+        )
+        col_list = ", ".join(cols)
+        sql = (  # nosec B608 — column names are the fixed allowlist above; status is literal
+            f"SELECT {col_list} FROM ralph_runs "
+            "WHERE status IN ('complete', 'failed')"
+        )
+        with self._conn.cursor() as cur:
+            cur.execute(sql)
+            rows = cur.fetchall()
+        mapped: list[RegistryRow] = []
+        for row in rows:
+            record: dict[str, object] = dict(zip(cols, row))
+            record["project_id"] = record.pop("project_slug")
+            for ts_key in ("spawned_at", "terminated_at"):
+                value = record.get(ts_key)
+                iso = getattr(value, "isoformat", None)
+                if callable(iso):
+                    record[ts_key] = iso()
+            mapped.append(record)
+        return mapped
+
     def read_cumulative_spend_usd(self) -> Decimal:
         """Fleet cumulative spend — the sum of recorded ``terminal_cost_usd`` across all
         Runs (FR-014), as an exact ``Decimal`` (NFR-007).

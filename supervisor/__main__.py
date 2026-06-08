@@ -38,12 +38,19 @@ from supervisor.cycle_wiring import (
 from supervisor.heartbeats import read_heartbeats_from_log
 from supervisor.pid_probe import format_pid_start_time, pid_alive, probe_pid_start_time
 from supervisor.ports import RegistryPort, RegistryRow
+from supervisor.run_auditor import RunAuditReport
+from supervisor.run_auditor import RunRecord as AuditRunRecord
 from supervisor.safety_gates import KillSwitch
 from supervisor.reattach import derive_reattach_decisions
 from supervisor.reconcile import RunCompletion, derive_reconcile_actions
 
 #: Default stall budget (seconds) for the Reconcile + Guard stall detection.
 DEFAULT_HANG_TIMEOUT_SECONDS = 1800.0
+
+
+def _no_completed_runs() -> list[AuditRunRecord]:
+    """The §4.4(6) Learn no-op source — no completed Runs (the OLB-01 default)."""
+    return []
 
 
 # The OS pid-liveness probe lives in the shared `pid_probe` module (read-only on every
@@ -78,6 +85,8 @@ def build_production_cycle(
     record_start_time: Callable[[str, str], None] | None = None,
     kill_switch: KillSwitch | None = None,
     completed_project_ids: Callable[[], frozenset[str]] = lambda: frozenset(),
+    learn_runs_source: Callable[[], Sequence[AuditRunRecord]] | None = None,
+    learn_report_sink: Callable[[RunAuditReport], None] | None = None,
 ) -> SupervisionCycle:
     """Assemble a :class:`SupervisionCycle` wired with all five §4.4 step configs.
 
@@ -151,13 +160,24 @@ def build_production_cycle(
         completed_project_ids=completed_project_ids,
     )
 
+    # §4.4(6) Learn: wire the live completed-Run source + report sink when supplied (Item 2);
+    # otherwise the OLB-01 no-op (an empty source short-circuits run_learn_step).
+    if learn_runs_source is None:
+        learn_config = LearnConfig(runs_source=_no_completed_runs)
+    elif learn_report_sink is None:
+        learn_config = LearnConfig(runs_source=learn_runs_source)
+    else:
+        learn_config = LearnConfig(
+            runs_source=learn_runs_source, report_sink=learn_report_sink
+        )
+
     return SupervisionCycle(
         registry,
         reconcile_config=reconcile_config,
         schedule_config=schedule_config,
         attend_config=AttendConfig(),
         guard_config=GuardConfig(stall_signals=_stall_signals),  # type: ignore[arg-type]
-        learn_config=LearnConfig(runs_source=lambda: []),  # live completed-Run corpus reader: deferred
+        learn_config=learn_config,
     )
 
 
@@ -260,6 +280,43 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
             terminal_cost_usd=read_terminal_cost(state_dir),
         )
 
+    # §4.4(6) Learn wiring (Item 2): the live completed-Run source + report/corpus sinks.
+    from supervisor.learn_assembly import (
+        completed_run_records,
+        learning_records,
+        render_learning_corpus,
+    )
+    from supervisor.run_auditor import render_audit_report
+
+    logs_dir = Path(state_dir) / "logs"
+
+    def _learn_runs_source() -> list[AuditRunRecord]:
+        """Read the live terminal Runs, persist the cost/duration learning corpus snapshot
+        (best-effort), and hand the Run-Auditor its records."""
+        rows = list(registry.read_completed_runs())
+        try:
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            (logs_dir / "learning_corpus.jsonl").write_text(
+                render_learning_corpus(learning_records(rows)), encoding="utf-8"
+            )
+        except OSError:
+            pass
+        return completed_run_records(rows)
+
+    def _learn_report_sink(report: RunAuditReport) -> None:
+        """Persist the findings-only Run-Auditor report (FR-053 — no registry write)."""
+        try:
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            (logs_dir / "run_auditor_report.md").write_text(
+                render_audit_report(report), encoding="utf-8"
+            )
+        except OSError:
+            pass
+        print(
+            f"supervisor: Learn pass — {len(report.findings)} finding(s) over "
+            f"{report.runs_audited} completed Run(s)."
+        )
+
     cycles = 0
     while args.max_cycles is None or cycles < args.max_cycles:
         # Re-read the kill-switch each cycle: the operator can engage/disengage between
@@ -290,6 +347,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
             record_start_time=registry.record_pid_start_time,
             kill_switch=kill_switch,
             completed_project_ids=registry.read_completed_project_ids,
+            learn_runs_source=_learn_runs_source,
+            learn_report_sink=_learn_report_sink,
         )
         cycle.run_once()
         cycles += 1

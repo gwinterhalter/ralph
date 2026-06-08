@@ -188,6 +188,35 @@ def test_read_completed_project_ids_filters_to_complete_state(
 
 
 @pytest.mark.unit
+def test_read_completed_runs_filters_terminal_and_maps(
+    registry: Registry, conn: _FakeConn
+) -> None:
+    """Item 2: read_completed_runs selects the terminal ralph_runs rows, renames
+    project_slug -> project_id, and coerces the timestamp columns to ISO strings."""
+    from datetime import datetime, timezone
+    from decimal import Decimal
+
+    spawned = datetime(2026, 6, 1, 0, 0, 0, tzinfo=timezone.utc)
+    terminated = datetime(2026, 6, 1, 0, 10, 0, tzinfo=timezone.utc)
+    conn.fetchall_result = [
+        ("rid", "slug", "complete", Decimal("2.50"), spawned, terminated, {"k": "v"})
+    ]
+
+    result = registry.read_completed_runs()
+
+    assert len(result) == 1
+    rec = result[0]
+    assert rec["run_id"] == "rid"
+    assert rec["project_id"] == "slug"
+    assert rec["status"] == "complete"
+    assert rec["terminal_cost_usd"] == Decimal("2.50")
+    assert rec["spawned_at"] == spawned.isoformat()
+    assert rec["terminated_at"] == terminated.isoformat()
+    sql, _params = conn.executed[0]
+    assert "status IN ('complete', 'failed')" in sql
+
+
+@pytest.mark.unit
 def test_set_lifecycle_state_persists_a_legal_transition(
     registry: Registry, conn: _FakeConn
 ) -> None:
