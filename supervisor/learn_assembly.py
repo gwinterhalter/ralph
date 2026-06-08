@@ -74,6 +74,17 @@ _REVISE_ROUND = "revise_round"
 # payload {attempt, level, item_id}; subject_id is the item under correction.
 _CORRECTION_ATTEMPT = "correction_attempt"
 
+# One `iteration_end` per inner-loop iteration ≈ one work-item closed — the per-item cost basis
+# (Fleet Analytics D1 refinement): cost-per-item = run cost / iterations closed in that run.
+_ITERATION_END = "iteration_end"
+
+
+def count_iterations(
+    events: "list[dict[str, object]] | tuple[dict[str, object], ...]",
+) -> int:
+    """Count ``iteration_end`` events in a Run's stream — the proxy for items closed (D1)."""
+    return sum(1 for e in events if e.get("event_type") == _ITERATION_END)
+
 
 def _as_int(value: object) -> int | None:
     """Coerce to int, or None (booleans rejected)."""
@@ -399,6 +410,7 @@ class LearningRecord:
     status: str
     cost_usd: Decimal | None
     duration_seconds: float | None
+    items_closed: int | None = None
 
 
 def _as_decimal(value: object) -> Decimal | None:
@@ -427,8 +439,16 @@ def _duration_seconds(spawned_at: object, terminated_at: object) -> float | None
     return (end - start).total_seconds()
 
 
-def learning_records(rows: "list[RegistryRow] | tuple[RegistryRow, ...]") -> list[LearningRecord]:
-    """Derive the per-completed-Run cost/duration/status learning facts from ``ralph_runs`` rows."""
+def learning_records(
+    rows: "list[RegistryRow] | tuple[RegistryRow, ...]",
+    *,
+    items_closed_for: "Callable[[RegistryRow], int | None] | None" = None,
+) -> list[LearningRecord]:
+    """Derive the per-completed-Run cost/duration/status learning facts from ``ralph_runs`` rows.
+
+    When ``items_closed_for`` is supplied (production wires it to count the Run's ``iteration_end``
+    events via :func:`count_iterations`), each record carries ``items_closed`` so cost forecasting
+    can use the per-item basis (D1); without it the field is ``None`` (per-Run basis)."""
     records: list[LearningRecord] = []
     for row in rows:
         status = str(row.get("status", ""))
@@ -443,6 +463,7 @@ def learning_records(rows: "list[RegistryRow] | tuple[RegistryRow, ...]") -> lis
                 duration_seconds=_duration_seconds(
                     row.get("spawned_at"), row.get("terminated_at")
                 ),
+                items_closed=items_closed_for(row) if items_closed_for is not None else None,
             )
         )
     return records
@@ -465,6 +486,7 @@ def render_learning_corpus(records: "list[LearningRecord] | tuple[LearningRecord
                     "status": record.status,
                     "cost_usd": None if record.cost_usd is None else str(record.cost_usd),
                     "duration_seconds": record.duration_seconds,
+                    "items_closed": record.items_closed,
                 },
                 sort_keys=True,
             )
@@ -516,6 +538,7 @@ __all__ = [
     "RunFacts",
     "assemble_run_facts",
     "build_correction_attempts",
+    "count_iterations",
     "findings_to_escalations",
     "scoped_events_for_run",
     "build_binding_outcomes",

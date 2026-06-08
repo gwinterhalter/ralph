@@ -326,12 +326,20 @@ class Registry:
         for rec in records:
             self._execute_write(
                 "INSERT INTO learning_records "
-                "(run_id, project_slug, status, cost_usd, duration_seconds) "
-                "VALUES (%s, %s, %s, %s, %s) "
+                "(run_id, project_slug, status, cost_usd, duration_seconds, items_closed) "
+                "VALUES (%s, %s, %s, %s, %s, %s) "
                 "ON CONFLICT (run_id) DO UPDATE SET project_slug = EXCLUDED.project_slug, "
                 "status = EXCLUDED.status, cost_usd = EXCLUDED.cost_usd, "
-                "duration_seconds = EXCLUDED.duration_seconds, updated_at = now()",
-                (rec.run_id, rec.project_slug, rec.status, rec.cost_usd, rec.duration_seconds),
+                "duration_seconds = EXCLUDED.duration_seconds, "
+                "items_closed = EXCLUDED.items_closed, updated_at = now()",
+                (
+                    rec.run_id,
+                    rec.project_slug,
+                    rec.status,
+                    rec.cost_usd,
+                    rec.duration_seconds,
+                    rec.items_closed,
+                ),
             )
 
     def upsert_audit_findings(
@@ -419,7 +427,7 @@ class Registry:
 
     def read_learning_records(self) -> Sequence[RegistryRow]:
         """Return the per-Run cost/duration learning corpus (Fleet Analytics §2 forecast input)."""
-        cols = ("run_id", "project_slug", "status", "cost_usd", "duration_seconds")
+        cols = ("run_id", "project_slug", "status", "cost_usd", "duration_seconds", "items_closed")
         col_list = ", ".join(cols)
         sql = f"SELECT {col_list} FROM learning_records"  # nosec B608 — fixed allowlist
         with self._conn.cursor() as cur:
@@ -548,6 +556,18 @@ class Registry:
             cur.execute(sql, tuple(params))
             rows = cur.fetchall()
         return [dict(zip(self._EVENT_COLUMNS, row)) for row in rows]
+
+    def prune_events(self, *, before_iso: str) -> int:
+        """Delete events older than ``before_iso`` (the retention policy); return rows deleted.
+
+        Fleet Analytics §1 retention (D3): the events table grows unbounded, so the operator (or an
+        opt-in cycle policy) prunes events whose ``ts_utc`` is before the cutoff. ``before_iso`` is a
+        parameterised value; the cutoff column is a SQL literal — no injection vector."""
+        with self._conn.cursor() as cur:
+            cur.execute("DELETE FROM events WHERE ts_utc < %s", (before_iso,))
+            deleted = cur.rowcount
+        self._conn.commit()
+        return deleted
 
     # --- Writes (Spec v1.3 §5.2-§5.5; sole write surface, NFR-006) ---
 

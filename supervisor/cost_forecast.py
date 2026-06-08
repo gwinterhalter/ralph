@@ -37,12 +37,17 @@ def _as_decimal(value: object) -> Decimal | None:
 
 @dataclass(frozen=True)
 class ProjectForecast:
-    """One project's spend-to-completion projection."""
+    """One project's spend-to-completion projection.
+
+    ``unit_cost_usd`` is per-CLOSED-ITEM when items were captured (``basis == 'per_item'`` — D1
+    refinement), else the per-RUN mean (``'per_run'``), else ``'none'`` (no cost history)."""
 
     project_id: str
     runs_with_cost: int
+    items_closed: int
     total_spent_usd: Decimal
-    mean_cost_per_run_usd: Decimal
+    unit_cost_usd: Decimal
+    basis: str
     open_work_count: int
     projected_remaining_usd: Decimal
     projected_total_usd: Decimal
@@ -71,6 +76,7 @@ def forecast_fleet(
     Projects are sorted by projected remaining spend, descending.
     """
     costs_by_project: dict[str, list[Decimal]] = defaultdict(list)
+    items_by_project: dict[str, int] = defaultdict(int)
     for row in learning_rows:
         project = str(row.get("project_slug") or row.get("project_id") or "")
         if not project:
@@ -78,6 +84,9 @@ def forecast_fleet(
         cost = _as_decimal(row.get("cost_usd"))
         if cost is not None:
             costs_by_project[project].append(cost)
+        items = row.get("items_closed")
+        if isinstance(items, int) and not isinstance(items, bool) and items > 0:
+            items_by_project[project] += items
 
     project_ids = set(costs_by_project) | set(open_work_counts)
     forecasts: list[ProjectForecast] = []
@@ -87,19 +96,34 @@ def forecast_fleet(
         costs = costs_by_project.get(project_id, [])
         total_spent = sum(costs, Decimal("0"))
         runs = len(costs)
-        mean = (total_spent / runs) if runs else Decimal("0")
+        items = items_by_project.get(project_id, 0)
+        # Prefer the per-CLOSED-ITEM basis (D1); fall back to per-Run mean; else no basis.
+        if items > 0:
+            unit_cost = total_spent / items
+            basis = "per_item"
+            sample = items
+        elif runs > 0:
+            unit_cost = total_spent / runs
+            basis = "per_run"
+            sample = runs
+        else:
+            unit_cost = Decimal("0")
+            basis = "none"
+            sample = 0
         open_count = int(open_work_counts.get(project_id, 0))
-        projected_remaining = mean * open_count
+        projected_remaining = unit_cost * open_count
         forecasts.append(
             ProjectForecast(
                 project_id=project_id,
                 runs_with_cost=runs,
+                items_closed=items,
                 total_spent_usd=total_spent,
-                mean_cost_per_run_usd=mean,
+                unit_cost_usd=unit_cost,
+                basis=basis,
                 open_work_count=open_count,
                 projected_remaining_usd=projected_remaining,
                 projected_total_usd=total_spent + projected_remaining,
-                confidence=min(1.0, runs / _CONFIDENCE_RUNS),
+                confidence=min(1.0, sample / _CONFIDENCE_RUNS),
             )
         )
         fleet_spent += total_spent
@@ -130,10 +154,11 @@ def render_forecast(forecast: FleetForecast, *, ceiling_usd: Decimal | None = No
     if not forecast.projects:
         lines.append("  (no projects with cost history or open work)")
     for project in forecast.projects:
+        unit_label = {"per_item": "/item", "per_run": "/run", "none": ""}[project.basis]
         lines.append(
             f"  {project.project_id}: spent ${project.total_spent_usd} + "
             f"~${project.projected_remaining_usd} for {project.open_work_count} open "
-            f"(mean ${project.mean_cost_per_run_usd}/run, confidence {project.confidence:.0%})"
+            f"(${project.unit_cost_usd}{unit_label}, confidence {project.confidence:.0%})"
         )
     return "\n".join(lines)
 

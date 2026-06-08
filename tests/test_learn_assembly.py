@@ -334,6 +334,26 @@ def test_findings_to_escalations_surfaces_only_new_keys() -> None:
     assert auto_pick_eligible(esc) is True
 
 
+def test_count_iterations() -> None:
+    from supervisor.learn_assembly import count_iterations
+
+    events = [
+        {"event_type": "iteration_end"},
+        {"event_type": "iteration_end"},
+        {"event_type": "phase_complete"},  # not an iteration_end
+        {"event_type": "gate_fire"},
+    ]
+    assert count_iterations(events) == 2
+
+
+def test_learning_records_items_closed_via_callable() -> None:
+    rows = [_row(run_id="a", status="complete")]
+    records = learning_records(rows, items_closed_for=lambda _r: 4)
+    assert records[0].items_closed == 4
+    # Default: no callable → None (per-Run basis).
+    assert learning_records(rows)[0].items_closed is None
+
+
 def test_build_correction_attempts() -> None:
     events = [
         {

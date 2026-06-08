@@ -292,6 +292,8 @@ def _main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI entry
     events_p.add_argument("--type", dest="event_type", default=None)
     events_p.add_argument("--limit", type=int, default=50)
     sub.add_parser("forecast", help="project fleet spend-to-completion (cost forecasting)")
+    prune_p = sub.add_parser("events-prune", help="delete events older than N days (retention)")
+    prune_p.add_argument("--days", type=float, required=True)
     onramp_p = sub.add_parser("onramp-abs", help="provision the ABS Phase 0->1->2 dependency chain")
     onramp_p.add_argument("--apply", action="store_true", help="write the rows (default: dry-run)")
     sub.add_parser("pause", help="write a pause command")
@@ -416,6 +418,19 @@ def _main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI entry
             else:
                 print(f"{phase.project_id} already exists — left unchanged")
         print(f"ABS on-ramp: {created} new project(s) provisioned.")
+        return 0
+
+    if args.cmd == "events-prune":
+        dsn = os.environ.get("OL_SUPERVISOR_DB_URL")
+        if not dsn:
+            print("control_panel events-prune: OL_SUPERVISOR_DB_URL is not set.")
+            return 1
+        from supervisor.registry import Registry
+
+        registry = Registry.from_env()
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=args.days)).isoformat()
+        deleted = registry.prune_events(before_iso=cutoff)
+        print(f"events-prune: deleted {deleted} event(s) older than {args.days} day(s) (before {cutoff}).")
         return 0
 
     if args.cmd == "forecast":

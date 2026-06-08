@@ -434,6 +434,16 @@ def test_read_learning_records(registry: Registry, conn: _FakeConn) -> None:
 
 
 @pytest.mark.unit
+def test_prune_events_deletes_before_cutoff(registry: Registry, conn: _FakeConn) -> None:
+    conn.rowcount_result = 7
+    deleted = registry.prune_events(before_iso="2026-06-01T00:00:00+00:00")
+    assert deleted == 7
+    sql, params = conn.executed[0]
+    assert "DELETE FROM events WHERE ts_utc < %s" in sql
+    assert params == ("2026-06-01T00:00:00+00:00",)
+
+
+@pytest.mark.unit
 def test_read_all_projects(registry: Registry, conn: _FakeConn) -> None:
     row = ("p1", "P1", "/p1", "k", "active", "candidate", 100, None, 0, None, [])
     conn.fetchall_result = [row]

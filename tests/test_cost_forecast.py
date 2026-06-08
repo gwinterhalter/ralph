@@ -14,29 +14,37 @@ from supervisor.cost_forecast import (
 pytestmark = pytest.mark.unit
 
 
-def _row(project: str, cost: str | None) -> dict[str, object]:
-    return {"project_slug": project, "cost_usd": None if cost is None else Decimal(cost)}
+def _row(project: str, cost: str | None, items: int | None = None) -> dict[str, object]:
+    return {
+        "project_slug": project,
+        "cost_usd": None if cost is None else Decimal(cost),
+        "items_closed": items,
+    }
 
 
-def test_forecast_projects_remaining_and_fleet_totals() -> None:
-    rows = [
-        _row("p1", "2.00"),
-        _row("p1", "4.00"),  # mean 3.00
-        _row("p2", "1.00"),  # mean 1.00
-    ]
-    open_counts = {"p1": 5, "p2": 2}
-    fc = forecast_fleet(rows, open_counts)
-
+def test_forecast_per_run_basis_when_no_items() -> None:
+    # No items_closed → per-Run mean basis (the v1 fallback).
+    rows = [_row("p1", "2.00"), _row("p1", "4.00"), _row("p2", "1.00")]
+    fc = forecast_fleet(rows, {"p1": 5, "p2": 2})
     by = {p.project_id: p for p in fc.projects}
-    assert by["p1"].mean_cost_per_run_usd == Decimal("3.00")
+    assert by["p1"].basis == "per_run"
+    assert by["p1"].unit_cost_usd == Decimal("3.00")  # (2+4)/2
     assert by["p1"].projected_remaining_usd == Decimal("15.00")  # 3 * 5
-    assert by["p1"].projected_total_usd == Decimal("21.00")  # 6 spent + 15
     assert by["p2"].projected_remaining_usd == Decimal("2.00")  # 1 * 2
-    assert fc.fleet_spent_usd == Decimal("7.00")  # 6 + 1
-    assert fc.fleet_projected_remaining_usd == Decimal("17.00")  # 15 + 2
+    assert fc.fleet_spent_usd == Decimal("7.00")
     assert fc.fleet_projected_total_usd == Decimal("24.00")
-    # sorted by projected remaining desc → p1 first
-    assert fc.projects[0].project_id == "p1"
+    assert fc.projects[0].project_id == "p1"  # sorted by projected remaining desc
+
+
+def test_forecast_per_item_basis_when_items_present() -> None:
+    # With items_closed → per-CLOSED-ITEM basis (D1): unit = total cost / total items.
+    rows = [_row("p1", "6.00", 3), _row("p1", "6.00", 3)]  # $12 over 6 items = $2/item
+    fc = forecast_fleet(rows, {"p1": 4})
+    p = fc.projects[0]
+    assert p.basis == "per_item"
+    assert p.items_closed == 6
+    assert p.unit_cost_usd == Decimal("2.00")
+    assert p.projected_remaining_usd == Decimal("8.00")  # 2 * 4 open
 
 
 def test_forecast_no_cost_history_is_zero_confidence() -> None:

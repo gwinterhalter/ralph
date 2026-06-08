@@ -312,6 +312,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
     from supervisor.learn_assembly import (
         build_correction_attempts,
         completed_run_records,
+        count_iterations,
         findings_to_escalations,
         learning_records,
         read_events_jsonl,
@@ -352,6 +353,20 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
                 print(f"supervisor: event ingest for {project.get('project_id')} skipped ({exc}).")
         if total_new:
             print(f"supervisor: ingested {total_new} new event(s) to the fleet events table.")
+        # Retention (D3): opt-in prune of events older than OL_SUPERVISOR_EVENT_RETENTION_DAYS.
+        retention_raw = os.environ.get("OL_SUPERVISOR_EVENT_RETENTION_DAYS")
+        if retention_raw:
+            from datetime import timedelta
+
+            try:
+                cutoff = (
+                    datetime.now(timezone.utc) - timedelta(days=float(retention_raw))
+                ).isoformat()
+                pruned = registry.prune_events(before_iso=cutoff)
+                if pruned:
+                    print(f"supervisor: pruned {pruned} event(s) older than {retention_raw}d.")
+            except Exception as exc:  # noqa: BLE001 - best-effort
+                print(f"supervisor: event prune skipped ({exc}).")
 
     _forecast_warned = {"breaching": False}
 
@@ -395,7 +410,10 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
         """Read the live terminal Runs, persist the cost/duration learning corpus (file +
         DB, best-effort), and hand the Run-Auditor its records."""
         rows = list(registry.read_completed_runs())
-        records = learning_records(rows)
+        # items_closed (D1): count each Run's iteration_end events → per-item cost forecasting basis.
+        records = learning_records(
+            rows, items_closed_for=lambda row: count_iterations(scoped_events_for_run(row))
+        )
         try:
             logs_dir.mkdir(parents=True, exist_ok=True)
             (logs_dir / "learning_corpus.jsonl").write_text(
