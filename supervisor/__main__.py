@@ -308,6 +308,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
     # §4.4(6) Learn wiring (Item 2): the live completed-Run source + report/corpus sinks.
     from supervisor.learn_assembly import (
         completed_run_records,
+        gate_events_from_run,
         learning_records,
         render_learning_corpus,
     )
@@ -326,7 +327,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
             )
         except OSError:
             pass
-        return completed_run_records(rows)
+        return completed_run_records(rows, gate_events_for=gate_events_from_run)
 
     def _learn_report_sink(report: RunAuditReport) -> None:
         """Persist the findings-only Run-Auditor report (FR-053 — no registry write)."""
