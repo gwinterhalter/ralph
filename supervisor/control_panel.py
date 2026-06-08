@@ -160,15 +160,41 @@ def render_metrics(metrics: EventMetrics) -> str:
     return "\n".join(lines)
 
 
+#: Finding lifecycle statuses, in workflow order (mirrors registry.FINDING_STATUSES).
+_FINDING_STATUS_ORDER: tuple[str, ...] = ("proposed", "accepted", "applied", "rejected")
+
+
+def summarize_finding_statuses(findings: Sequence[Mapping[str, object]]) -> dict[str, int]:
+    """Count findings by lifecycle status (pure; missing/unknown status → 'proposed')."""
+    counts: dict[str, int] = {}
+    for finding in findings:
+        status = str(finding.get("status") or "proposed")
+        counts[status] = counts.get(status, 0) + 1
+    return counts
+
+
+def _status_rollup(counts: Mapping[str, int]) -> str:
+    """One-line 'N proposed, M applied, ...' rollup in workflow order (pure)."""
+    parts = [
+        f"{counts[s]} {s}"
+        for s in (*_FINDING_STATUS_ORDER, *sorted(set(counts) - set(_FINDING_STATUS_ORDER)))
+        if counts.get(s)
+    ]
+    return ", ".join(parts)
+
+
 def render_learnings(findings: Sequence[Mapping[str, object]]) -> str:
     """Render the persisted Run-Auditor learnings pane (pure; over read_audit_findings rows).
 
-    Groups by finding kind and lists each subject with its recommendation + adoption route, so the
-    operator sees the accumulated cross-run/cross-project learnings (Item 2 DB capture). An empty
-    set renders a clear 'no learnings yet' line."""
+    Shows each finding's lifecycle status (proposed/accepted/applied/rejected) FIRST so the operator
+    sees what is actionable (proposed = awaiting a decision; accepted = run `apply`), plus the
+    recommendation, adoption route, and authoring skill. The header rolls up counts by status. An
+    empty set renders a clear 'no learnings yet' line."""
     if not findings:
         return "learnings: none captured yet (the Learn step records findings to run_audit_findings)."
-    lines = [f"learnings: {len(findings)} finding(s) captured (run_audit_findings):"]
+    rollup = _status_rollup(summarize_finding_statuses(findings))
+    header = f"learnings: {len(findings)} finding(s) captured (run_audit_findings)"
+    lines = [f"{header} — {rollup}:" if rollup else f"{header}:"]
     for finding in findings:
         kind = str(finding.get("kind", "?"))
         binding_class = finding.get("binding_class")
@@ -176,29 +202,93 @@ def render_learnings(findings: Sequence[Mapping[str, object]]) -> str:
             kind = f"{kind}:{binding_class}"
         subject = str(finding.get("subject", "?"))
         runs = finding.get("runs_audited", "?")
-        lines.append(f"  [{kind}] {subject}  (across {runs} runs)")
+        status = str(finding.get("status") or "proposed")
+        lines.append(f"  [{status}] [{kind}] {subject}  (across {runs} runs)")
         lines.append(f"    → {finding.get('recommendation', '')}")
-        lines.append(f"    adopt: {finding.get('routes_to', '')}")
+        skill = finding.get("authoring_skill")
+        adopt = f"    adopt: {finding.get('routes_to', '')}"
+        if skill:
+            adopt += f"  (skill: {skill})"
+        lines.append(adopt)
+        if status == "proposed":
+            lines.append(f"    action: `control_panel promote {finding.get('finding_key', '?')}`")
+        elif status == "accepted":
+            lines.append(f"    action: `control_panel apply {finding.get('finding_key', '?')}`")
     return "\n".join(lines)
 
 
+#: Effect outcomes, ordered worst-first so a regression leads the rollup (mirrors effect_measure).
+_EFFECT_OUTCOME_ORDER: tuple[str, ...] = ("regressed", "no_effect", "pending", "confirmed")
+
+
+def summarize_effect_outcomes(rows: Sequence[Mapping[str, object]]) -> dict[str, int]:
+    """Count measured effects by outcome (pure)."""
+    counts: dict[str, int] = {}
+    for row in rows:
+        outcome = str(row.get("outcome") or "?")
+        counts[outcome] = counts.get(outcome, 0) + 1
+    return counts
+
+
+def _effect_rollup(counts: Mapping[str, int]) -> str:
+    """One-line outcome rollup, worst-first (pure)."""
+    parts = [
+        f"{counts[o]} {o}"
+        for o in (*_EFFECT_OUTCOME_ORDER, *sorted(set(counts) - set(_EFFECT_OUTCOME_ORDER)))
+        if counts.get(o)
+    ]
+    return ", ".join(parts)
+
+
 def render_effects(rows: Sequence[Mapping[str, object]]) -> str:
-    """Render the learning effect-measurement pane (pure; over read_audit_effects rows)."""
+    """Render the learning effect-measurement pane (pure; over read_audit_effects rows).
+
+    The header rolls up outcomes worst-first (regressed/no_effect/pending/confirmed) so a regression
+    or no-effect adoption is immediately visible without scanning. Each row shows the before→after
+    metric, post-adoption run count, and the adoption instant."""
     if not rows:
         return "effects: none measured yet (adopt a learning, then post-adoption runs accrue)."
-    lines = [f"effects: {len(rows)} adopted learning(s) measured:"]
+    rollup = _effect_rollup(summarize_effect_outcomes(rows))
+    header = f"effects: {len(rows)} adopted learning(s) measured"
+    lines = [f"{header} — {rollup}:" if rollup else f"{header}:"]
     for row in rows:
         before = row.get("before_metric")
         after = row.get("after_metric")
         b = f"{before:.3f}" if isinstance(before, (int, float)) else "?"
         a = f"{after:.3f}" if isinstance(after, (int, float)) else "?"
+        applied = row.get("applied_at")
+        when = f"  (adopted {applied})" if applied else ""
         lines.append(
             f"  [{row.get('outcome', '?')}] {row.get('finding_key', '?')}  "
-            f"{b} → {a} over {row.get('post_adoption_runs', 0)} post-run(s)"
+            f"{b} → {a} over {row.get('post_adoption_runs', 0)} post-run(s){when}"
         )
         if row.get("detail"):
             lines.append(f"    {row.get('detail')}")
     return "\n".join(lines)
+
+
+def render_learning_banner(
+    findings: Sequence[Mapping[str, object]], effects: Sequence[Mapping[str, object]]
+) -> str:
+    """One-line learning-lifecycle + effect-outcome banner for the status dashboard (pure).
+
+    Surfaces, at a glance, how many findings await a decision and whether any adopted learning
+    regressed — neither is on the FR-058 run-state snapshot. Flags actionable counts (proposed
+    findings to decide; regressed/no_effect adoptions to review) so they aren't missed."""
+    f_counts = summarize_finding_statuses(findings)
+    e_counts = summarize_effect_outcomes(effects)
+    learn = _status_rollup(f_counts) or "none"
+    eff = _effect_rollup(e_counts) or "none measured"
+    line = f"Learnings: {learn}  |  Effects: {eff}"
+    flags = []
+    if f_counts.get("proposed"):
+        flags.append(f"{f_counts['proposed']} finding(s) awaiting a decision (`learnings --status proposed`)")
+    regressions = e_counts.get("regressed", 0) + e_counts.get("no_effect", 0)
+    if regressions:
+        flags.append(f"{regressions} adopted learning(s) not confirmed (`effects`)")
+    if flags:
+        line += "\n  [!] " + "; ".join(flags)
+    return line
 
 
 def render_correction_summary(rows: Sequence[Mapping[str, object]]) -> str:
@@ -347,7 +437,15 @@ def _main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI entry
     status_p.add_argument(
         "--interval", type=float, default=30.0, help="bounded refresh interval (seconds)"
     )
-    sub.add_parser("learnings", help="list the captured Run-Auditor learnings (run_audit_findings)")
+    learnings_p = sub.add_parser(
+        "learnings", help="list the captured Run-Auditor learnings (run_audit_findings)"
+    )
+    learnings_p.add_argument(
+        "--status",
+        choices=("proposed", "accepted", "applied", "rejected"),
+        default=None,
+        help="show only findings in this lifecycle status (default: all)",
+    )
     sub.add_parser("corrections", help="list per-item correction-loop churn (correction_attempts)")
     sub.add_parser("effects", help="list measured before/after effects of adopted learnings")
     promote_p = sub.add_parser("promote", help="accept a learning (queue it for adoption)")
@@ -416,6 +514,10 @@ def _main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI entry
         from supervisor.registry import Registry
 
         registry = Registry.from_env()
+        # Banner: the live FR-058 snapshot is about run-state only, so surface the Item-2 learning
+        # lifecycle + effect outcomes here once (regressed/no_effect adoptions otherwise only page by
+        # email — they have no real project row to raise attention_debt on the dashboard).
+        print(render_learning_banner(registry.read_audit_findings(), registry.read_audit_effects()))
 
         def _fetch() -> FullFleetSnapshot:
             return build_full_fleet_snapshot(registry, now=datetime.now(timezone.utc))
@@ -430,7 +532,11 @@ def _main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI entry
         from supervisor.registry import Registry
 
         registry = Registry.from_env()
-        print(render_learnings(registry.read_audit_findings()))
+        learning_rows = list(registry.read_audit_findings())
+        want = getattr(args, "status", None)
+        if want is not None:
+            learning_rows = [r for r in learning_rows if str(r.get("status") or "proposed") == want]
+        print(render_learnings(learning_rows))
         return 0
 
     if args.cmd == "onramp-abs":
@@ -604,5 +710,8 @@ __all__ = [
     "render_correction_summary",
     "render_events",
     "render_effects",
+    "render_learning_banner",
+    "summarize_finding_statuses",
+    "summarize_effect_outcomes",
     "build_dispatch_command",
 ]

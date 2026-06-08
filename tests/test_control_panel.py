@@ -17,10 +17,13 @@ from supervisor.control_panel import (
     render_correction_summary,
     render_effects,
     render_events,
+    render_learning_banner,
     render_learnings,
     render_metrics,
     run_status_panel,
+    summarize_effect_outcomes,
     summarize_events,
+    summarize_finding_statuses,
     write_command,
 )
 from supervisor.full_status_surface import FullFleetSnapshot
@@ -228,7 +231,63 @@ def test_dispatch_succeeded_guards_false_success() -> None:
 def test_render_effects() -> None:
     assert "none measured yet" in render_effects([])
     rows = [{"finding_key":"answerer_dsl_candidate:g1","outcome":"confirmed",
-             "before_metric":1.0,"after_metric":0.0,"post_adoption_runs":4,"detail":"d"}]
+             "before_metric":1.0,"after_metric":0.0,"post_adoption_runs":4,"detail":"d",
+             "applied_at":"2026-06-08T10:00:00+00:00"}]
     out = render_effects(rows)
     assert "[confirmed] answerer_dsl_candidate:g1" in out
     assert "1.000 → 0.000 over 4 post-run(s)" in out
+    assert "adopted 2026-06-08T10:00:00+00:00" in out  # applied_at surfaced
+
+
+def test_render_learnings_shows_status_and_actionable_hint() -> None:
+    rows = [
+        {"finding_key": "k:proposed", "kind": "answerer_dsl_candidate", "subject": "g1",
+         "status": "proposed", "recommendation": "r", "routes_to": "operator + cf-spec-writer",
+         "authoring_skill": "cf-spec-writer", "runs_audited": 3},
+        {"finding_key": "k:accepted", "kind": "session_shape", "subject": "s",
+         "status": "accepted", "recommendation": "r", "routes_to": "operator", "runs_audited": 2},
+        {"finding_key": "k:applied", "kind": "session_shape", "subject": "s2",
+         "status": "applied", "recommendation": "r", "routes_to": "operator", "runs_audited": 2},
+    ]
+    out = render_learnings(rows)
+    assert "1 proposed, 1 accepted, 1 applied" in out  # rollup in workflow order
+    assert "[proposed] [answerer_dsl_candidate] g1" in out
+    assert "(skill: cf-spec-writer)" in out
+    assert "control_panel promote k:proposed" in out   # proposed -> promote hint
+    assert "control_panel apply k:accepted" in out      # accepted -> apply hint
+    assert "control_panel promote k:applied" not in out  # applied: no action hint
+
+
+def test_summarize_finding_statuses_defaults_missing_to_proposed() -> None:
+    counts = summarize_finding_statuses([{"finding_key": "k"}, {"status": "applied"}])
+    assert counts == {"proposed": 1, "applied": 1}
+
+
+def test_render_effects_rollup_worst_first() -> None:
+    rows = [
+        {"finding_key": "a", "outcome": "confirmed", "before_metric": 1.0, "after_metric": 0.0,
+         "post_adoption_runs": 3},
+        {"finding_key": "b", "outcome": "regressed", "before_metric": 0.0, "after_metric": 1.0,
+         "post_adoption_runs": 3},
+        {"finding_key": "c", "outcome": "pending", "before_metric": None, "after_metric": None,
+         "post_adoption_runs": 1},
+    ]
+    out = render_effects(rows)
+    assert out.splitlines()[0].index("regressed") < out.splitlines()[0].index("confirmed")
+    assert summarize_effect_outcomes(rows) == {"confirmed": 1, "regressed": 1, "pending": 1}
+
+
+def test_render_learning_banner_flags_actionable() -> None:
+    findings = [{"status": "proposed"}, {"status": "applied"}]
+    effects = [{"outcome": "regressed"}, {"outcome": "confirmed"}]
+    out = render_learning_banner(findings, effects)
+    assert "Learnings: 1 proposed, 1 applied" in out
+    assert "Effects: 1 regressed, 1 confirmed" in out
+    assert "[!]" in out and "awaiting a decision" in out and "not confirmed" in out
+
+
+def test_render_learning_banner_quiet_when_nothing_actionable() -> None:
+    out = render_learning_banner([{"status": "applied"}], [{"outcome": "confirmed"}])
+    assert "[!]" not in out  # no proposed findings, no non-confirmed effects
+    out_empty = render_learning_banner([], [])
+    assert "Learnings: none" in out_empty and "Effects: none measured" in out_empty
