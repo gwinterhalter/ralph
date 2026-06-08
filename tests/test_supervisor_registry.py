@@ -291,6 +291,68 @@ def test_read_audit_findings_maps_rows(registry: Registry, conn: _FakeConn) -> N
     assert result[0]["runs_audited"] == 5
 
 
+# --- ol4: corrections + finding lifecycle ---
+
+
+@pytest.mark.unit
+def test_upsert_audit_findings_writes_authoring_skill(
+    registry: Registry, conn: _FakeConn
+) -> None:
+    from supervisor.run_auditor import AuditFinding, FindingKind
+
+    conn.fetchall_result = []  # none existing
+    registry.upsert_audit_findings(
+        [
+            AuditFinding(
+                kind=FindingKind.ANSWERER_DSL_CANDIDATE,
+                subject="g1",
+                evidence="e",
+                recommendation="r",
+                routes_to="operator + cf-spec-writer",
+            )
+        ],
+        runs_audited=3,
+    )
+    insert = next(
+        (q, p) for q, p in conn.executed if "INSERT INTO run_audit_findings" in q
+    )
+    assert "cf-spec-writer" in insert[1]  # authoring_skill parsed from routes_to
+
+
+@pytest.mark.unit
+def test_set_finding_status_validates_and_writes(
+    registry: Registry, conn: _FakeConn
+) -> None:
+    registry.set_finding_status("k1", "accepted", decided_by="greg")
+    sql, params = conn.executed[0]
+    assert "UPDATE run_audit_findings SET status" in sql
+    assert params[0] == "accepted" and params[1] == "greg" and params[2] == "k1"
+    with pytest.raises(ValueError, match="illegal finding status"):
+        registry.set_finding_status("k1", "bogus", decided_by="greg")
+
+
+@pytest.mark.unit
+def test_upsert_correction_attempts(registry: Registry, conn: _FakeConn) -> None:
+    from supervisor.learn_assembly import CorrectionAttempt
+
+    registry.upsert_correction_attempts(
+        [CorrectionAttempt("u1", "p", 2, 2, "L3", "OLB-07", "2026-06-07T10:00:00Z")]
+    )
+    sql, params = conn.executed[0]
+    assert "INSERT INTO correction_attempts" in sql
+    assert "ON CONFLICT (event_uuid) DO NOTHING" in sql
+    assert params[0] == "u1" and params[5] == "OLB-07"
+
+
+@pytest.mark.unit
+def test_read_correction_summary_maps_rows(registry: Registry, conn: _FakeConn) -> None:
+    conn.fetchall_result = [("OLB-07", 5, 2, "L4")]
+    result = registry.read_correction_summary()
+    assert result[0]["item_id"] == "OLB-07"
+    assert result[0]["attempts"] == 5
+    assert result[0]["max_level"] == "L4"
+
+
 @pytest.mark.unit
 def test_set_lifecycle_state_persists_a_legal_transition(
     registry: Registry, conn: _FakeConn

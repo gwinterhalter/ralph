@@ -308,13 +308,22 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
     # §4.4(6) Learn wiring (Item 2): the live completed-Run source + report/corpus sinks.
     from supervisor.attention import intake_escalation
     from supervisor.learn_assembly import (
+        build_correction_attempts,
         completed_run_records,
         findings_to_escalations,
         learning_records,
         render_learning_corpus,
         run_facts_from_run,
+        scoped_events_for_run,
     )
-    from supervisor.run_auditor import render_audit_report
+    from supervisor.run_auditor import (
+        AuditConfig,
+        CorrectionRecord,
+        derive_correction_findings,
+        render_audit_report,
+    )
+
+    _correction_records: list[CorrectionRecord] = []
 
     logs_dir = Path(state_dir) / "logs"
 
@@ -334,24 +343,56 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
             registry.upsert_learning_records(records)  # Item 2 DB capture (ol3)
         except Exception as exc:  # noqa: BLE001 - capture is best-effort; never abort the cycle
             print(f"supervisor: learning_records DB capture skipped ({exc}).")
+        # Corrections (ol4): capture the L1-L4 correction-loop attempts from each Run's event
+        # stream + stash the per-item records for the correction_pattern finding deriver.
+        corr_attempts = []
+        _correction_records.clear()
+        for row in rows:
+            for attempt in build_correction_attempts(scoped_events_for_run(row)):
+                corr_attempts.append(attempt)
+                _correction_records.append(
+                    CorrectionRecord(
+                        run_id=str(row.get("run_id") or ""),
+                        project_slug=str(row.get("project_id") or row.get("project_slug") or ""),
+                        item_id=attempt.item_id,
+                        level=attempt.level,
+                        attempt=attempt.attempt or 0,
+                    )
+                )
+        try:
+            registry.upsert_correction_attempts(corr_attempts)  # ol4
+        except Exception as exc:  # noqa: BLE001 - best-effort; never abort the cycle
+            print(f"supervisor: correction_attempts DB capture skipped ({exc}).")
         return completed_run_records(rows, facts_for=run_facts_from_run)
 
     def _learn_report_sink(report: RunAuditReport) -> None:
         """Persist the findings-only Run-Auditor report (file + DB capture), then surface any NEW
         findings to the operator via the attention queue (auto-feedback). FR-053 — the auditor
         itself writes nothing; this persists its OWN findings + raises operator offers."""
+        # Merge the gate/binding/shape findings (report) with the correction_pattern findings
+        # (ol4) into one combined report — persisted to the file + DB + escalated together.
+        correction_findings = derive_correction_findings(
+            _correction_records, config=AuditConfig()
+        )
+        all_findings = list(report.findings) + correction_findings
+        combined = RunAuditReport(
+            findings=tuple(all_findings),
+            runs_audited=report.runs_audited,
+            min_consistent_runs=report.min_consistent_runs,
+            shape_revision_fraction=report.shape_revision_fraction,
+        )
         try:
             logs_dir.mkdir(parents=True, exist_ok=True)
             (logs_dir / "run_auditor_report.md").write_text(
-                render_audit_report(report), encoding="utf-8"
+                render_audit_report(combined), encoding="utf-8"
             )
         except OSError:
             pass
         new_keys: list[str] = []
         try:
             new_keys = registry.upsert_audit_findings(
-                report.findings, runs_audited=report.runs_audited
-            )  # Item 2 DB capture (ol3); returns the finding_keys not seen before
+                all_findings, runs_audited=report.runs_audited
+            )  # Item 2 DB capture (ol3/ol4); returns the finding_keys not seen before
         except Exception as exc:  # noqa: BLE001 - capture is best-effort; never abort the cycle
             print(f"supervisor: run_audit_findings DB capture skipped ({exc}).")
         # Auto-feedback: surface only the NEW findings as one-confirm operator offers (deduped by
@@ -359,7 +400,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
         # store so the next Attend pass delivers them via the notification port (Item 3).
         if new_keys:
             escalations = findings_to_escalations(
-                report.findings, new_keys=set(new_keys), now=datetime.now(timezone.utc)
+                all_findings, new_keys=set(new_keys), now=datetime.now(timezone.utc)
             )
             state = attention_store.load()
             for escalation in escalations:
@@ -367,7 +408,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
             attention_store.save(state)
             print(f"supervisor: Learn pass — raised {len(escalations)} new learning offer(s).")
         print(
-            f"supervisor: Learn pass — {len(report.findings)} finding(s) over "
+            f"supervisor: Learn pass — {len(all_findings)} finding(s) over "
             f"{report.runs_audited} completed Run(s)."
         )
 

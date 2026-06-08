@@ -13,6 +13,7 @@ from supervisor.learn_assembly import (
     RunFacts,
     assemble_run_facts,
     build_binding_outcomes,
+    build_correction_attempts,
     build_gate_events,
     build_shape_usages,
     completed_run_records,
@@ -27,9 +28,11 @@ from supervisor.run_auditor import (
     AuditConfig,
     AuditFinding,
     BindingFindingClass,
+    CorrectionRecord,
     FindingKind,
     GateEvent,
     RunRecord,
+    derive_correction_findings,
     run_audit_pass,
 )
 
@@ -329,6 +332,41 @@ def test_findings_to_escalations_surfaces_only_new_keys() -> None:
     assert esc.confidence >= 0.7
     # The escalation is eligible for the FR-032 one-confirm accept path.
     assert auto_pick_eligible(esc) is True
+
+
+def test_build_correction_attempts() -> None:
+    events = [
+        {
+            "event_type": "correction_attempt",
+            "event_uuid": "u1",
+            "project_id": "p1",
+            "iteration_index": 2,
+            "subject_id": "OLB-07",
+            "ts_utc": "2026-06-07T10:00:00.000Z",
+            "payload": {"attempt": 2, "level": "L3", "item_id": "OLB-07"},
+        },
+        {"event_type": "correction_attempt", "project_id": "p1", "payload": {}},  # no uuid → skip
+        {"event_type": "gate_fire", "event_uuid": "u2", "payload": {}},  # not a correction → skip
+    ]
+    attempts = build_correction_attempts(events)
+    assert len(attempts) == 1
+    a = attempts[0]
+    assert a.event_uuid == "u1" and a.item_id == "OLB-07" and a.level == "L3" and a.attempt == 2
+
+
+def test_derive_correction_findings_fires_on_recurrence() -> None:
+    # Same item corrected across 3 distinct Runs → a chronic-defect finding (deepest L4).
+    records = [
+        CorrectionRecord(run_id="r1", project_slug="p", item_id="OLB-07", level="L2"),
+        CorrectionRecord(run_id="r2", project_slug="p", item_id="OLB-07", level="L4"),
+        CorrectionRecord(run_id="r3", project_slug="p", item_id="OLB-07", level="L3"),
+        CorrectionRecord(run_id="r1", project_slug="p", item_id="OLB-99", level="L1"),  # 1 run only
+    ]
+    findings = derive_correction_findings(records, config=AuditConfig(min_consistent_runs=3))
+    assert len(findings) == 1
+    assert findings[0].kind is FindingKind.CORRECTION_PATTERN
+    assert findings[0].subject == "OLB-07"
+    assert "L4" in findings[0].evidence  # deepest level reported
 
 
 def test_findings_to_escalations_empty_when_no_new() -> None:

@@ -65,6 +65,7 @@ TERMINAL_RUN_STATUSES: frozenset[str] = frozenset({"complete", "failed"})
 ROUTE_ANSWERER_DSL = "operator + cf-spec-writer"
 ROUTE_BINDINGS = "operator + cf-seed-producer"
 ROUTE_SHAPES = "operator + cf-session-plan-reviewer"
+ROUTE_CORRECTIONS = "operator + cf-pytest"
 
 
 # --------------------------------------------------------------------------- #
@@ -98,6 +99,21 @@ class ShapeUsage:
 
     shape: str
     required_reviewer_revision: bool
+
+
+@dataclass(frozen=True)
+class CorrectionRecord:
+    """One L1-L4 correction attempt within a Run (the FR-correction subject).
+
+    Supplied by the caller from the captured ``correction_attempt`` event stream; ``level`` is the
+    patch level (``L1``..``L4``), ``run_id`` lets the deriver count DISTINCT Runs an item was
+    corrected across (the recurrence signal)."""
+
+    run_id: str
+    project_slug: str
+    item_id: str
+    level: str
+    attempt: int = 0
 
 
 @dataclass(frozen=True)
@@ -142,6 +158,7 @@ class FindingKind(Enum):
     ANSWERER_DSL_CANDIDATE = "answerer_dsl_candidate"
     VERIFICATION_BINDING = "verification_binding"
     SESSION_SHAPE = "session_shape"
+    CORRECTION_PATTERN = "correction_pattern"
 
 
 class BindingFindingClass(Enum):
@@ -161,6 +178,53 @@ class AuditFinding:
     recommendation: str
     routes_to: str
     binding_class: BindingFindingClass | None = None
+
+
+def _level_rank(level: str) -> int:
+    """Numeric rank of a correction patch level (``L3`` -> 3); 0 when unparseable."""
+    token = level.strip().upper().lstrip("L")
+    return int(token) if token.isdigit() else 0
+
+
+def derive_correction_findings(
+    records: Sequence[CorrectionRecord], *, config: AuditConfig
+) -> list[AuditFinding]:
+    """FR-correction: work-items that repeatedly entered the correction loop across Runs.
+
+    A work-item that required correction across ``>= config.min_consistent_runs`` DISTINCT Runs is a
+    chronic-defect candidate (the item's test or spec is the likely real problem, not the build) —
+    one finding naming the item, the Run count, and the deepest patch level reached. Fewer than the
+    threshold yields none. Routes to the operator + cf-pytest (the test/code authoring surface)."""
+    runs_by_item: dict[str, set[str]] = defaultdict(set)
+    levels_by_item: dict[str, set[str]] = defaultdict(set)
+    for record in records:
+        if not record.item_id:
+            continue
+        runs_by_item[record.item_id].add(record.run_id)
+        if record.level:
+            levels_by_item[record.item_id].add(record.level)
+
+    findings: list[AuditFinding] = []
+    for item in sorted(runs_by_item):
+        run_count = len(runs_by_item[item])
+        if run_count < config.min_consistent_runs:
+            continue
+        max_level = max(levels_by_item[item], key=_level_rank, default="")
+        level_note = f" (deepest patch {max_level})" if max_level else ""
+        findings.append(
+            AuditFinding(
+                kind=FindingKind.CORRECTION_PATTERN,
+                subject=item,
+                evidence=f"entered the correction loop across {run_count} Runs{level_note}",
+                recommendation=(
+                    f"review work-item '{item}' for a chronic defect — it needed the L1-L4 "
+                    f"correction loop across {run_count} Runs{level_note}; the test or spec is the "
+                    f"likely real problem, not the build"
+                ),
+                routes_to=ROUTE_CORRECTIONS,
+            )
+        )
+    return findings
 
 
 def finding_key(finding: "AuditFinding") -> str:

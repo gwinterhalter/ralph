@@ -70,6 +70,37 @@ _PASS_TOKENS = frozenset({"pass", "passed", "ok", "success", "true"})
 # iteration is recovered (required_reviewer_revision iff any round needed revision).
 _REVISE_ROUND = "revise_round"
 
+# Correction history: the cf-correction-agent `correction_attempt` events (L1-L4 patch retries),
+# payload {attempt, level, item_id}; subject_id is the item under correction.
+_CORRECTION_ATTEMPT = "correction_attempt"
+
+
+def _as_int(value: object) -> int | None:
+    """Coerce to int, or None (booleans rejected)."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, (float, str)):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+@dataclass(frozen=True)
+class CorrectionAttempt:
+    """One captured ``correction_attempt`` event (raw, for the correction_attempts DB table)."""
+
+    event_uuid: str
+    project_slug: str
+    iteration_index: int | None
+    attempt: int | None
+    level: str
+    item_id: str
+    ts_utc: str | None
+
 
 @dataclass(frozen=True)
 class RunFacts:
@@ -213,6 +244,38 @@ def build_shape_usages(
     )
 
 
+def build_correction_attempts(
+    events: "list[dict[str, object]] | tuple[dict[str, object], ...]",
+) -> list[CorrectionAttempt]:
+    """Fold ``correction_attempt`` events into :class:`CorrectionAttempt` rows (for DB capture).
+
+    Keyed by ``event_uuid`` (so re-reading the append-only log is idempotent). An event lacking an
+    event_uuid is skipped. Never raises."""
+    attempts: list[CorrectionAttempt] = []
+    for event in events:
+        if event.get("event_type") != _CORRECTION_ATTEMPT:
+            continue
+        uuid = event.get("event_uuid")
+        if not isinstance(uuid, str) or not uuid:
+            continue
+        payload = event.get("payload")
+        payload = payload if isinstance(payload, dict) else {}
+        item = event.get("subject_id") or payload.get("item_id") or ""
+        ts = event.get("ts_utc")
+        attempts.append(
+            CorrectionAttempt(
+                event_uuid=uuid,
+                project_slug=str(event.get("project_id") or event.get("initiative_slug") or ""),
+                iteration_index=_as_int(event.get("iteration_index")),
+                attempt=_as_int(payload.get("attempt")),
+                level=str(payload.get("level") or ""),
+                item_id=str(item),
+                ts_utc=ts if isinstance(ts, str) and ts else None,
+            )
+        )
+    return attempts
+
+
 def assemble_run_facts(
     events: "list[dict[str, object]] | tuple[dict[str, object], ...]",
 ) -> RunFacts:
@@ -247,7 +310,7 @@ def read_events_jsonl(path: str | Path) -> list[dict[str, object]]:
     return events
 
 
-def _scoped_events_for_run(row: RegistryRow) -> list[dict[str, object]]:
+def scoped_events_for_run(row: RegistryRow) -> list[dict[str, object]]:
     """Read + scope a completed Run's events from its initiative event stream (I/O).
 
     Locates the events log at ``<seed dir>/state/logs/events.jsonl`` (the seed's sibling ``state``
@@ -281,8 +344,8 @@ def _scoped_events_for_run(row: RegistryRow) -> list[dict[str, object]]:
 
 def gate_events_from_run(row: RegistryRow) -> tuple[GateEvent, ...]:
     """A completed Run's gate facts from its event stream (I/O; FR-050) — :func:`build_gate_events`
-    over :func:`_scoped_events_for_run`."""
-    return build_gate_events(_scoped_events_for_run(row))
+    over :func:`scoped_events_for_run`."""
+    return build_gate_events(scoped_events_for_run(row))
 
 
 def run_facts_from_run(row: RegistryRow) -> RunFacts:
@@ -292,7 +355,7 @@ def run_facts_from_run(row: RegistryRow) -> RunFacts:
     (FR-051), and session-shape (FR-052) facts. Returns an empty :class:`RunFacts` when the
     seed/log is absent. Never raises.
     """
-    return assemble_run_facts(_scoped_events_for_run(row))
+    return assemble_run_facts(scoped_events_for_run(row))
 
 
 def completed_run_records(
@@ -448,10 +511,13 @@ def findings_to_escalations(
 
 
 __all__ = [
+    "CorrectionAttempt",
     "LearningRecord",
     "RunFacts",
     "assemble_run_facts",
+    "build_correction_attempts",
     "findings_to_escalations",
+    "scoped_events_for_run",
     "build_binding_outcomes",
     "build_gate_events",
     "build_shape_usages",

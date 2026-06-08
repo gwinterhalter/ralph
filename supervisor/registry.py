@@ -26,8 +26,16 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Protocol, cast
 
 from supervisor import transitions
-from supervisor.learn_assembly import LearningRecord
+from supervisor.learn_assembly import CorrectionAttempt, LearningRecord
 from supervisor.run_auditor import AuditFinding, finding_key
+
+#: The Run-Auditor finding lifecycle states (ol4) the control-panel promoter drives.
+FINDING_STATUSES: frozenset[str] = frozenset({"proposed", "accepted", "applied", "rejected"})
+
+
+def _authoring_skill(routes_to: str) -> str:
+    """The authoring skill named in a finding's ``routes_to`` (the part after the last ``+``)."""
+    return routes_to.split("+")[-1].strip()
 
 if TYPE_CHECKING:
     from supervisor.ports import RegistryRow
@@ -342,10 +350,13 @@ class Registry:
             binding_class = (
                 finding.binding_class.value if finding.binding_class is not None else None
             )
+            # ON CONFLICT refreshes the evidence/recommendation/runs_audited + last_seen_at but
+            # NEVER the lifecycle status/decision — an operator promote/reject decision is preserved
+            # across re-captures (a re-seen finding is not re-surfaced; status stays put).
             self._execute_write(
                 "INSERT INTO run_audit_findings (finding_key, kind, subject, binding_class, "
-                "evidence, recommendation, routes_to, runs_audited) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
+                "evidence, recommendation, routes_to, runs_audited, authoring_skill) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) "
                 "ON CONFLICT (finding_key) DO UPDATE SET evidence = EXCLUDED.evidence, "
                 "recommendation = EXCLUDED.recommendation, runs_audited = EXCLUDED.runs_audited, "
                 "last_seen_at = now()",
@@ -358,9 +369,61 @@ class Registry:
                     finding.recommendation,
                     finding.routes_to,
                     runs_audited,
+                    _authoring_skill(finding.routes_to),
                 ),
             )
         return [k for k in keys if k not in existing]
+
+    def set_finding_status(
+        self, finding_key_value: str, status: str, *, decided_by: str
+    ) -> None:
+        """Set a finding's lifecycle status (ol4 promoter): proposed/accepted/applied/rejected.
+
+        Records ``decided_by`` + ``decided_at = now()``. Validates the status against
+        :data:`FINDING_STATUSES` before the write. The control-panel promoter calls this on
+        promote (accepted) / reject (rejected) / applied."""
+        if status not in FINDING_STATUSES:
+            raise ValueError(
+                f"illegal finding status {status!r}; legal: {sorted(FINDING_STATUSES)}"
+            )
+        self._execute_write(
+            "UPDATE run_audit_findings SET status = %s, decided_by = %s, decided_at = now() "
+            "WHERE finding_key = %s",
+            (status, decided_by, finding_key_value),
+        )
+
+    def upsert_correction_attempts(
+        self, attempts: "Sequence[CorrectionAttempt]"
+    ) -> None:
+        """Capture correction-loop attempts (ol4), keyed by event_uuid (idempotent — ON CONFLICT
+        DO NOTHING, since a logged correction event is immutable)."""
+        for attempt in attempts:
+            self._execute_write(
+                "INSERT INTO correction_attempts (event_uuid, project_slug, iteration_index, "
+                "attempt, level, item_id, ts_utc) VALUES (%s, %s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT (event_uuid) DO NOTHING",
+                (
+                    attempt.event_uuid,
+                    attempt.project_slug,
+                    attempt.iteration_index,
+                    attempt.attempt,
+                    attempt.level,
+                    attempt.item_id,
+                    attempt.ts_utc,
+                ),
+            )
+
+    def read_correction_summary(self) -> Sequence[RegistryRow]:
+        """Per-item correction churn (ol4): item_id, attempts, projects, deepest level (control panel)."""
+        cols = ("item_id", "attempts", "projects", "max_level")
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT item_id, count(*) AS attempts, count(DISTINCT project_slug) AS projects, "
+                "max(level) AS max_level FROM correction_attempts GROUP BY item_id "
+                "ORDER BY attempts DESC"
+            )
+            rows = cur.fetchall()
+        return [dict(zip(cols, row)) for row in rows]
 
     def read_audit_findings(self) -> Sequence[RegistryRow]:
         """Return all persisted Run-Auditor findings, most-recently-seen first (control-panel read)."""
@@ -373,6 +436,10 @@ class Registry:
             "recommendation",
             "routes_to",
             "runs_audited",
+            "status",
+            "authoring_skill",
+            "decided_by",
+            "decided_at",
         )
         col_list = ", ".join(cols)
         sql = (  # nosec B608 — column names are the fixed allowlist above; no caller input
