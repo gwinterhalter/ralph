@@ -327,6 +327,16 @@ EXECUTOR_MODEL="$(read_seed_field "$SEED" .executor_model 2>/dev/null || echo ""
 [[ "$EXECUTOR_MODEL" == "null" ]] && EXECUTOR_MODEL=""
 EXECUTOR_MODEL_FLAG=""
 [[ -n "$EXECUTOR_MODEL" ]] && EXECUTOR_MODEL_FLAG="--model $EXECUTOR_MODEL"
+# Review F-1 (seed schema 1.4): gate the --strict-mcp-config flag on the optional
+# strict_mcp_config seed field instead of emitting it unconditionally (the prior code path
+# always passed --strict-mcp-config regardless of the field, so setting it false had no
+# effect — dead config). Default STRICT when the field is absent or anything other than an
+# explicit `false`, so every existing seed and the canonical always-strict behaviour is
+# unchanged; only `strict_mcp_config: false` relaxes it (the CLI then also honours MCP
+# servers configured outside --mcp-config). Used at BOTH claude --print spawn sites below.
+STRICT_MCP="$(read_seed_field "$SEED" .strict_mcp_config 2>/dev/null || echo "")"
+STRICT_MCP_FLAG="--strict-mcp-config"
+[[ "$STRICT_MCP" == "false" ]] && STRICT_MCP_FLAG=""
 # OLB-08 C2 (operator gate_response_0015_0000 = option A): optional NARROW allow-rule for the
 # checkpoint live-spawn. The seed may declare executor_allowed_tools as a YAML list of Claude Code
 # permission patterns (e.g. "Bash(OLB_C2_LIVE=1 python -m pytest tests/test_c2_single_project_e2e.py:*)").
@@ -390,7 +400,7 @@ claude --print --output-format json \
        --permission-mode "$posture_value" \
        $EXECUTOR_MODEL_FLAG \
        "${EXEC_ALLOW[@]}" \
-       --strict-mcp-config --mcp-config "$MCP_CONFIG" \
+       $STRICT_MCP_FLAG --mcp-config "$MCP_CONFIG" \
        --max-budget-usd "$PER_CALL_CAP" --max-turns "$MAX_TURNS" \
        < "$PLAN_PATH" > "$RESULT_JSON_TMP"
 mv -f "$RESULT_JSON_TMP" "$RESULT_JSON"
@@ -535,7 +545,7 @@ case "$_plan_shape" in
                --permission-mode "$posture_value" \
                $EXECUTOR_MODEL_FLAG \
                "${EXEC_ALLOW[@]}" \
-               --strict-mcp-config --mcp-config "$MCP_CONFIG" \
+               $STRICT_MCP_FLAG --mcp-config "$MCP_CONFIG" \
                --max-budget-usd "$PER_CALL_CAP" --max-turns 12 \
                <<<"$_recovery_prompt" >> "$STATE_DIR/logs/report_recovery.log" 2>&1 || true
         if _report_complete; then
