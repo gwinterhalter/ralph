@@ -292,6 +292,8 @@ def _main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI entry
     events_p.add_argument("--type", dest="event_type", default=None)
     events_p.add_argument("--limit", type=int, default=50)
     sub.add_parser("forecast", help="project fleet spend-to-completion (cost forecasting)")
+    onramp_p = sub.add_parser("onramp-abs", help="provision the ABS Phase 0->1->2 dependency chain")
+    onramp_p.add_argument("--apply", action="store_true", help="write the rows (default: dry-run)")
     sub.add_parser("pause", help="write a pause command")
     sub.add_parser("query", help="write a query_register_state command")
     bump = sub.add_parser("bump", help="write a bump_budget command")
@@ -384,6 +386,36 @@ def _main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI entry
 
         registry = Registry.from_env()
         print(render_learnings(registry.read_audit_findings()))
+        return 0
+
+    if args.cmd == "onramp-abs":
+        from supervisor.abs_onramp import abs_chain_plan, render_chain_plan
+
+        plan = abs_chain_plan()
+        if not args.apply:
+            print(render_chain_plan(plan))
+            print("(dry-run — pass --apply to provision)")
+            return 0
+        dsn = os.environ.get("OL_SUPERVISOR_DB_URL")
+        if not dsn:
+            print("control_panel onramp-abs --apply: OL_SUPERVISOR_DB_URL is not set.")
+            return 1
+        from supervisor.registry import Registry
+
+        registry = Registry.from_env()
+        created = 0
+        for phase in plan:
+            if registry.upsert_project(
+                phase.project_id,
+                folder_path=phase.folder_path,
+                priority=phase.priority,
+                depends_on=phase.depends_on,
+            ):
+                created += 1
+                print(f"provisioned {phase.project_id} (depends_on={list(phase.depends_on)})")
+            else:
+                print(f"{phase.project_id} already exists — left unchanged")
+        print(f"ABS on-ramp: {created} new project(s) provisioned.")
         return 0
 
     if args.cmd == "forecast":

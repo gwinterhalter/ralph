@@ -65,6 +65,10 @@ class _FakeCursor:
     def fetchone(self) -> tuple[object, ...] | None:
         return self._conn.fetchone_result
 
+    @property
+    def rowcount(self) -> int:
+        return self._conn.rowcount_result
+
 
 class _FakeConn:
     """In-memory stand-in for an injected psycopg ``Connection``.
@@ -78,6 +82,7 @@ class _FakeConn:
         self.commits = 0
         self.fetchall_result: list[tuple[object, ...]] = []
         self.fetchone_result: tuple[object, ...] | None = None
+        self.rowcount_result = 1
 
     def cursor(self) -> _FakeCursor:
         return _FakeCursor(self)
@@ -391,6 +396,29 @@ def test_read_events_db_filters(registry: Registry, conn: _FakeConn) -> None:
     sql, params = conn.executed[0]
     assert "WHERE project_id = %s AND event_type = %s" in sql
     assert params == ("p", "gate_fire", 10)
+
+
+@pytest.mark.unit
+def test_upsert_project_inserts_with_depends_on(registry: Registry, conn: _FakeConn) -> None:
+    conn.rowcount_result = 1  # a new row was inserted
+    created = registry.upsert_project(
+        "abs_phase1", folder_path="abs_phase1", priority=20, depends_on=["abs_phase0"]
+    )
+    assert created is True
+    sql, params = conn.executed[0]
+    assert "INSERT INTO projects" in sql
+    assert "ON CONFLICT (project_id) DO NOTHING" in sql
+    assert params[0] == "abs_phase1"
+    assert params[-1] == ["abs_phase0"]  # depends_on as a list (text[])
+
+
+@pytest.mark.unit
+def test_upsert_project_existing_returns_false(registry: Registry, conn: _FakeConn) -> None:
+    conn.rowcount_result = 0  # ON CONFLICT DO NOTHING — no insert
+    assert (
+        registry.upsert_project("abs_phase0", folder_path="abs_phase0", priority=30, depends_on=[])
+        is False
+    )
 
 
 @pytest.mark.unit

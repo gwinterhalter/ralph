@@ -49,6 +49,9 @@ class _DBCursor(Protocol):
 
     def execute(self, query: str, params: Sequence[object] = (), /) -> object: ...
 
+    @property
+    def rowcount(self) -> int: ...
+
     def fetchall(self) -> Sequence[Sequence[object]]: ...
 
     def fetchone(self) -> Sequence[object] | None: ...
@@ -569,6 +572,32 @@ class Registry:
             "WHERE project_id = %s",
             (state, project_id),
         )
+
+    def upsert_project(
+        self,
+        project_id: str,
+        *,
+        folder_path: str,
+        priority: int,
+        depends_on: Sequence[str],
+        lifecycle_state: str = "candidate",
+    ) -> bool:
+        """Provision a Project row (ABS on-ramp §3); returns True iff a new row was inserted.
+
+        Idempotent + non-clobbering: ``ON CONFLICT (project_id) DO NOTHING`` — re-running the on-ramp
+        never overwrites an existing project's lifecycle/state. ``display_name`` defaults to the id;
+        ``status`` is the legacy 'active'. ``depends_on`` is the Item 1 cross-initiative gate."""
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO projects (project_id, display_name, folder_path, status, "
+                "lifecycle_state, priority, depends_on) "
+                "VALUES (%s, %s, %s, 'active', %s, %s, %s) "
+                "ON CONFLICT (project_id) DO NOTHING",
+                (project_id, project_id, folder_path, lifecycle_state, priority, list(depends_on)),
+            )
+            inserted = cur.rowcount == 1
+        self._conn.commit()
+        return inserted
 
     def record_run(self, project_id: str, run: RegistryRow) -> None:
         """Insert a Run Registry row at spawn (Spec §5.4 FR-009).
