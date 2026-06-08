@@ -33,7 +33,13 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from supervisor.ports import RegistryRow
-from supervisor.run_auditor import TERMINAL_RUN_STATUSES, GateEvent, RunRecord
+from supervisor.run_auditor import (
+    TERMINAL_RUN_STATUSES,
+    BindingOutcome,
+    GateEvent,
+    RunRecord,
+    ShapeUsage,
+)
 
 # --- Event-stream gate-fact assembly (FR-050 Answerer-DSL candidates) ----------
 # The per-Run gate facts the Run-Auditor's FR-050 finding keys on. They are NOT carried on a
@@ -49,10 +55,26 @@ _GATE_RESOLVE = "gate_resolve"  # payload.option carries the chosen option (auto
 _GATE_EVENT_TYPES = frozenset({_GATE_FIRE, _GATE_ESCALATE, _GATE_RESOLVE})
 _GATE_SUBJECT_KIND = "gate"
 
-# NOTE on the remaining two finding facts: verification-binding pass/fail (FR-051) and
-# session-shape revision (FR-052) are NOT present in the event stream — there is no per-binding
-# pass/fail event, and shape names are not evented. They stay empty here (no fabrication); lighting
-# them up needs those facts emitted (or sourced from reports/plans) — a separate follow-on.
+# FR-051 verification-binding pass/fail facts: a `verification` event per binding the consumer
+# checked (subject_kind 'binding'; payload {binding, result|passed}). Emitted via the
+# `lib/events.sh verification` CLI the consumer calls.
+_VERIFICATION = "verification"
+_BINDING_SUBJECT_KIND = "binding"
+_PASS_TOKENS = frozenset({"pass", "passed", "ok", "success", "true"})
+
+# FR-052 session-shape revision facts: the `revise_round` event (already emitted per plan-review
+# round) carries verdict/findings; with the plan `shape` added to its payload, one shape-use per
+# iteration is recovered (required_reviewer_revision iff any round needed revision).
+_REVISE_ROUND = "revise_round"
+
+
+@dataclass(frozen=True)
+class RunFacts:
+    """The per-Run Run-Auditor facts assembled from one Run's event stream (FR-050/051/052)."""
+
+    gate_events: tuple[GateEvent, ...] = ()
+    binding_outcomes: tuple[BindingOutcome, ...] = ()
+    shape_usages: tuple[ShapeUsage, ...] = ()
 
 
 def _parse_ts(value: object) -> datetime | None:
@@ -114,6 +136,91 @@ def build_gate_events(
     )
 
 
+def build_binding_outcomes(
+    events: "list[dict[str, object]] | tuple[dict[str, object], ...]",
+) -> tuple[BindingOutcome, ...]:
+    """Fold a Run's ``verification`` events into per-binding :class:`BindingOutcome` facts (FR-051).
+
+    One :class:`BindingOutcome` per ``verification`` event whose ``subject_kind`` is ``binding``;
+    ``passed`` is taken from ``payload.passed`` (bool) or ``payload.result`` (a pass token like
+    ``pass``/``ok``/``success``). Events lacking a binding name or a resolvable pass/fail are
+    skipped. Never raises.
+    """
+    outcomes: list[BindingOutcome] = []
+    for event in events:
+        if event.get("event_type") != _VERIFICATION or event.get("subject_kind") != _BINDING_SUBJECT_KIND:
+            continue
+        payload = event.get("payload")
+        payload = payload if isinstance(payload, dict) else {}
+        binding = event.get("subject_id") or payload.get("binding")
+        if not isinstance(binding, str) or not binding:
+            continue
+        passed_value = payload.get("passed")
+        result = payload.get("result")
+        if isinstance(passed_value, bool):
+            passed = passed_value
+        elif isinstance(result, str) and result:
+            passed = result.strip().lower() in _PASS_TOKENS
+        else:
+            continue
+        outcomes.append(BindingOutcome(binding=binding, passed=passed))
+    return tuple(outcomes)
+
+
+def build_shape_usages(
+    events: "list[dict[str, object]] | tuple[dict[str, object], ...]",
+) -> tuple[ShapeUsage, ...]:
+    """Fold a Run's ``revise_round`` events into per-iteration :class:`ShapeUsage` facts (FR-052).
+
+    Each iteration that ran the plan-review loop is one shape-use, keyed by ``(iteration_index,
+    shape)`` (the ``shape`` is read from the ``revise_round`` payload). ``required_reviewer_revision``
+    is True iff ANY round for that use needed revision — a non-``converged`` verdict OR a positive
+    ``findings_blocker`` / ``findings_drift`` count. A ``revise_round`` lacking a ``shape`` is
+    skipped (the field is only present once the orchestrator stamps it). Never raises.
+    """
+    required: dict[tuple[object, str], bool] = {}
+    shape_of: dict[tuple[object, str], str] = {}
+    order: list[tuple[object, str]] = []
+    for event in events:
+        if event.get("event_type") != _REVISE_ROUND:
+            continue
+        payload = event.get("payload")
+        payload = payload if isinstance(payload, dict) else {}
+        shape = payload.get("shape")
+        if not isinstance(shape, str) or not shape:
+            continue
+        key = (event.get("iteration_index"), shape)
+        if key not in required:
+            required[key] = False
+            shape_of[key] = shape
+            order.append(key)
+        verdict = payload.get("verdict")
+        fb = payload.get("findings_blocker")
+        fd = payload.get("findings_drift")
+        needed = (
+            (verdict is not None and verdict != "converged")
+            or (isinstance(fb, int) and not isinstance(fb, bool) and fb > 0)
+            or (isinstance(fd, int) and not isinstance(fd, bool) and fd > 0)
+        )
+        if needed:
+            required[key] = True
+    return tuple(
+        ShapeUsage(shape=shape_of[key], required_reviewer_revision=required[key])
+        for key in order
+    )
+
+
+def assemble_run_facts(
+    events: "list[dict[str, object]] | tuple[dict[str, object], ...]",
+) -> RunFacts:
+    """Assemble all three Run-Auditor fact kinds from one Run's events (FR-050/051/052)."""
+    return RunFacts(
+        gate_events=build_gate_events(events),
+        binding_outcomes=build_binding_outcomes(events),
+        shape_usages=build_shape_usages(events),
+    )
+
+
 def read_events_jsonl(path: str | Path) -> list[dict[str, object]]:
     """Thin JSONL adapter: read an ``events.jsonl`` into a list of event dicts (fault-tolerant).
 
@@ -137,23 +244,22 @@ def read_events_jsonl(path: str | Path) -> list[dict[str, object]]:
     return events
 
 
-def gate_events_from_run(row: RegistryRow) -> tuple[GateEvent, ...]:
-    """Assemble a completed Run's gate facts from its initiative event stream (I/O; FR-050).
+def _scoped_events_for_run(row: RegistryRow) -> list[dict[str, object]]:
+    """Read + scope a completed Run's events from its initiative event stream (I/O).
 
     Locates the events log at ``<seed dir>/state/logs/events.jsonl`` (the seed's sibling ``state``
-    tree, the same convention the production completion probe uses), scopes the events to this Run
-    by ``project_id`` AND the ``[spawned_at, terminated_at]`` window (runs are sequential per
+    tree, the same convention the production completion probe uses) and scopes the events to this
+    Run by ``project_id`` AND the ``[spawned_at, terminated_at]`` window (runs are sequential per
     project — the active-run unique index guarantees at most one running Run per project — so the
-    window cleanly partitions one project's append-only log into its successive Runs), and folds
-    them via :func:`build_gate_events`. Returns ``()`` when the seed/log is absent. Never raises.
+    window cleanly partitions one project's append-only log into its successive Runs). Returns
+    ``[]`` when the seed/log is absent. Never raises.
     """
     seed = row.get("seed_path")
     if not isinstance(seed, str) or not seed:
-        return ()
-    events_path = Path(seed).parent / "state" / "logs" / "events.jsonl"
-    events = read_events_jsonl(events_path)
+        return []
+    events = read_events_jsonl(Path(seed).parent / "state" / "logs" / "events.jsonl")
     if not events:
-        return ()
+        return []
     slug = row.get("project_id") or row.get("project_slug")
     start = _parse_ts(row.get("spawned_at"))
     end = _parse_ts(row.get("terminated_at"))
@@ -167,34 +273,52 @@ def gate_events_from_run(row: RegistryRow) -> tuple[GateEvent, ...]:
         if end is not None and ts is not None and ts > end:
             continue
         scoped.append(event)
-    return build_gate_events(scoped)
+    return scoped
+
+
+def gate_events_from_run(row: RegistryRow) -> tuple[GateEvent, ...]:
+    """A completed Run's gate facts from its event stream (I/O; FR-050) — :func:`build_gate_events`
+    over :func:`_scoped_events_for_run`."""
+    return build_gate_events(_scoped_events_for_run(row))
+
+
+def run_facts_from_run(row: RegistryRow) -> RunFacts:
+    """All three of a completed Run's Run-Auditor fact kinds from its event stream (I/O).
+
+    Reads + window-scopes the Run's events once and assembles the gate (FR-050), verification-binding
+    (FR-051), and session-shape (FR-052) facts. Returns an empty :class:`RunFacts` when the
+    seed/log is absent. Never raises.
+    """
+    return assemble_run_facts(_scoped_events_for_run(row))
 
 
 def completed_run_records(
     rows: "list[RegistryRow] | tuple[RegistryRow, ...]",
     *,
-    gate_events_for: Callable[[RegistryRow], tuple[GateEvent, ...]] | None = None,
+    facts_for: Callable[[RegistryRow], RunFacts] | None = None,
 ) -> list[RunRecord]:
     """Map terminal ``ralph_runs`` rows into Run-Auditor :class:`RunRecord`s.
 
     Keeps only rows whose ``status`` is a canonical terminal status
-    (:data:`~supervisor.run_auditor.TERMINAL_RUN_STATUSES`). When ``gate_events_for`` is supplied
-    (production wires :func:`gate_events_from_run`), each record carries the Run's gate facts so the
-    FR-050 Answerer-DSL finding can fire; without it (the default) the gate facts are empty. The
-    verification-binding (FR-051) and session-shape (FR-052) facts are always empty — those are not
-    in the event stream (see module note), so they are never fabricated.
+    (:data:`~supervisor.run_auditor.TERMINAL_RUN_STATUSES`). When ``facts_for`` is supplied
+    (production wires :func:`run_facts_from_run`), each record carries the Run's assembled gate /
+    verification-binding / session-shape facts so the FR-050/051/052 findings can fire; without it
+    (the default) the fact collections are empty — never fabricated.
     """
     records: list[RunRecord] = []
     for row in rows:
         status = str(row.get("status", ""))
         if status not in TERMINAL_RUN_STATUSES:
             continue
+        facts = facts_for(row) if facts_for is not None else RunFacts()
         records.append(
             RunRecord(
                 run_id=str(row.get("run_id", "")),
                 project_slug=str(row.get("project_id") or row.get("project_slug") or ""),
                 status=status,
-                gate_events=gate_events_for(row) if gate_events_for is not None else (),
+                gate_events=facts.gate_events,
+                binding_outcomes=facts.binding_outcomes,
+                shape_usages=facts.shape_usages,
             )
         )
     return records
@@ -284,10 +408,15 @@ def render_learning_corpus(records: "list[LearningRecord] | tuple[LearningRecord
 
 __all__ = [
     "LearningRecord",
+    "RunFacts",
+    "assemble_run_facts",
+    "build_binding_outcomes",
     "build_gate_events",
+    "build_shape_usages",
     "completed_run_records",
     "gate_events_from_run",
     "learning_records",
     "read_events_jsonl",
     "render_learning_corpus",
+    "run_facts_from_run",
 ]
