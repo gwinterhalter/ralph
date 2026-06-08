@@ -210,6 +210,29 @@ def render_events(rows: Sequence[Mapping[str, object]]) -> str:
     return "\n".join(lines)
 
 
+def _dispatch_succeeded(returncode: int, stdout: str) -> bool:
+    """True iff an `apply` dispatch actually ran the skill (not a no-op / error).
+
+    `claude -p` exits 0 even when the slash command does not resolve (it returns an
+    "Unknown command" envelope), so exit-0 alone is NOT proof the authoring skill ran. A dispatch
+    counts as applied only when: exit 0, AND the output is not an "Unknown command" no-op, AND the
+    JSON envelope (when present) is not an error. Prevents falsely marking a finding `applied` when
+    the skill never executed (surfaced by the L3 apply drill, 2026-06-08)."""
+    if returncode != 0:
+        return False
+    if "Unknown command" in stdout:
+        return False
+    text = stdout.strip()
+    if text:
+        try:
+            obj = json.loads(text.splitlines()[-1])
+        except (json.JSONDecodeError, IndexError):
+            obj = None
+        if isinstance(obj, dict) and obj.get("is_error") is True:
+            return False
+    return True
+
+
 def build_dispatch_command(
     finding: Mapping[str, object], *, skills_dir: str
 ) -> list[str]:
@@ -496,15 +519,24 @@ def _main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI entry
         import subprocess  # noqa: PLC0415 - lazy; only the live apply path needs it
 
         try:
-            completed = subprocess.run(argv_cmd, check=False)  # noqa: S603 - argv is built, not shell
+            completed = subprocess.run(  # noqa: S603 - argv is built, not shell
+                argv_cmd, check=False, capture_output=True, text=True
+            )
         except FileNotFoundError:
             print("control_panel apply: `claude` not on PATH — cannot dispatch.")
             return 1
-        if completed.returncode == 0:
+        if _dispatch_succeeded(completed.returncode, completed.stdout or ""):
             registry.set_finding_status(args.finding_key, "applied", decided_by=args.by)
             print(f"applied {args.finding_key}.")
             return 0
-        print(f"control_panel apply: dispatch exited {completed.returncode}; left 'accepted'.")
+        # The skill did not actually run (non-zero, unknown-command no-op, or error envelope) —
+        # leave the finding 'accepted' so it is not falsely recorded as applied.
+        tail = (completed.stdout or completed.stderr or "").strip()[-300:]
+        print(
+            f"control_panel apply: dispatch did not run the skill (exit {completed.returncode}); "
+            f"left 'accepted'. Ensure CLAUDE_SKILLS_DIR resolves /{finding.get('authoring_skill')}. "
+            f"Output tail: {tail}"
+        )
         return 1
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

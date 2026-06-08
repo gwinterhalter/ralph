@@ -207,3 +207,18 @@ def test_render_events() -> None:
     out = render_events(rows)
     assert "events: 1" in out
     assert "p1  gate/gate_fire g1" in out
+
+
+def test_dispatch_succeeded_guards_false_success() -> None:
+    from supervisor.control_panel import _dispatch_succeeded
+
+    # exit 0 + real skill output → applied
+    assert _dispatch_succeeded(0, '{"is_error":false,"result":"done"}') is True
+    # exit 0 but the slash command did not resolve → NOT applied (the L3 drill defect)
+    assert _dispatch_succeeded(0, '{"is_error":false,"result":"Unknown command: /cf-doc-reviewer"}') is False
+    # non-zero exit → NOT applied
+    assert _dispatch_succeeded(1, '{"is_error":false}') is False
+    # error envelope → NOT applied
+    assert _dispatch_succeeded(0, '{"is_error":true,"result":"boom"}') is False
+    # empty output, exit 0 → applied (no evidence of failure)
+    assert _dispatch_succeeded(0, "") is True
