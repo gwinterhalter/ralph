@@ -414,6 +414,16 @@ class Registry:
                 ),
             )
 
+    def read_learning_records(self) -> Sequence[RegistryRow]:
+        """Return the per-Run cost/duration learning corpus (Fleet Analytics §2 forecast input)."""
+        cols = ("run_id", "project_slug", "status", "cost_usd", "duration_seconds")
+        col_list = ", ".join(cols)
+        sql = f"SELECT {col_list} FROM learning_records"  # nosec B608 — fixed allowlist
+        with self._conn.cursor() as cur:
+            cur.execute(sql)
+            rows = cur.fetchall()
+        return [dict(zip(cols, row)) for row in rows]
+
     def read_correction_summary(self) -> Sequence[RegistryRow]:
         """Per-item correction churn (ol4): item_id, attempts, projects, deepest level (control panel)."""
         cols = ("item_id", "attempts", "projects", "max_level")

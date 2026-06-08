@@ -394,6 +394,18 @@ def test_read_events_db_filters(registry: Registry, conn: _FakeConn) -> None:
 
 
 @pytest.mark.unit
+def test_read_learning_records(registry: Registry, conn: _FakeConn) -> None:
+    from decimal import Decimal
+
+    conn.fetchall_result = [("r1", "p1", "complete", Decimal("1.25"), 300.0)]
+    result = registry.read_learning_records()
+    assert result[0]["project_slug"] == "p1"
+    assert result[0]["cost_usd"] == Decimal("1.25")
+    sql, _params = conn.executed[0]
+    assert "FROM learning_records" in sql
+
+
+@pytest.mark.unit
 def test_read_all_projects(registry: Registry, conn: _FakeConn) -> None:
     row = ("p1", "P1", "/p1", "k", "active", "candidate", 100, None, 0, None, [])
     conn.fetchall_result = [row]

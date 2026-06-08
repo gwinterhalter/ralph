@@ -306,7 +306,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
         )
 
     # §4.4(6) Learn wiring (Item 2): the live completed-Run source + report/corpus sinks.
-    from supervisor.attention import intake_escalation
+    from supervisor.attention import ESCALATION_KIND_ROUTINE, Escalation, intake_escalation
+    from supervisor.cost_forecast import forecast_breaches, forecast_fleet
     from supervisor.event_ingest import events_file_for
     from supervisor.learn_assembly import (
         build_correction_attempts,
@@ -351,6 +352,42 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
                 print(f"supervisor: event ingest for {project.get('project_id')} skipped ({exc}).")
         if total_new:
             print(f"supervisor: ingested {total_new} new event(s) to the fleet events table.")
+
+    _forecast_warned = {"breaching": False}
+
+    def _forecast_guard() -> None:
+        """Warn-only cost-forecast guard (Fleet Analytics §2): raise ONE operator escalation when
+        the fleet PROJECTED total first breaches OL_SUPERVISOR_FORECAST_CEILING_USD (the hard
+        auto-pause stays the existing emergency spend backstop). Default off (no ceiling env)."""
+        ceiling_raw = os.environ.get("OL_SUPERVISOR_FORECAST_CEILING_USD")
+        if not ceiling_raw:
+            return
+        ceiling = Decimal(ceiling_raw)
+        try:
+            projects = list(registry.read_all_projects())
+            open_counts = open_work_counts_for(projects, workspace_root=workspace_root)
+            forecast = forecast_fleet(registry.read_learning_records(), open_counts)
+        except Exception as exc:  # noqa: BLE001 - best-effort; never abort the cycle
+            print(f"supervisor: forecast guard skipped ({exc}).")
+            return
+        breaching = forecast_breaches(forecast, ceiling)
+        if breaching and not _forecast_warned["breaching"]:
+            escalation = Escalation(
+                project_id="*fleet*",
+                gate_id="forecast:over-ceiling",
+                kind=ESCALATION_KIND_ROUTINE,
+                reversible=True,
+                suggested_option=(
+                    f"projected fleet total ${forecast.fleet_projected_total_usd} exceeds ceiling "
+                    f"${ceiling} — review budget / pause low-value projects"
+                ),
+                confidence=0.9,
+                raised_at=datetime.now(timezone.utc),
+            )
+            state = attention_store.load()
+            attention_store.save(intake_escalation(state, escalation))
+            print(f"supervisor: FORECAST WARNING — projected ${forecast.fleet_projected_total_usd} > ${ceiling}.")
+        _forecast_warned["breaching"] = breaching
 
     logs_dir = Path(state_dir) / "logs"
 
@@ -488,6 +525,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
         )
         cycle.run_once()
         _ingest_fleet_events()  # Fleet Analytics §1: ship all projects' events.jsonl to the DB
+        _forecast_guard()  # Fleet Analytics §2: warn-only projected-spend guard
         cycles += 1
         if args.once or (args.max_cycles is not None and cycles >= args.max_cycles):
             break

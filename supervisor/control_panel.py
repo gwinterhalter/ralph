@@ -291,6 +291,7 @@ def _main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI entry
     events_p.add_argument("--project", default=None)
     events_p.add_argument("--type", dest="event_type", default=None)
     events_p.add_argument("--limit", type=int, default=50)
+    sub.add_parser("forecast", help="project fleet spend-to-completion (cost forecasting)")
     sub.add_parser("pause", help="write a pause command")
     sub.add_parser("query", help="write a query_register_state command")
     bump = sub.add_parser("bump", help="write a bump_budget command")
@@ -383,6 +384,25 @@ def _main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI entry
 
         registry = Registry.from_env()
         print(render_learnings(registry.read_audit_findings()))
+        return 0
+
+    if args.cmd == "forecast":
+        dsn = os.environ.get("OL_SUPERVISOR_DB_URL")
+        if not dsn:
+            print("control_panel forecast: OL_SUPERVISOR_DB_URL is not set.")
+            return 1
+        from supervisor.candidate_enrichment import open_work_counts_for
+        from supervisor.cost_forecast import forecast_fleet, render_forecast
+        from supervisor.registry import Registry
+
+        registry = Registry.from_env()
+        projects = list(registry.read_all_projects())
+        workspace_root = os.environ.get("OL_SUPERVISOR_WORKSPACE_ROOT")
+        open_counts = open_work_counts_for(projects, workspace_root=workspace_root)
+        forecast = forecast_fleet(registry.read_learning_records(), open_counts)
+        ceiling_raw = os.environ.get("OL_SUPERVISOR_FORECAST_CEILING_USD")
+        ceiling = Decimal(ceiling_raw) if ceiling_raw else None
+        print(render_forecast(forecast, ceiling_usd=ceiling))
         return 0
 
     if args.cmd in ("corrections", "promote", "reject", "apply"):
