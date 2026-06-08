@@ -280,6 +280,7 @@ class Registry:
             "spawned_at",
             "terminated_at",
             "metadata",
+            "seed_path",  # REQUIRED by the Learn fact assembly (locates <seed>/state/logs/events.jsonl)
         )
         col_list = ", ".join(cols)
         sql = (  # nosec B608 — column names are the fixed allowlist above; status is literal

@@ -204,7 +204,7 @@ def test_read_completed_runs_filters_terminal_and_maps(
     spawned = datetime(2026, 6, 1, 0, 0, 0, tzinfo=timezone.utc)
     terminated = datetime(2026, 6, 1, 0, 10, 0, tzinfo=timezone.utc)
     conn.fetchall_result = [
-        ("rid", "slug", "complete", Decimal("2.50"), spawned, terminated, {"k": "v"})
+        ("rid", "slug", "complete", Decimal("2.50"), spawned, terminated, {"k": "v"}, "K:/s/seed.md")
     ]
 
     result = registry.read_completed_runs()
@@ -217,6 +217,9 @@ def test_read_completed_runs_filters_terminal_and_maps(
     assert rec["terminal_cost_usd"] == Decimal("2.50")
     assert rec["spawned_at"] == spawned.isoformat()
     assert rec["terminated_at"] == terminated.isoformat()
+    # seed_path is REQUIRED — the Learn fact assembly locates <seed>/state/logs/events.jsonl from it
+    # (its omission silently emptied all FR-050/051/052 facts + items_closed over live data).
+    assert rec["seed_path"] == "K:/s/seed.md"
     sql, _params = conn.executed[0]
     assert "status IN ('complete', 'failed')" in sql
 
