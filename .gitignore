@@ -10,6 +10,10 @@ state/
 # Learn-step runtime output (learning_corpus.jsonl, run_auditor_report.md) written
 # when workspace_root defaults to the repo during a local --once run; never tracked.
 logs/
+# Supervisor/webui runtime files when state_dir defaults to the repo (operator action log +
+# the loop pid file the GUI's supervisor control writes); never tracked.
+operator_actions.jsonl
+*.pid
 
 # Archive is optional to commit
 # archive/
