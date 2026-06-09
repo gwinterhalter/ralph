@@ -13,6 +13,7 @@ from supervisor.full_status_surface import (
     ProjectFullStatusRow,
 )
 from supervisor.inbox import (
+    KIND_APPROVAL,
     KIND_BUDGET,
     KIND_CHURN,
     KIND_FAILED,
@@ -135,6 +136,14 @@ def test_failed_project_surfaces_as_attention() -> None:
     projects = [{"project_id": "pf", "lifecycle_state": "failed"}]
     cards = build_inbox(projects=projects)
     assert len(cards) == 1 and cards[0].kind == KIND_FAILED and cards[0].subject == "pf"
+
+
+def test_pending_approval_project_surfaces_as_approval_card() -> None:
+    projects = [{"project_id": "proposed_x", "display_name": "Proposed X",
+                 "lifecycle_state": "pending_approval"}]
+    cards = build_inbox(projects=projects)
+    assert len(cards) == 1 and cards[0].kind == KIND_APPROVAL and cards[0].subject == "proposed_x"
+    assert "approve" in cards[0].actions and "reject" in cards[0].actions
 
 
 def test_churn_threshold() -> None:

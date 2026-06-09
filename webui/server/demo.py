@@ -31,6 +31,20 @@ class _SeededRegistry:
              "subject": "spec_review_loop", "status": "applied", "recommendation": "tune the shape",
              "routes_to": "operator", "authoring_skill": "cf-session-plan-reviewer", "runs_audited": 3},
         ]
+        self._projects: list[dict[str, object]] = [
+            {"project_id": "abs_phase0", "display_name": "abs_phase0", "folder_path": "abs_phase0",
+             "lifecycle_state": "complete", "attention_debt": 0, "depends_on": []},
+            {"project_id": "abs_phase1", "display_name": "abs_phase1", "folder_path": "abs_phase1",
+             "lifecycle_state": "running", "attention_debt": 0, "depends_on": ["abs_phase0"]},
+            {"project_id": "abs_phase2", "display_name": "abs_phase2", "folder_path": "abs_phase2",
+             "lifecycle_state": "candidate", "attention_debt": 0, "depends_on": ["abs_phase1"]},
+            {"project_id": "oltest_old", "display_name": "oltest_old", "folder_path": "oltest_old",
+             "lifecycle_state": "failed", "attention_debt": 0, "depends_on": []},
+            {"project_id": "oltest_paused", "display_name": "oltest_paused", "folder_path": "oltest_paused",
+             "lifecycle_state": "paused_gate", "attention_debt": 1, "depends_on": []},
+            {"project_id": "proposed_demo", "display_name": "proposed_demo", "folder_path": "proposed_demo",
+             "lifecycle_state": "pending_approval", "attention_debt": 0, "depends_on": []},
+        ]
 
     def read_candidates(self) -> Sequence[Mapping[str, object]]:
         return [{"project_id": "abs_phase2", "display_name": "abs_phase2",
@@ -56,18 +70,23 @@ class _SeededRegistry:
         return [{"item_id": "OLB-07", "attempts": 5, "projects": 2, "max_level": "L4"}]
 
     def read_all_projects(self) -> Sequence[Mapping[str, object]]:
-        return [
-            {"project_id": "abs_phase0", "display_name": "abs_phase0", "folder_path": "abs_phase0",
-             "lifecycle_state": "complete", "attention_debt": 0, "depends_on": []},
-            {"project_id": "abs_phase1", "display_name": "abs_phase1", "folder_path": "abs_phase1",
-             "lifecycle_state": "running", "attention_debt": 0, "depends_on": ["abs_phase0"]},
-            {"project_id": "abs_phase2", "display_name": "abs_phase2", "folder_path": "abs_phase2",
-             "lifecycle_state": "candidate", "attention_debt": 0, "depends_on": ["abs_phase1"]},
-            {"project_id": "oltest_old", "display_name": "oltest_old", "folder_path": "oltest_old",
-             "lifecycle_state": "failed", "attention_debt": 0, "depends_on": []},
-            {"project_id": "oltest_paused", "display_name": "oltest_paused", "folder_path": "oltest_paused",
-             "lifecycle_state": "paused_gate", "attention_debt": 1, "depends_on": []},
-        ]
+        return self._projects
+
+    def set_lifecycle_state(self, project_id: str, state: str) -> None:
+        for p in self._projects:
+            if p["project_id"] == project_id:
+                if p["lifecycle_state"] == "pending_approval" and state == "candidate":
+                    p["lifecycle_state"] = state
+                    return
+                raise ValueError(f"illegal {p['lifecycle_state']}->{state}")
+        raise ValueError(f"unknown project {project_id}")
+
+    def delete_pending_project(self, project_id: str) -> bool:
+        for i, p in enumerate(self._projects):
+            if p["project_id"] == project_id and p["lifecycle_state"] == "pending_approval":
+                del self._projects[i]
+                return True
+        return False
 
     def read_learning_records(self) -> Sequence[Mapping[str, object]]:
         return [{"project_slug": "oltest_d2", "cost_usd": "2.50"}]

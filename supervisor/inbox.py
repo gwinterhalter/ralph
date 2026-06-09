@@ -34,6 +34,7 @@ KIND_BUDGET = "budget"
 KIND_GATE = "gate"
 KIND_STALL = "stall"
 KIND_FAILED = "failed"
+KIND_APPROVAL = "approval"
 KIND_REGRESSED = "regressed"
 KIND_LEARNING = "learning"
 KIND_CHURN = "churn"
@@ -45,11 +46,13 @@ _URGENCY: dict[str, int] = {
     KIND_STALL: 2,
     KIND_FAILED: 3,
     KIND_REGRESSED: 3,
+    KIND_APPROVAL: 4,
     KIND_LEARNING: 4,
     KIND_CHURN: 5,
 }
 
 _FAILED_STATE = "failed"
+_PENDING_APPROVAL_STATE = "pending_approval"
 
 #: The lifecycle state a Project sits in while a gate awaits an operator decision.
 _PAUSED_GATE_STATE = "paused_gate"
@@ -167,6 +170,18 @@ def build_inbox(
                     actions=("investigate",),
                 )
             )
+        elif state == _PENDING_APPROVAL_STATE:
+            cards.append(
+                InboxCard(
+                    kind=KIND_APPROVAL,
+                    urgency=_URGENCY[KIND_APPROVAL],
+                    title=f"Approval needed · {proj.get('display_name') or pid}",
+                    subject=pid,
+                    detail="proposed RL project awaiting your approval (see its proposal doc + registry)",
+                    actions=("approve", "reject", "details"),
+                    recommended="details",
+                )
+            )
 
     for row in fleet_rows:
         if row.lifecycle_state == _PAUSED_GATE_STATE and row.project_id not in gated_projects:
@@ -263,6 +278,7 @@ __all__ = [
     "KIND_GATE",
     "KIND_STALL",
     "KIND_FAILED",
+    "KIND_APPROVAL",
     "KIND_REGRESSED",
     "KIND_LEARNING",
     "KIND_CHURN",

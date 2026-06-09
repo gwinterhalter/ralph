@@ -62,6 +62,8 @@ class RegistryLike(Protocol):
         self, *, project_id: str | None = ..., event_type: str | None = ..., limit: int = ...
     ) -> Sequence[Mapping[str, object]]: ...
     def set_finding_status(self, finding_key_value: str, status: str, *, decided_by: str) -> None: ...
+    def set_lifecycle_state(self, project_id: str, state: str) -> None: ...
+    def delete_pending_project(self, project_id: str) -> bool: ...
     def prune_events(self, *, before_iso: str) -> int: ...
     def upsert_project(
         self, project_id: str, *, folder_path: str, priority: int, depends_on: Sequence[str],
@@ -432,6 +434,26 @@ def create_app(
                      new_cap_usd=new_cap_usd)
         _record("bump_budget", project_id, by, f"{new_cap_usd} ({cid})")
         return {"command_id": cid, "state": "queued", "project_id": project_id}
+
+    @app.post("/api/projects/{project_id}/approve")
+    def approve_project(project_id: str, by: str = Body(default="operator", embed=True)) -> dict[str, object]:
+        """Approve a proposed RL project (RL Project Intake): pending_approval → candidate, so the
+        supervisor can admit it. Errors if the project is not in pending_approval."""
+        try:
+            registry_provider().set_lifecycle_state(project_id, "candidate")
+        except Exception as e:  # noqa: BLE001 - IllegalTransitionError / unknown project → 409
+            raise HTTPException(status_code=409, detail=f"cannot approve {project_id!r}: {e}") from None
+        _record("approve-project", project_id, by)
+        return {"project_id": project_id, "lifecycle_state": "candidate", "state": "approved"}
+
+    @app.post("/api/projects/{project_id}/reject")
+    def reject_project(project_id: str, by: str = Body(default="operator", embed=True)) -> dict[str, object]:
+        """Reject a proposed RL project: delete the row (guarded to pending_approval only). The
+        scaffolded folder + proposal doc are retained on disk."""
+        if not registry_provider().delete_pending_project(project_id):
+            raise HTTPException(status_code=404, detail=f"no pending-approval proposal {project_id!r}")
+        _record("reject-project", project_id, by)
+        return {"project_id": project_id, "state": "rejected"}
 
     @app.post("/api/gates/resolve")
     def resolve_gate(

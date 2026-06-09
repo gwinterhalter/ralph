@@ -14,6 +14,7 @@ body { margin: 0; background: #f4f5f8; }
 .badge.lc-candidate { background: #f1f5f9; color: #475569; }
 .badge.lc-paused_gate { background: #fee2e2; color: #991b1b; }
 .badge.lc-failed { background: #fee2e2; color: #991b1b; }
+.badge.lc-pending_approval { background: #dbeafe; color: #1e3a8a; }
 button.danger { border-color: #ef4444; color: #b91c1c; }
 .topbar .cost { margin-left: auto; opacity: 0.8; }
 .topbar .loop-label { font-size: 0.82em; opacity: 0.75; }
@@ -34,6 +35,8 @@ h2 { margin-top: 0; }
 .card-gate, .card-budget { border-left-color: #ef4444; }
 .card-stall { border-left-color: #f59e0b; }
 .card-regressed { border-left-color: #a855f7; }
+.card-failed { border-left-color: #dc2626; }
+.card-approval { border-left-color: #2563eb; }
 .card-learning { border-left-color: #eab308; }
 .card-churn { border-left-color: #94a3b8; }
 .card-title { font-weight: 600; }

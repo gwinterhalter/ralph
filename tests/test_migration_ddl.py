@@ -23,9 +23,14 @@ from supervisor.transitions import LIFECYCLE_STATES
 
 pytestmark = pytest.mark.unit
 
+# ol2 declares the supervision schema; ol8 extends the lifecycle_state CHECK with `pending_approval`
+# (RL Project Intake). The as-built lifecycle CHECK is the union, so concatenate both.
+_MIG = Path(__file__).resolve().parent.parent / "migrations"
 _DDL = (
-    Path(__file__).resolve().parent.parent / "migrations" / "ol2_supervision_schema.sql"
-).read_text(encoding="utf-8")
+    (_MIG / "ol2_supervision_schema.sql").read_text(encoding="utf-8")
+    + "\n"
+    + (_MIG / "ol8_pending_approval_state.sql").read_text(encoding="utf-8")
+)
 
 
 # `project_id` is the pre-existing legacy PK the additive migration assumes (it does

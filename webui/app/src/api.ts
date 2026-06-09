@@ -1,7 +1,7 @@
 // Typed client for the control-panel API (webui.server.app). All reads are GET, actions POST.
 
 export interface InboxCard {
-  kind: "budget" | "gate" | "stall" | "regressed" | "learning" | "churn";
+  kind: "budget" | "gate" | "stall" | "failed" | "approval" | "regressed" | "learning" | "churn";
   urgency: number;
   title: string;
   subject: string;
@@ -169,6 +169,10 @@ export const api = {
     post(`/api/projects/${encodeURIComponent(projectId)}/budget`, { new_cap_usd: newCapUsd, by }),
   resolveGate: (requestPath: string, selectedOption: string, by = "operator") =>
     post("/api/gates/resolve", { request_path: requestPath, selected_option: selectedOption, by }),
+  approveProject: (projectId: string, by = "operator") =>
+    post(`/api/projects/${encodeURIComponent(projectId)}/approve`, { by }),
+  rejectProject: (projectId: string, by = "operator") =>
+    post(`/api/projects/${encodeURIComponent(projectId)}/reject`, { by }),
   query: (by = "operator") => post("/api/commands/query", { by }),
   supervisorRunOnce: (by = "operator") => post<{ pid: number }>("/api/supervisor/run-once", { by }),
   supervisorStart: (interval = 30, by = "operator") =>

@@ -18,9 +18,13 @@ from __future__ import annotations
 from collections.abc import Mapping
 from types import MappingProxyType
 
-# The eight Project Lifecycle States (Spec v1.3 §5.2 FR-001).
+# The Project Lifecycle States (Spec v1.3 §5.2 FR-001, eight) + `pending_approval` (RL Project
+# Intake, OL-8): a scaffolded candidate awaiting operator approval in the control-panel GUI. It is
+# pre-`candidate` — the supervisor admit pass reads `candidate`, so a `pending_approval` Project is
+# never dispatched until the operator Approves (→ candidate). Reject removes the row (not a transition).
 LIFECYCLE_STATES: frozenset[str] = frozenset(
     {
+        "pending_approval",
         "candidate",
         "admitted",
         "running",
@@ -37,6 +41,10 @@ LIFECYCLE_STATES: frozenset[str] = frozenset(
 # of §5.3; no edge exists here that §5.3 does not list.
 LEGAL_TRANSITIONS: Mapping[str, frozenset[str]] = MappingProxyType(
     {
+        # pending_approval -> candidate: operator Approved the proposed RL project in the GUI
+        # (OL-8 / RL Project Intake). The only legal edge out of pending_approval; Reject deletes
+        # the row instead of transitioning.
+        "pending_approval": frozenset({"candidate"}),
         # candidate -> admitted: Admission Gate passed (§6).
         "candidate": frozenset({"admitted"}),
         # admitted -> running: Supervisor spawns the orchestrator Run (§6.3).

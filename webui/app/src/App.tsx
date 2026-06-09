@@ -107,7 +107,9 @@ export default function App() {
     async (card: InboxCard, action: string) => {
       try {
         if (action === "investigate" || action === "details") { await showProject(card.subject); return; }
-        if (card.kind === "gate") { await api.resolveGate(card.subject, action); flash(`Gate answered: ${action}`); }
+        if (card.kind === "approval" && action === "approve") { await api.approveProject(card.subject); flash("Approved → candidate"); }
+        else if (card.kind === "approval" && action === "reject") { await api.rejectProject(card.subject); flash("Proposal rejected"); }
+        else if (card.kind === "gate") { await api.resolveGate(card.subject, action); flash(`Gate answered: ${action}`); }
         else if (card.kind === "learning" && action === "adopt") { await api.promote(card.subject); flash("Adopted — see Improve"); }
         else if (card.kind === "learning" && action === "reject") { await api.reject(card.subject); flash("Rejected"); }
         else if ((card.kind === "stall" || card.kind === "budget") && action === "pause") { await api.pause(card.subject); flash("Pause queued"); }

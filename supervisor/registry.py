@@ -665,6 +665,21 @@ class Registry:
         self._conn.commit()
         return inserted
 
+    def delete_pending_project(self, project_id: str) -> bool:
+        """Delete a proposed project row — GUI Reject of an RL Project Intake proposal (OL-8).
+
+        GUARDED: deletes ONLY when the row is still ``lifecycle_state='pending_approval'`` (a
+        never-approved proposal), so a real candidate/running/complete project can never be removed
+        through this path. Returns True iff a row was deleted."""
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM projects WHERE project_id = %s AND lifecycle_state = 'pending_approval'",
+                (project_id,),
+            )
+            deleted = cur.rowcount == 1
+        self._conn.commit()
+        return deleted
+
     def record_run(self, project_id: str, run: RegistryRow) -> None:
         """Insert a Run Registry row at spawn (Spec §5.4 FR-009).
 

@@ -24,6 +24,7 @@ test("full console: real data, gate resolve, adopt, all tabs, paused-gate visibi
   await expect(page.getByText("proceed to Phase 1?")).toBeVisible();
   await expect(page.getByText(/Gate awaiting decision · oltest_paused/)).toBeVisible(); // paused_gate PROJECT surfaced (the fixed defect)
   await expect(page.getByText(/Project failed · oltest_old/)).toBeVisible();           // failed PROJECT surfaced
+  await expect(page.getByText(/Approval needed · proposed_demo/)).toBeVisible();        // RL-intake proposal awaiting approval
   await expect(page.getByText(/Learning ready .*abs-phase-boundary/)).toBeVisible();
   await expect(page.getByText(/Adopted learning regressed/)).toBeVisible();
   await expect(page.getByText(/Chronic correction churn · OLB-07/)).toBeVisible();
@@ -40,6 +41,11 @@ test("full console: real data, gate resolve, adopt, all tabs, paused-gate visibi
   // Resolve the file gate: its real option "proceed" → POST /api/gates/resolve; card disappears.
   await page.getByRole("button", { name: "proceed" }).click();
   await expect(page.getByText("proceed to Phase 1?")).toHaveCount(0);
+
+  // Approve the proposed RL project (RL Project Intake) → real /api/projects/.../approve flips it
+  // pending_approval → candidate, so the Approval-needed card disappears.
+  await page.getByRole("button", { name: "approve" }).click();
+  await expect(page.getByText(/Approval needed · proposed_demo/)).toHaveCount(0);
 
   // Fleet — ALL projects incl CLOSED activity (complete + failed), not just active.
   await page.getByRole("button", { name: "Fleet", exact: true }).click();

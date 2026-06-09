@@ -26,6 +26,8 @@ const KIND_ICON: Record<string, string> = {
   budget: "🔴",
   gate: "🔴",
   stall: "🟠",
+  failed: "🟥",
+  approval: "🟦",
   regressed: "🟣",
   learning: "🟡",
   churn: "⚪",

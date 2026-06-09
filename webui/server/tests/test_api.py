@@ -93,6 +93,22 @@ class FakeRegistry:
             if f["finding_key"] == finding_key_value:
                 f["status"] = status
 
+    def set_lifecycle_state(self, project_id, state):
+        for p in self.projects:
+            if p["project_id"] == project_id:
+                if p["lifecycle_state"] == "pending_approval" and state == "candidate":
+                    p["lifecycle_state"] = state
+                    return
+                raise ValueError(f"illegal {p['lifecycle_state']}->{state}")
+        raise ValueError(f"unknown project {project_id}")
+
+    def delete_pending_project(self, project_id):
+        for i, p in enumerate(self.projects):
+            if p["project_id"] == project_id and p["lifecycle_state"] == "pending_approval":
+                del self.projects[i]
+                return True
+        return False
+
     def prune_events(self, *, before_iso):
         self.pruned.append(before_iso)
         return 7
@@ -326,6 +342,38 @@ def test_inbox_surfaces_failed_project(client: tuple[TestClient, FakeRegistry]) 
                          "lifecycle_state": "failed", "attention_debt": 0, "depends_on": []})
     cards = c.get("/api/inbox").json()["cards"]
     assert any(card["kind"] == "failed" and card["subject"] == "pf" for card in cards)
+
+
+def _add_proposal(reg: FakeRegistry, pid: str = "proposed_x") -> None:
+    reg.projects.append({"project_id": pid, "display_name": pid, "folder_path": pid,
+                         "lifecycle_state": "pending_approval", "attention_debt": 0, "depends_on": []})
+
+
+def test_inbox_surfaces_pending_approval_project(client: tuple[TestClient, FakeRegistry]) -> None:
+    c, reg = client
+    _add_proposal(reg)
+    card = next(x for x in c.get("/api/inbox").json()["cards"] if x["kind"] == "approval")
+    assert card["subject"] == "proposed_x" and "approve" in card["actions"] and "reject" in card["actions"]
+
+
+def test_approve_project_promotes_to_candidate(client: tuple[TestClient, FakeRegistry]) -> None:
+    c, reg = client
+    _add_proposal(reg)
+    r = c.post("/api/projects/proposed_x/approve", json={"by": "greg"})
+    assert r.status_code == 200 and r.json()["lifecycle_state"] == "candidate"
+    assert next(p for p in reg.projects if p["project_id"] == "proposed_x")["lifecycle_state"] == "candidate"
+    # approving a non-pending project is a 409 (guarded transition)
+    assert c.post("/api/projects/p1/approve").status_code == 409
+
+
+def test_reject_project_deletes_only_pending(client: tuple[TestClient, FakeRegistry]) -> None:
+    c, reg = client
+    _add_proposal(reg)
+    assert c.post("/api/projects/proposed_x/reject").status_code == 200
+    assert not any(p["project_id"] == "proposed_x" for p in reg.projects)  # deleted
+    # rejecting a real (non-pending) project is refused (404 — guard deletes nothing)
+    assert c.post("/api/projects/p1/reject").status_code == 404
+    assert any(p["project_id"] == "p1" for p in reg.projects)  # p1 untouched
 
 
 def test_inbox_includes_gate_card_and_budget_breach(client: tuple[TestClient, FakeRegistry], monkeypatch) -> None:
