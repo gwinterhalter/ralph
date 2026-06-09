@@ -415,9 +415,29 @@ def create_app(
         from fastapi.staticfiles import StaticFiles  # noqa: PLC0415 - only when serving a built UI
 
         app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="ui")
+    else:
+        @app.get("/")
+        def _root_help() -> JSONResponse:
+            # API-only mode (no built UI found): a 404 at / is confusing, so explain how to get the UI.
+            return JSONResponse({
+                "service": "Outer Loop Supervisor — control-panel API",
+                "api": "/api/* (try /api/health)",
+                "ui": "not served — build it: `cd webui/app && npm run build` then restart this "
+                      "server, OR run the dev server `cd webui/app && npm run dev` "
+                      "(http://localhost:5173).",
+            })
 
     return app
 
 
+def _default_static_dir() -> str | None:
+    """Resolve the built UI: OL_SUPERVISOR_WEBUI_STATIC if set, else webui/app/dist if it exists."""
+    env = os.environ.get("OL_SUPERVISOR_WEBUI_STATIC")
+    if env:
+        return env
+    dist = Path(__file__).resolve().parent.parent / "app" / "dist"  # webui/app/dist
+    return str(dist) if dist.is_dir() else None
+
+
 # Module-level app for `uvicorn webui.server.app:app` (live server; reads the env DB).
-app = create_app(static_dir=os.environ.get("OL_SUPERVISOR_WEBUI_STATIC"))
+app = create_app(static_dir=_default_static_dir())

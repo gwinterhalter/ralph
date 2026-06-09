@@ -124,6 +124,22 @@ def test_health(client: tuple[TestClient, FakeRegistry]) -> None:
     assert c.get("/api/health").json()["ok"] is True
 
 
+def test_root_serves_ui_when_static_present(tmp_path: Path) -> None:
+    (tmp_path / "index.html").write_text("<!doctype html><div id='root'></div>", encoding="utf-8")
+    reg = FakeRegistry()
+    c = TestClient(create_app(registry_provider=lambda: reg, state_dir=tmp_path, static_dir=tmp_path))
+    r = c.get("/")
+    assert r.status_code == 200 and "root" in r.text  # the built UI, not a 404
+
+
+def test_root_help_when_no_static(client: tuple[TestClient, FakeRegistry]) -> None:
+    # API-only mode (no built UI): / must explain how to get the UI, not bare-404 (the launch bug).
+    c, _ = client
+    r = c.get("/")
+    assert r.status_code == 200
+    assert "npm run build" in r.json()["ui"]
+
+
 def test_fleet_serializes_rows(client: tuple[TestClient, FakeRegistry]) -> None:
     c, _ = client
     body = c.get("/api/fleet").json()
