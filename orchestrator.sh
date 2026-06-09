@@ -140,10 +140,22 @@ run_claude_json() {
   # invocation (was previously exported globally at L11; broke WinGet jq.exe on /tmp/...
   # paths everywhere). Localized form preserves FUP-0740 slash-prefix preservation scope
   # without leaking the path-conversion-disable to jq / mv / etc.
-  # shellcheck disable=SC2086
   local llm_t0; llm_t0="$(date +%s%3N 2>/dev/null || echo 0)"
+  local llm_err="$out_file.err"
+  # shellcheck disable=SC2086
   MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
-    claude -p $role_model_flag --permission-mode "$POSTURE_VALUE" --output-format json --max-budget-usd "$remaining_budget" --add-dir "$CLAUDE_SKILLS_DIR" -- "$@" > "$out_file"
+    claude -p $role_model_flag --permission-mode "$POSTURE_VALUE" --output-format json --max-budget-usd "$remaining_budget" --add-dir "$CLAUDE_SKILLS_DIR" -- "$@" > "$out_file" 2> "$llm_err"
+  # Rate-limit detection (concurrency 2026-06-09): scan the captured stderr; best-effort, non-fatal.
+  if command -v detect_and_emit_rate_limit >/dev/null 2>&1; then
+    local rl_role="orchestrator"
+    case "$*" in
+      *rl-initiative-planner*) rl_role="planner" ;;
+      *rl-iteration-consumer*) rl_role="consumer" ;;
+    esac
+    detect_and_emit_rate_limit "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "${EVENT_ITER:-0}" "$rl_role" "${rm_val:-}" "$llm_err"
+  fi
+  [[ -s "$llm_err" ]] && cat "$llm_err" >&2   # preserve prior stderr visibility in the orchestrator log
+  rm -f "$llm_err" 2>/dev/null || true
   call_cost="$(jq -r '.total_cost_usd // 0' "$out_file")"
   new_total="$(jq -rn --argjson cur "$current_spend" --argjson cc "$call_cost" '$cur + $cc')"
   jq --argjson nt "$new_total" '.total_spend_usd = $nt' "$RUNNING_SPEND_FILE" > "$RUNNING_SPEND_FILE.tmp" \

@@ -88,6 +88,28 @@ describe("SpendView", () => {
     expect(screen.getByText(/projected total \$15\.00/)).toBeInTheDocument();
     expect(screen.getByRole("cell", { name: "per_item" })).toBeInTheDocument();
   });
+
+  it("shows a throttling warning with reset hint when rate limits were hit", () => {
+    const forecast: Forecast = {
+      projects: [], fleet_spent_usd: "0", fleet_projected_remaining_usd: "0", fleet_projected_total_usd: "0",
+    };
+    const throttling = {
+      count: 2,
+      recent: [{ ts_utc: "2026-06-09T18:00:00Z", project_id: "p1", role: "executor",
+        reset_hint: "resets at 19:00", detail: "429 usage limit" }],
+    };
+    render(<SpendView forecast={forecast} throttling={throttling} onProvision={() => {}} onPrune={() => {}} onQuery={() => {}} />);
+    expect(screen.getByText(/Throttled 2×/)).toBeInTheDocument();
+    expect(screen.getByText(/resets at 19:00/)).toBeInTheDocument();
+  });
+
+  it("shows a clean no-throttling marker when count is zero", () => {
+    const forecast: Forecast = {
+      projects: [], fleet_spent_usd: "0", fleet_projected_remaining_usd: "0", fleet_projected_total_usd: "0",
+    };
+    render(<SpendView forecast={forecast} throttling={{ count: 0, recent: [] }} onProvision={() => {}} onPrune={() => {}} onQuery={() => {}} />);
+    expect(screen.getByText(/No throttling recorded/)).toBeInTheDocument();
+  });
 });
 
 describe("ActionsView", () => {

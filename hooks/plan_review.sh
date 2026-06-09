@@ -33,13 +33,24 @@ SEED_PATH="$STATE_DIR/seed.md"
 BUDGET_CAP=$(read_seed_field "$SEED_PATH" .budget.tokens_usd 2>/dev/null || echo 20)
 [[ -z "$BUDGET_CAP" || "$BUDGET_CAP" == "null" ]] && BUDGET_CAP=20
 
+# Cheap-role model (concurrency Tier-1 follow-on, 2026-06-09): plan review — both the
+# cf-session-plan-reviewer pass and the rl-initiative-planner --revise pass — is a cheap,
+# bounded role, so it runs on a cheaper model by default to stretch the scarce Opus weekly
+# allowance (the real Max governor). Seed override: `.plan_review_model`; default "sonnet"
+# when unset/null. An explicit empty value would fall through to the CLI default.
+PLAN_REVIEW_MODEL="$(read_seed_field "$SEED_PATH" .plan_review_model 2>/dev/null || echo "")"
+[[ -z "$PLAN_REVIEW_MODEL" || "$PLAN_REVIEW_MODEL" == "null" ]] && PLAN_REVIEW_MODEL="sonnet"
+PLAN_REVIEW_MODEL_FLAG=""
+[[ -n "$PLAN_REVIEW_MODEL" ]] && PLAN_REVIEW_MODEL_FLAG="--model $PLAN_REVIEW_MODEL"
+
 for round in 1 2 3 4 5; do
   FINDINGS="$ITER_DIR/review_findings_${round}.json"
   RESULT_TEXT="$ITER_DIR/review_result_${round}.txt"
   # Invoke cf-session-plan-reviewer; capture JSON envelope via --output-format json. FUP-0720.
   # FUP-0743: --add-dir "$CLAUDE_SKILLS_DIR" -- required so the slash command resolves from
   # the ralph/ CWD (skills live in a SIBLING tree); env var exported by orchestrator.sh.
-  claude -p --output-format json --max-budget-usd "$BUDGET_CAP" \
+  # shellcheck disable=SC2086  # PLAN_REVIEW_MODEL_FLAG is intentionally word-split (flag + value or empty)
+  claude -p $PLAN_REVIEW_MODEL_FLAG --output-format json --max-budget-usd "$BUDGET_CAP" \
     --add-dir "$CLAUDE_SKILLS_DIR" -- "/cf-session-plan-reviewer $PLAN_PATH" > "$FINDINGS"
   # Extract .result field for convergence regex (newlines unescaped) — FUP-0720.
   jq -r '.result // empty' "$FINDINGS" > "$RESULT_TEXT"
@@ -78,7 +89,8 @@ for round in 1 2 3 4 5; do
   fi
   # Else invoke planner --revise to produce a revised plan (overwrites $PLAN_PATH).
   # FUP-0743: --add-dir + -- (same rationale as the reviewer call above).
-  claude -p --output-format json --max-budget-usd "$BUDGET_CAP" \
+  # shellcheck disable=SC2086  # PLAN_REVIEW_MODEL_FLAG is intentionally word-split (flag + value or empty)
+  claude -p $PLAN_REVIEW_MODEL_FLAG --output-format json --max-budget-usd "$BUDGET_CAP" \
     --add-dir "$CLAUDE_SKILLS_DIR" -- "/rl-initiative-planner --revise $FINDINGS" > "$ITER_DIR/revise_round_${round}.json"
 done
 

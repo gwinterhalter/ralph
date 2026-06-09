@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import type {
   InboxCard, FleetSnapshot, Finding, EffectRow, Forecast, EventRow, ActionRow, GraphNode, GraphEdge,
-  ProjectRow, RunRow, LoopStatus,
+  ProjectRow, RunRow, LoopStatus, Throttling,
 } from "./api";
 import {
   InboxView, FleetView, RunsView, ImproveView, EffectsView, SpendView, EventsView, ActionsView,
@@ -42,6 +42,7 @@ export default function App() {
   const [effects, setEffects] = useState<EffectRow[]>([]);
   const [byOutcome, setByOutcome] = useState<Record<string, number>>({});
   const [forecast, setForecast] = useState<Forecast | null>(null);
+  const [throttling, setThrottling] = useState<Throttling | null>(null);
   const [events, setEvents] = useState<EventRow[]>([]);
   const [eventMeta, setEventMeta] = useState<{ total: number; failures: number }>({ total: 0, failures: 0 });
   const [actions, setActions] = useState<ActionRow[]>([]);
@@ -61,14 +62,14 @@ export default function App() {
   const loadAll = useCallback(async () => {
     try {
       setError(null);
-      const [inbox, fl, pr, rn, lp, learn, eff, fc, ev, acts, gr] = await Promise.all([
+      const [inbox, fl, pr, rn, lp, learn, eff, fc, th, ev, acts, gr] = await Promise.all([
         api.inbox(), api.fleet(), api.projects(), api.runs(), api.loopStatus(), api.learnings(),
-        api.effects(), api.forecast(), api.events(), api.actions(), api.graph(),
+        api.effects(), api.forecast(), api.throttling(), api.events(), api.actions(), api.graph(),
       ]);
       setCards(inbox.cards); setFleet(fl); setProjects(pr.projects);
       setRuns(rn.runs); setRunsTotal(rn.total_cost_usd); setLoop(lp);
       setFindings(learn.findings); setEffects(eff.effects); setByOutcome(eff.by_outcome);
-      setForecast(fc); setEvents(ev.events); setEventMeta(ev.metrics);
+      setForecast(fc); setThrottling(th); setEvents(ev.events); setEventMeta(ev.metrics);
       setActions(acts.actions); setGraph(gr);
     } catch (e) {
       setError(String(e));
@@ -183,6 +184,7 @@ export default function App() {
         {tab === "spend" && (
           <SpendView
             forecast={forecast}
+            throttling={throttling}
             onProvision={() => {
               if (window.confirm("Provision the ABS Phase 0→1→2 chain as candidate projects?"))
                 void api.onramp(true).then(() => { flash("ABS chain provisioned"); return loadAll(); });

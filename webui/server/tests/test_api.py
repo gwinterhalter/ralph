@@ -203,6 +203,27 @@ def test_fleet_serializes_rows(client: tuple[TestClient, FakeRegistry]) -> None:
     assert isinstance(body["total_cumulative_cost_usd"], str)
 
 
+def test_fleet_ceiling_reflects_env(
+    client: tuple[TestClient, FakeRegistry], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Concurrency display follow-up (2026-06-09): the GUI ceiling matches OL_SUPERVISOR_CONCURRENCY_CEILING.
+    c, _ = client
+    monkeypatch.setenv("OL_SUPERVISOR_CONCURRENCY_CEILING", "4")
+    body = c.get("/api/fleet").json()
+    assert body["concurrency_ceiling"] == 4
+
+
+def test_fleet_ceiling_defaults_when_env_unset(
+    client: tuple[TestClient, FakeRegistry], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from supervisor.safety_gates import DEFAULT_CONCURRENCY_CEILING
+
+    c, _ = client
+    monkeypatch.delenv("OL_SUPERVISOR_CONCURRENCY_CEILING", raising=False)
+    body = c.get("/api/fleet").json()
+    assert body["concurrency_ceiling"] == DEFAULT_CONCURRENCY_CEILING
+
+
 def test_inbox_aggregates_learning_and_regressed(client: tuple[TestClient, FakeRegistry]) -> None:
     c, _ = client
     cards = c.get("/api/inbox").json()["cards"]
@@ -406,6 +427,33 @@ def test_events_prune(client: tuple[TestClient, FakeRegistry]) -> None:
     c, reg = client
     body = c.post("/api/events-prune", params={"days": 30}).json()
     assert body["deleted"] == 7 and reg.pruned
+
+
+def test_throttling_surfaces_rate_limit_events(client: tuple[TestClient, FakeRegistry]) -> None:
+    c, reg = client
+    reg.events = [
+        {
+            "ts_utc": "2026-06-09T18:00:00Z",
+            "project_id": "p1",
+            "role": "executor",
+            "event_type": "rate_limit",
+            "payload": {"detail": "429 usage limit", "reset_hint": "resets at 19:00", "model": "opus"},
+        },
+        {"ts_utc": "x", "project_id": "p1", "role": "planner", "event_type": "llm_call", "payload": {}},
+    ]
+    body = c.get("/api/throttling").json()
+    assert body["count"] == 1  # only the rate_limit event, not the llm_call
+    assert body["recent"][0]["reset_hint"] == "resets at 19:00"
+    assert body["recent"][0]["role"] == "executor"
+
+
+def test_throttling_empty_when_none(client: tuple[TestClient, FakeRegistry]) -> None:
+    c, reg = client
+    reg.events = [
+        {"ts_utc": "x", "project_id": "p1", "role": "planner", "event_type": "llm_call", "payload": {}}
+    ]
+    body = c.get("/api/throttling").json()
+    assert body["count"] == 0 and body["recent"] == []
 
 
 def test_actions_log_records_every_action(client: tuple[TestClient, FakeRegistry]) -> None:

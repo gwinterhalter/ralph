@@ -38,6 +38,7 @@ from supervisor.control_panel import (
 )
 from supervisor.cost_forecast import forecast_fleet
 from supervisor.full_status_surface import FullFleetSnapshot, build_full_fleet_snapshot
+from supervisor.safety_gates import DEFAULT_CONCURRENCY_CEILING
 from supervisor.inbox import build_inbox
 from webui.server import audit_log, gates
 from webui.server.supervisor_control import SupervisorRunner
@@ -87,6 +88,23 @@ def _default_dispatcher(argv: list[str]) -> tuple[int, str]:
     except FileNotFoundError:
         return 127, "`claude` not on PATH"
     return p.returncode, (p.stdout or "") + (f"\n{p.stderr}" if p.stderr else "")
+
+
+def _resolve_ceiling() -> int:
+    """The operator-tunable Concurrency Ceiling for the DISPLAY surfaces (concurrency 2026-06-09).
+
+    Reads ``OL_SUPERVISOR_CONCURRENCY_CEILING`` (the same env the supervisor dispatcher reads),
+    so the GUI's ``Running: N/ceiling`` matches what the dispatcher actually fills to. Falls back
+    to ``DEFAULT_CONCURRENCY_CEILING`` when unset/invalid — never raises."""
+    raw = os.environ.get("OL_SUPERVISOR_CONCURRENCY_CEILING")
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            return DEFAULT_CONCURRENCY_CEILING
+        if value >= 1:
+            return value
+    return DEFAULT_CONCURRENCY_CEILING
 
 
 def _jsonable(value: object) -> Any:
@@ -194,7 +212,9 @@ def create_app(
 
     def _inbox_payload(reg: RegistryLike) -> tuple[dict[str, Any], dict[str, Any]]:
         """(inbox, fleet) dicts from one snapshot — shared by /api/inbox, /api/fleet, /api/stream."""
-        snap = build_full_fleet_snapshot(reg, now=datetime.now(timezone.utc))  # type: ignore[arg-type]
+        snap = build_full_fleet_snapshot(
+            reg, now=datetime.now(timezone.utc), concurrency_ceiling=_resolve_ceiling()  # type: ignore[arg-type]
+        )
         cards = build_inbox(
             fleet_rows=snap.rows,
             findings=reg.read_audit_findings(),
@@ -382,6 +402,28 @@ def create_app(
         reg = registry_provider()
         rows = list(reg.read_events_db(project_id=project, event_type=type, limit=limit))
         return {"events": [_jsonable(r) for r in rows], "metrics": asdict(summarize_events(rows))}
+
+    @app.get("/api/throttling")
+    def throttling(limit: int = Query(default=100, ge=1, le=100000)) -> dict[str, Any]:
+        """Rate-limit / usage-limit events the orchestrator captured from ``claude`` stderr
+        (concurrency 2026-06-09). Surfaces the count + most-recent occurrences (with reset hints)
+        for the Spend / Events tab — the GUI throttling indicator. Empty when nothing was throttled."""
+        reg = registry_provider()
+        rows = list(reg.read_events_db(event_type="rate_limit", limit=limit))
+        recent: list[dict[str, Any]] = []
+        for r in rows:
+            payload = r.get("payload")
+            payload = payload if isinstance(payload, dict) else {}
+            recent.append(
+                {
+                    "ts_utc": _jsonable(r.get("ts_utc")),
+                    "project_id": r.get("project_id"),
+                    "role": r.get("role"),
+                    "reset_hint": payload.get("reset_hint"),
+                    "detail": payload.get("detail"),
+                }
+            )
+        return {"count": len(rows), "recent": recent}
 
     @app.get("/api/forecast")
     def forecast() -> dict[str, Any]:

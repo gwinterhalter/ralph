@@ -104,6 +104,34 @@ emit_event() {
   return 0
 }
 
+# --- rate-limit detection (concurrency Tier-2 follow-on, 2026-06-09) -------------------------
+# detect_and_emit_rate_limit <state_dir> <project_id> <slug> <iter> <role> <model> <stderr_file>
+# Scans a CAPTURED `claude` STDERR file for rate-limit / usage-limit markers and, on a match, emits
+# ONE `rate_limit` event (role-tagged) carrying the matched detail + any parsed reset hint. STDERR
+# only — never the model's stdout answer — so generated content cannot false-positive (this mirrors
+# the 2026-06-09 Step-0 throttle detector, where stderr scanning was the reliable signal and the
+# content-keyword scan was not). event_type `rate_limit` is a Comprehensive_Event_Log_Spec extension;
+# `events.event_type` is unconstrained text, so no DB migration is needed. Fully guarded (spec §6.3):
+# any internal failure stays contained and the caller is never aborted.
+detect_and_emit_rate_limit() {
+  (
+    set +e
+    rl_state="${1:-}"; rl_pid="${2:-}"; rl_slug="${3:-}"; rl_iter="${4:-}"
+    rl_role="${5:-}"; rl_model="${6:-}"; rl_err="${7:-}"
+    [[ -z "$rl_state" || -z "$rl_err" || ! -s "$rl_err" ]] && exit 0
+    rl_line="$(grep -iE 'rate.?limit|usage limit|429|too many requests|overloaded|quota exceeded' "$rl_err" 2>/dev/null | head -1)"
+    [[ -z "$rl_line" ]] && exit 0
+    # Best-effort reset hint: a "resets/try again ..." fragment; empty when claude gives none.
+    rl_reset="$(grep -ioE '(resets?|try again)[^.]*' "$rl_err" 2>/dev/null | head -1)"
+    rl_detail="$(printf '%s' "$rl_line" | cut -c1-300)"
+    emit_event "$rl_state" "$rl_pid" "$rl_slug" "$rl_iter" "$rl_role" "rate_limit" "" "" "" \
+      "$(jq -nc --arg d "$rl_detail" --arg r "$rl_reset" --arg m "$rl_model" \
+         '{detail:$d, model:$m} + (if $r != "" then {reset_hint:$r} else {} end)' 2>/dev/null || printf '{}')"
+    exit 0
+  ) 2>/dev/null || true
+  return 0
+}
+
 # --- CLI dispatch (FUP-0838) ----------------------------------------------------------------
 # Dual-mode: `source lib/events.sh` keeps exposing emit_event() (the guard below is false when
 # sourced); invoking the file as a script reaches the audit-target timing emitters used by the

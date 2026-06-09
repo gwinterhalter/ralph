@@ -402,7 +402,13 @@ claude --print --output-format json \
        "${EXEC_ALLOW[@]}" \
        $STRICT_MCP_FLAG --mcp-config "$MCP_CONFIG" \
        --max-budget-usd "$PER_CALL_CAP" --max-turns "$MAX_TURNS" \
-       < "$PLAN_PATH" > "$RESULT_JSON_TMP"
+       < "$PLAN_PATH" > "$RESULT_JSON_TMP" 2> "$RESULT_JSON_TMP.err"
+# Rate-limit detection (concurrency 2026-06-09): scan the executor's captured stderr; best-effort.
+if command -v detect_and_emit_rate_limit >/dev/null 2>&1; then
+  detect_and_emit_rate_limit "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "executor" "" "$RESULT_JSON_TMP.err"
+fi
+[[ -s "$RESULT_JSON_TMP.err" ]] && cat "$RESULT_JSON_TMP.err" >&2   # preserve prior stderr visibility
+rm -f "$RESULT_JSON_TMP.err" 2>/dev/null || true
 mv -f "$RESULT_JSON_TMP" "$RESULT_JSON"
 emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "executor" "role_complete" \
   "$(( $(date +%s%3N 2>/dev/null || echo 0) - EVENT_EX_T0 ))" "" "" \

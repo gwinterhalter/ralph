@@ -83,3 +83,7 @@ table.fleet { border-collapse: collapse; width: 100%; max-width: 900px; backgrou
 .gn-id { font-weight: 600; }
 .gn-state { font-size: 0.8em; color: #64748b; }
 .gn-deps { font-size: 0.8em; color: #2563eb; margin-top: 4px; }
+
+/* Throttling indicator (concurrency 2026-06-09): rate/usage-limit events on the Spend tab. */
+.throttle-warn { border-left: 4px solid #ef4444; background: #fef2f2; padding: 8px 12px; margin: 8px 0; border-radius: 4px; }
+.throttle-warn .rollup { color: #b91c1c; font-weight: 600; }

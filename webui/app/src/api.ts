@@ -86,6 +86,15 @@ export interface EventRow {
   subject_id?: string;
 }
 
+export interface ThrottleEvent {
+  ts_utc: string;
+  project_id: string;
+  role: string;
+  reset_hint: string | null;
+  detail: string | null;
+}
+export interface Throttling { count: number; recent: ThrottleEvent[]; }
+
 export interface ActionRow { ts: string; action: string; target: string; by: string; detail: string; }
 
 export interface ProjectRow {
@@ -157,6 +166,7 @@ export const api = {
     q.set("limit", String(limit));
     return getJSON<{ events: EventRow[]; metrics: { total: number; failures: number } }>(`/api/events?${q}`);
   },
+  throttling: () => getJSON<Throttling>("/api/throttling"),
   actions: () => getJSON<{ actions: ActionRow[] }>("/api/actions"),
   projects: () => getJSON<{ projects: ProjectRow[]; count: number }>("/api/projects"),
   runs: () => getJSON<{ runs: RunRow[]; count: number; total_cost_usd: string }>("/api/runs"),

@@ -1,7 +1,7 @@
 // Presentational views — pure functions of props (no fetching), so they unit-test cleanly.
 import type {
   InboxCard, FleetSnapshot, Finding, EffectRow, Forecast, EventRow, ActionRow, GraphNode, GraphEdge,
-  ProjectRow, RunRow, LoopStatus,
+  ProjectRow, RunRow, LoopStatus, Throttling,
 } from "./api";
 
 export function SupervisorControls(props: {
@@ -321,14 +321,31 @@ function fmt(v: number | null): string {
 
 export function SpendView(props: {
   forecast: Forecast | null;
+  throttling?: Throttling | null;
   onProvision: () => void;
   onPrune: (days: number) => void;
   onQuery: () => void;
 }) {
   const f = props.forecast;
+  const th = props.throttling;
   return (
     <div>
       <h2>Spend</h2>
+      {th && (th.count > 0 ? (
+        <div className="throttle-warn" aria-label="Throttling">
+          <p className="rollup">⚠ Throttled {th.count}× — rate / usage limits hit</p>
+          <ul className="events">
+            {th.recent.slice(0, 5).map((t, i) => (
+              <li key={`${t.ts_utc}:${i}`}>
+                <span className="e-ts">{t.ts_utc}</span> {t.project_id} · {t.role}
+                {t.reset_hint ? ` · ${t.reset_hint}` : ""}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : (
+        <p className="rollup" aria-label="Throttling">No throttling recorded ✓</p>
+      ))}
       {!f ? <p>Loading forecast…</p> : (
         <>
           <p className="rollup">
