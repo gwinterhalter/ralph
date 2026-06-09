@@ -1,0 +1,68 @@
+name: webui-ci
+
+# CI for the supervisor + control-panel GUI. Runs the same gates verified locally:
+#   Python — hermetic supervisor suite, ruff, mypy --strict, the FastAPI API tests.
+#   Node   — tsc typecheck, Vitest component tests, the mocked + live-backend Playwright E2E.
+# The real-DB E2E (playwright.db.config.ts) is NOT run here — it needs the disposable-branch DSN as
+# a secret; run it manually (see webui/README.md).
+
+on:
+  push:
+    branches: [main, ol-build]
+    paths: ["supervisor/**", "tests/**", "webui/**", "pyproject.toml", ".github/workflows/webui-ci.yml"]
+  pull_request:
+    paths: ["supervisor/**", "tests/**", "webui/**", "pyproject.toml"]
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[web]"
+          pip install ruff mypy pytest
+      - name: Ruff
+        run: python -m ruff check supervisor tests webui
+      - name: Mypy (strict, supervisor)
+        run: python -m mypy supervisor
+      - name: Hermetic supervisor suite
+        run: python -m pytest
+      - name: FastAPI API tests
+        run: python -m pytest webui/server/tests
+
+  node:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: webui/app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install JS deps
+        run: npm ci
+      - name: Install Python (for the live-backend E2E server)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install supervisor package (E2E server import)
+        working-directory: .
+        run: pip install -e ".[web]"
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Vitest component tests
+        run: npm test
+      - name: Build
+        run: npm run build
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+      - name: E2E — mocked
+        run: npx playwright test
+      - name: E2E — live backend (real FastAPI, seeded in-memory registry)
+        run: npx playwright test -c playwright.live.config.ts

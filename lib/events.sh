@@ -138,6 +138,21 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       emit_event "$RL_STATE_DIR" "${EVENT_PROJECT_ID:-}" "${EVENT_SLUG:-}" "${EVENT_ITER:-0}" \
                  audit audit_target_exit "${4:-}" "${2:-}" "${3:-audit_target}" "${5:-}"
       ;;
+    verification)
+      # verification <binding> <pass|fail> [item_id]
+      # Item-2 FR-051 fact: one event per verification binding the Consumer checked, so the
+      # Run-Auditor's learn_assembly can surface over-verification (a binding that always passes)
+      # and binding-defect (always fails) candidates. role=consumer, subject_kind=binding,
+      # payload {binding, result, item_id?}. Best-effort, never aborts (§6.3); standalone
+      # (RL_STATE_DIR unset) → no-op via the guard above. The rl-iteration-consumer skill calls
+      # this once per binding outcome.
+      _ev_bind="${2:-}"
+      _ev_res="${3:-}"
+      emit_event "$RL_STATE_DIR" "${EVENT_PROJECT_ID:-}" "${EVENT_SLUG:-}" "${EVENT_ITER:-0}" \
+                 consumer verification "" "$_ev_bind" binding \
+                 "$(jq -nc --arg b "$_ev_bind" --arg r "$_ev_res" --arg item "${4:-}" \
+                    '{binding:$b, result:$r} + (if $item != "" then {item_id:$item} else {} end)' 2>/dev/null || printf '{}')"
+      ;;
     correction_attempt)
       # correction_attempt <attempt> <level> <item_id>
       # Executor-side L1–L4 correction-loop retry primitive (FUP-0843; spec v1.3 §6.2 —

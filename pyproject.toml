@@ -1,0 +1,65 @@
+[project]
+name = "ralph-supervisor"
+version = "0.0.0"
+description = "Ralph Loop Outer Loop Supervisor (ol-build)"
+requires-python = ">=3.12"
+dependencies = [
+    # OLB-02 (gate olb02-registry-db-access option A): the concrete Project
+    # Registry layer (supervisor/registry.py) reaches the code_factory Postgres on
+    # the disposable branch via a direct psycopg driver. Imported lazily inside
+    # Registry.from_env so the import of registry.py and the whole unit suite stay
+    # hermetic/DB-free; the live branch is wired only at C2/OLB-08.
+    "psycopg[binary]>=3.1",
+    # FR-013 re-attach: the live OS process start-time probe
+    # (supervisor.__main__._pid_start_time) reads psutil.Process(pid).create_time()
+    # to disambiguate a recycled pid from our original orchestrator. Imported lazily
+    # inside the probe with a graceful ImportError -> None fallback, so the hermetic
+    # unit suite stays runnable without it; required in deployment for FR-013 to fire.
+    "psutil>=5.9",
+]
+
+[project.optional-dependencies]
+# Control-panel GUI server (webui/server/app.py). A thin FastAPI adapter over the supervisor
+# reads/write-seams; kept OUTSIDE the core deps + the strict mypy gate (files = ["supervisor"]) so
+# the hermetic unit suite and the headless CLI need none of it. Install with: pip install -e .[web]
+web = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "httpx>=0.27",
+]
+
+[tool.mypy]
+# FUP-0856: the enforced `mypy --strict` gate is PRODUCTION-only — the
+# `supervisor/` package. The `tests/` tree carries pre-existing strict-mode
+# helper-typing debt (untyped fixtures; `run_once()` used in a value context) that
+# is intentionally OUTSIDE the gate; cf-code-review runs `mypy --strict supervisor`.
+# `psycopg` (optional, lazily imported, absent in the hermetic type-check env) and
+# `PyYAML` (no bundled stubs) are import-ignored — the production code casts/guards
+# their use, so the gate stays strict-clean in BOTH the hermetic and the
+# psycopg/PyYAML-present environments.
+python_version = "3.12"
+strict = true
+files = ["supervisor"]
+
+[[tool.mypy.overrides]]
+module = ["psycopg", "psycopg.*", "yaml", "psutil"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+# Collect only the Python supervisor tests; the inherited *.sh framework
+# tests in tests/ are NOT pytest and must not be collected.
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+# Repo root only. supervisor/ is a PACKAGE (has __init__.py) — import it as
+# `supervisor.<module>`. Do NOT also put supervisor/ on the path; that creates a
+# dual import model (bare `import foo` vs `import supervisor.foo`) that collides
+# under --import-mode=importlib once real modules land.
+pythonpath = ["."]
+addopts = "-ra -q --strict-markers --import-mode=importlib"
+markers = [
+    "integration: integration_checkpoint-shape tests (C1-C5), slower, may touch the branch DB",
+    "unit: fast component_build-shape unit tests",
+]

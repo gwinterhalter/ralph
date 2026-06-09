@@ -3,6 +3,18 @@ prd.json
 progress.txt
 .last-branch
 
+# Supervisor runtime state when state_dir defaults to the repo (operator command
+# channel written by control_panel.write_command); runtime state, never tracked.
+commands/
+state/
+# Learn-step runtime output (learning_corpus.jsonl, run_auditor_report.md) written
+# when workspace_root defaults to the repo during a local --once run; never tracked.
+logs/
+# Supervisor/webui runtime files when state_dir defaults to the repo (operator action log +
+# the loop pid file the GUI's supervisor control writes); never tracked.
+operator_actions.jsonl
+*.pid
+
 # Archive is optional to commit
 # archive/
 
@@ -14,6 +26,16 @@ progress.txt
 __pycache__/
 *.pyc
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Control-panel GUI (webui/app) JS build + test artifacts — never tracked.
+webui/app/node_modules/
+webui/app/dist/
+webui/app/test-results/
+webui/app/playwright-report/
+webui/app/.vite/
+webui/app/.e2e-state/
 
 #Claude
 # Exclude .claude/ CONTENTS (not the dir itself — required for the negation below to

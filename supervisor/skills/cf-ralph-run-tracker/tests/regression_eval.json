@@ -1,0 +1,104 @@
+{
+  "skill_name": "cf-ralph-run-tracker",
+  "version": "1.0",
+  "cases": [
+    {
+      "id": "TC-001",
+      "prompt": "The Supervisor just confirmed an orchestrator spawn for project acme-portal — record the Run row in ralph_runs.",
+      "should_trigger": true,
+      "expected_behavior": "Govern an FR-009 spawn INSERT: require project_slug, seed_path, spawned_at, orchestrator_pid; status born 'running'; metadata carries the process-start-time disambiguator; via the registry.py record_run mechanism.",
+      "rationale": "FR-009 spawn-row-at-spawn is the first of the two write points; required-field coverage is the core positive case."
+    },
+    {
+      "id": "TC-002",
+      "prompt": "The orchestrator for acme-portal exited with INITIATIVE_COMPLETE — reconcile its ralph_runs row to terminal.",
+      "should_trigger": true,
+      "expected_behavior": "Govern an FR-011 terminal reconciliation UPDATE: set status='complete', terminated_at, and summed exact-decimal terminal_cost_usd; target only the currently-running row; via registry.py update_run_status.",
+      "rationale": "FR-011 terminal reconciliation is the second write point; the clean-completion acceptance criterion."
+    },
+    {
+      "id": "TC-003",
+      "prompt": "An orchestrator hit its budget ceiling and exited on the budget-exhausted code. What status does its ralph_runs row get?",
+      "should_trigger": true,
+      "expected_behavior": "Map the exit code to status='budget_exhausted' (FR-012), explicitly distinct from 'failed'; never collapse the two.",
+      "rationale": "FR-012 exit-code mapping with budget_exhausted kept distinct from failed — the spec's named acceptance criterion."
+    },
+    {
+      "id": "TC-004",
+      "prompt": "Should ralph_runs.project_slug have a hard foreign key to projects so the DB enforces the owning-project link?",
+      "should_trigger": true,
+      "expected_behavior": "No — FR-010 is a deliberate soft reference resolving to exactly one projects.project_id with NO hard FK; proposing a hard FK is a design change requiring re-gate (HALT).",
+      "rationale": "FR-010 soft-reference discipline; guards against drifting to a hard FK (OL-3 open modelling stance)."
+    },
+    {
+      "id": "TC-005",
+      "prompt": "The Supervisor restarted and found a ralph_runs row still marked running. How do we re-attach to that orchestrator?",
+      "should_trigger": true,
+      "expected_behavior": "Re-attach by recorded orchestrator_pid PLUS the metadata process-start-time disambiguator (FR-013); if both do not confirm the live process, reconcile the Run as 'failed'. Pid alone is insufficient (process-reuse hazard).",
+      "rationale": "FR-013 re-attach by recorded identity disambiguated against pid reuse."
+    },
+    {
+      "id": "TC-006",
+      "prompt": "Can we just store the summed run cost as a Python float in terminal_cost_usd to keep it simple?",
+      "should_trigger": true,
+      "expected_behavior": "HALT/refuse — FR-014/NFR-007 require exact NUMERIC preserving cent precision; a float is a defect, not a rounding choice. Anti-guess: never store an approximated value.",
+      "rationale": "FR-014/NFR-007 exact-decimal anti-guess case; a float store is rejected, never silently accepted."
+    },
+    {
+      "id": "TC-007",
+      "prompt": "Let's add a last_iteration_at heartbeat column to ralph_runs and update it every orchestrator iteration so we can see liveness.",
+      "should_trigger": true,
+      "expected_behavior": "HALT — §5.6 forbids a per-iteration liveness column on ralph_runs; status moves only at spawn and terminal reconciliation. Freshness is the event stream's last phase_complete (Event-Log §15), not a ralph_runs column.",
+      "rationale": "§5.6 no-liveness-column boundary; guards against introducing a third write point / freshness store."
+    },
+    {
+      "id": "TC-008",
+      "prompt": "Can the running orchestrator itself write its own ralph_runs status row as it goes?",
+      "should_trigger": true,
+      "expected_behavior": "No — NFR-006 sole-writer: only the conforming Supervisor mechanism (registry.py) writes ralph_runs; no orchestrator Run, role skill, or Executor session writes a row directly. HALT the direct write.",
+      "rationale": "NFR-006 sole-writer discipline, mirroring cf-followup-tracker's exclusivity for followups."
+    },
+    {
+      "id": "TC-009",
+      "prompt": "I'm editing Ralph_Loop_Outer_Loop_Spec section 5.4 to reword the FR-011 acceptance criterion.",
+      "should_trigger": false,
+      "expected_behavior": "Does NOT trigger — editing the governing spec is cf-spec-writer's job. This skill enforces the spec's ralph_runs contract; it does not author the spec (spec-enforcer anti-trigger).",
+      "rationale": "Spec-enforcer anti-trigger: must not fire on edits to its own governing document, only on ralph_runs writes."
+    },
+    {
+      "id": "TC-010",
+      "prompt": "Ingest this Issues report and insert the new follow-up rows into the tracker.",
+      "should_trigger": false,
+      "expected_behavior": "Does NOT trigger — followups rows are cf-followup-tracker's domain. This skill is the sole writer for ralph_runs only, not followups.",
+      "rationale": "Negative/neighbour-skill case: the precedent skill cf-followup-tracker owns followups; this skill must not over-trigger onto a different table."
+    },
+    {
+      "id": "TC-011",
+      "prompt": "Record a spawn Run row, but the project_slug 'acme' matches two rows in projects.",
+      "should_trigger": true,
+      "expected_behavior": "HALT — FR-010 requires project_slug to resolve to exactly one projects.project_id; zero or many is an unresolved reference. Surface the ambiguity; never guess a Project. Bad-source precondition.",
+      "rationale": "Bad-source / input-precondition case: an unresolvable soft reference halts rather than writing on a guessed Project."
+    },
+    {
+      "id": "TC-012",
+      "prompt": "Reconcile the Run to status='timed_out'.",
+      "should_trigger": true,
+      "expected_behavior": "HALT — 'timed_out' is outside the ralph_runs_status_check set (running | complete | budget_exhausted | failed | halted); the write is rejected before it reaches the DB. Never coerce to a near-value. A wedged-but-alive Run maps to 'halted'; a gone process maps to 'failed'.",
+      "rationale": "Anti-guess case: an out-of-enum status is rejected against the live CHECK, never substituted."
+    },
+    {
+      "id": "TC-013",
+      "prompt": "Should cf-ralph-run-tracker invent its own write discipline for ralph_runs, or mirror an already-approved sole-writer pattern?",
+      "should_trigger": true,
+      "expected_behavior": "Mirror the approved cf-followup-tracker precedent — Spec v1.3 §5.5 names this skill as the sole write authority for ralph_runs 'exactly as cf-followup-tracker is for followups'. Honour the prior approved governance pattern (EQUIVALENT precedent); do not fork or invent a new pattern (SR-ANTI-03).",
+      "rationale": "Precedent-check case (Phase 0a / SR-DISC-06): the proposed skill has a known prior approved design (cf-followup-tracker); the build must honour it rather than drift."
+    },
+    {
+      "id": "TC-014",
+      "prompt": "When the spawn is confirmed, write a Run Registry row referencing that Project with a recorded spawn timestamp in spawned_at.",
+      "should_trigger": true,
+      "expected_behavior": "Govern the FR-009 spawn INSERT exactly as the spec's FR-009 acceptance criterion and registry.py::record_run docstring phrase it: a ralph_runs row exists referencing the Project with spawned_at recorded.",
+      "rationale": "Historical-phrase case (SR-DISC-05): first build has no prior-session corpus, so the observed phrasing is sourced verbatim from the FR-009 acceptance criterion (Spec v1.3 §5.4) and the OLB-02 registry.py record_run docstring — the authoritative phrasing source for this skill's triggers."
+    }
+  ]
+}

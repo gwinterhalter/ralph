@@ -65,9 +65,14 @@ for round in 1 2 3 4 5; do
   [[ -z "$rr_fb" ]] && rr_fb=-1
   [[ -z "$rr_fd" ]] && rr_fd=-1
   rr_verdict="revise"; [[ "$rr_converged" -eq 1 ]] && rr_verdict="converged"
+  # Item-2 FR-052: stamp the session-plan shape on the revise_round event so the Run-Auditor's
+  # learn_assembly can recover per-shape revision rates (which shapes keep needing reviewer
+  # revision). Same shape-extraction sed used by execute_with_gates / adversarial_verify; empty
+  # when the plan declares no shape line (the learning pass then skips this use).
+  rr_shape="$(sed -nE 's/^[[:space:]]*(-[[:space:]]+)?\*{0,2}shape:\*{0,2}[[:space:]]*([A-Za-z_]+).*/\2/p' "$PLAN_PATH" 2>/dev/null | head -1)"
   emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "planner" "revise_round" "" "" "" \
-    "$(jq -nc --argjson rd "$round" --argjson fb "$rr_fb" --argjson fd "$rr_fd" --arg v "$rr_verdict" \
-       '{round:$rd, findings_blocker:$fb, findings_drift:$fd, verdict:$v}')"
+    "$(jq -nc --argjson rd "$round" --argjson fb "$rr_fb" --argjson fd "$rr_fd" --arg v "$rr_verdict" --arg sh "$rr_shape" \
+       '{round:$rd, findings_blocker:$fb, findings_drift:$fd, verdict:$v} + (if $sh != "" then {shape:$sh} else {} end)')"
   if [[ "$rr_converged" -eq 1 ]]; then
     exit 0
   fi
