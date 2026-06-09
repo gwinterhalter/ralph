@@ -87,6 +87,29 @@ export interface EventRow {
 
 export interface ActionRow { ts: string; action: string; target: string; by: string; detail: string; }
 
+export interface ProjectRow {
+  project_id: string;
+  display_name: string;
+  lifecycle_state: string;
+  attention_debt: number;
+  depends_on: string[];
+  cost_usd: string;
+  runs: number;
+}
+export interface RunRow {
+  run_id: string;
+  project_id: string;
+  status: string;
+  cost_usd: string;
+  spawned_at: string | null;
+  terminated_at: string | null;
+}
+export interface LoopStatus {
+  last_activity: string | null;
+  seconds_since: number | null;
+  active_guess: boolean;
+}
+
 // Optional bearer token for the API. A local tool can't set headers on the page load, so we read
 // it from the URL (?token=…) once and reuse it on every fetch + the SSE URL. Unset = open server.
 const AUTH_TOKEN =
@@ -133,6 +156,9 @@ export const api = {
     return getJSON<{ events: EventRow[]; metrics: { total: number; failures: number } }>(`/api/events?${q}`);
   },
   actions: () => getJSON<{ actions: ActionRow[] }>("/api/actions"),
+  projects: () => getJSON<{ projects: ProjectRow[]; count: number }>("/api/projects"),
+  runs: () => getJSON<{ runs: RunRow[]; count: number; total_cost_usd: string }>("/api/runs"),
+  loopStatus: () => getJSON<LoopStatus>("/api/loop-status"),
   graph: () => getJSON<{ nodes: GraphNode[]; edges: GraphEdge[] }>("/api/graph"),
   streamUrl: () => "/api/stream" + (AUTH_TOKEN ? `?token=${encodeURIComponent(AUTH_TOKEN)}` : ""),
   pause: (projectId: string, by = "operator") =>
@@ -147,6 +173,8 @@ export const api = {
     post(`/api/findings/${encodeURIComponent(key)}/reject`, { by }),
   apply: (key: string, by = "operator") =>
     post(`/api/findings/${encodeURIComponent(key)}/apply`, { by }),
+  revert: (key: string, by = "operator") =>
+    post<{ detail: string }>(`/api/findings/${encodeURIComponent(key)}/revert`, { by }),
   onramp: (apply: boolean) => post(`/api/onramp-abs?apply=${apply}`),
   prune: (days: number) => post(`/api/events-prune?days=${days}`),
 };

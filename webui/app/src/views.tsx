@@ -1,6 +1,7 @@
 // Presentational views — pure functions of props (no fetching), so they unit-test cleanly.
 import type {
   InboxCard, FleetSnapshot, Finding, EffectRow, Forecast, EventRow, ActionRow, GraphNode, GraphEdge,
+  ProjectRow, RunRow,
 } from "./api";
 
 const KIND_ICON: Record<string, string> = {
@@ -44,8 +45,11 @@ export function InboxView(props: {
   );
 }
 
+const ACTIVE_STATES = new Set(["running", "candidate", "admitted", "paused_gate"]);
+
 export function FleetView(props: {
-  snapshot: FleetSnapshot | null;
+  projects: ProjectRow[];
+  snapshot: FleetSnapshot | null;        // for the live running/stalled rollup only
   expandedId: string | null;
   rowEvents: EventRow[];
   onToggleRow: (projectId: string) => void;
@@ -53,15 +57,15 @@ export function FleetView(props: {
   onBump: (projectId: string) => void;
 }) {
   const s = props.snapshot;
-  if (!s) return <p>Loading fleet…</p>;
+  if (props.projects.length === 0) return <p>No projects yet. Provision work from the Spend tab.</p>;
   return (
     <div>
       <table className="fleet" aria-label="Fleet">
         <thead>
-          <tr><th></th><th>Project</th><th>Lifecycle</th><th>Run</th><th>Attn</th><th>Open</th><th>Cost</th><th>♥</th><th></th></tr>
+          <tr><th></th><th>Project</th><th>Lifecycle</th><th>Cost</th><th>Runs</th><th>Attn</th><th>Depends on</th><th></th></tr>
         </thead>
         <tbody>
-          {s.rows.map((r) => (
+          {props.projects.map((r) => (
             <FleetRow
               key={r.project_id}
               row={r}
@@ -74,16 +78,18 @@ export function FleetView(props: {
           ))}
         </tbody>
       </table>
-      <p className="rollup">
-        Running {s.running_count}/{s.concurrency_ceiling} · headroom {s.headroom} · stalled{" "}
-        {s.stalled_count} · total ${s.total_cumulative_cost_usd} (info)
-      </p>
+      {s && (
+        <p className="rollup">
+          Live: running {s.running_count}/{s.concurrency_ceiling} · headroom {s.headroom} ·
+          stalled {s.stalled_count} · fleet cost ${s.total_cumulative_cost_usd} (info)
+        </p>
+      )}
     </div>
   );
 }
 
 function FleetRow(props: {
-  row: FleetSnapshot["rows"][number];
+  row: ProjectRow;
   expanded: boolean;
   events: EventRow[];
   onToggle: () => void;
@@ -91,26 +97,28 @@ function FleetRow(props: {
   onBump: () => void;
 }) {
   const r = props.row;
+  const active = ACTIVE_STATES.has(r.lifecycle_state);
   return (
     <>
-      <tr data-stalled={r.heartbeat_state === "STALLED"}>
+      <tr className={`lc-${r.lifecycle_state}`}>
         <td>
           <button aria-label={`expand ${r.project_id}`} className="expander" onClick={props.onToggle}>
             {props.expanded ? "▾" : "▸"}
           </button>
         </td>
-        <td>{r.display_name}</td><td>{r.lifecycle_state}</td><td>{r.active_run_status}</td>
-        <td>{r.attention_debt}</td><td>{r.open_work_count}</td><td>${r.cumulative_cost_usd}</td>
-        <td>{r.heartbeat_state}</td>
+        <td>{r.display_name}</td>
+        <td><span className={`badge lc-${r.lifecycle_state}`}>{r.lifecycle_state}</span></td>
+        <td>${r.cost_usd}</td><td>{r.runs}</td><td>{r.attention_debt}</td>
+        <td>{r.depends_on.length ? r.depends_on.join(", ") : "—"}</td>
         <td>
-          <button onClick={props.onPause}>Pause</button>
-          <button onClick={props.onBump}>$</button>
+          {active && <button onClick={props.onPause}>Pause</button>}
+          {active && <button onClick={props.onBump}>$</button>}
         </td>
       </tr>
       {props.expanded && (
         <tr className="detail-row">
           <td></td>
-          <td colSpan={8}>
+          <td colSpan={7}>
             <div className="row-detail" aria-label={`detail ${r.project_id}`}>
               <strong>Recent events</strong>
               {props.events.length === 0 ? <p>No recent events.</p> : (
@@ -128,6 +136,33 @@ function FleetRow(props: {
         </tr>
       )}
     </>
+  );
+}
+
+export function RunsView(props: { runs: RunRow[]; totalCost: string }) {
+  return (
+    <div>
+      <h2>Run history</h2>
+      {props.runs.length === 0 ? <p>No completed runs yet.</p> : (
+        <>
+          <p className="rollup">{props.runs.length} run(s) · total ${props.totalCost}</p>
+          <table className="fleet" aria-label="Runs">
+            <thead><tr><th>Project</th><th>Status</th><th>Cost</th><th>Spawned</th><th>Terminated</th></tr></thead>
+            <tbody>
+              {props.runs.map((r) => (
+                <tr key={r.run_id} className={`lc-${r.status}`}>
+                  <td>{r.project_id}</td>
+                  <td><span className={`badge lc-${r.status}`}>{r.status}</span></td>
+                  <td>${r.cost_usd}</td>
+                  <td className="e-ts">{r.spawned_at ?? "—"}</td>
+                  <td className="e-ts">{r.terminated_at ?? "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
+    </div>
   );
 }
 
@@ -181,8 +216,18 @@ export function ImproveView(props: {
   onPromote: (key: string) => void;
   onReject: (key: string) => void;
   onApply: (key: string) => void;
+  onRevert: (key: string) => void;
 }) {
   const effectByKey = new Map(props.effects.map((e) => [e.finding_key, e]));
+  if (props.findings.length === 0) {
+    return (
+      <p className="empty-help">
+        No learnings captured yet. The supervisor's Learn step writes Run-Auditor findings here after
+        it audits completed runs (recurring gates, over-verification, chronic corrections). They then
+        flow Proposed → Accepted → Applied, and the Effects tab measures whether each one helped.
+      </p>
+    );
+  }
   return (
     <div className="kanban">
       {COLUMNS.map((col) => {
@@ -208,6 +253,9 @@ export function ImproveView(props: {
                     {col === "accepted" && (
                       <button onClick={() => props.onApply(f.finding_key)}>Apply</button>
                     )}
+                    {col === "applied" && (
+                      <button className="danger" onClick={() => props.onRevert(f.finding_key)}>Roll back</button>
+                    )}
                   </div>
                 </div>
               );
@@ -222,6 +270,15 @@ export function ImproveView(props: {
 export function EffectsView(props: { effects: EffectRow[]; byOutcome: Record<string, number> }) {
   const order = ["regressed", "no_effect", "pending", "confirmed"];
   const roll = order.filter((o) => props.byOutcome[o]).map((o) => `${props.byOutcome[o]} ${o}`).join(", ");
+  if (props.effects.length === 0) {
+    return (
+      <p className="empty-help">
+        No effects measured yet. Once a learning is <em>applied</em> (Improve tab), the supervisor
+        compares the subject's runs before vs after adoption and reports here whether it
+        helped (confirmed), did nothing (no_effect), or made things worse (regressed).
+      </p>
+    );
+  }
   return (
     <div>
       <p className="rollup">{roll || "none measured yet"}</p>

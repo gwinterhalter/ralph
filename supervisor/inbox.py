@@ -81,6 +81,7 @@ def build_inbox(
     effects: Sequence[Mapping[str, object]] = (),
     corrections: Sequence[Mapping[str, object]] = (),
     gates: Sequence[Mapping[str, object]] = (),
+    projects: Sequence[Mapping[str, object]] = (),
     budget_breach: Mapping[str, object] | None = None,
     churn_threshold: int = DEFAULT_CHURN_THRESHOLD,
 ) -> list[InboxCard]:
@@ -127,6 +128,28 @@ def build_inbox(
                 subject=str(gate.get("request_file") or gid),
                 detail=str(gate.get("question_text") or "operator decision required"),
                 actions=(*option_ids, "details"),
+            )
+        )
+
+    # A Project sitting in paused_gate needs an operator decision, but it is neither a candidate nor
+    # running (so it is absent from the active fleet snapshot) and may have no surfaced gate_request
+    # file — without this it would be INVISIBLE. Emit an investigate card for any such Project not
+    # already covered by a file-gate (live-found 2026-06-08: a paused_gate project raised no card).
+    for proj in projects:
+        if str(proj.get("lifecycle_state")) != _PAUSED_GATE_STATE:
+            continue
+        pid = str(proj.get("project_id") or "")
+        if not pid or pid in gated_projects:
+            continue
+        gated_projects.add(pid)
+        cards.append(
+            InboxCard(
+                kind=KIND_GATE,
+                urgency=_URGENCY[KIND_GATE],
+                title=f"Gate awaiting decision · {proj.get('display_name') or pid}",
+                subject=pid,
+                detail="paused on a gate — open the project to investigate / answer it",
+                actions=("investigate",),
             )
         )
 

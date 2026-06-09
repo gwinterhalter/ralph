@@ -78,5 +78,19 @@ Two E2E modes:
   browser. Needs the disposable-branch DSN:
   `$env:OL_SUPERVISOR_DB_URL="<dev DSN>"; npx playwright test -c playwright.db.config.ts` (NEVER prod).
 
+- **Operator launch** (`webui/verify_launch.ps1`): reproduces the operator's *actual* launch —
+  starts `python -m webui.server` in PowerShell and HTTP-probes `/`, `/api/health`, `/api/inbox`,
+  `/api/projects`, `/api/runs`, `/api/loop-status` over the real DB. This is the check that catches
+  launch-path bugs (the earlier `/ -> 404`). Run: `pwsh -File webui\verify_launch.ps1`.
+
 CI: `.github/workflows/webui-ci.yml` runs the Python gates + Vitest + the mocked & live-backend E2E
 on every push/PR touching `supervisor/` or `webui/`.
+
+## Screens
+Home (Needs-You inbox — gates incl. paused-gate projects, stalls, budget breach, learnings,
+regressions, churn), Fleet (ALL projects: lifecycle + cost + runs + depends-on, row drill-down to
+events, pause/bump), Runs (past run history + cost), Improve (proposed→accepted→applied→measured
+kanban, with Adopt/Reject/Apply/**Roll back**), Effects, Spend (forecast + provision + prune),
+Events, Graph (depends_on chain), Actions (operator log). Topbar shows a **loop-status** banner
+("loop: active/idle — last activity N ago"); actions emit toasts; "investigate" navigates to the
+project drill-down.

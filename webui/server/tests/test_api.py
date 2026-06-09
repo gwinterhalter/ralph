@@ -53,6 +53,16 @@ class FakeRegistry:
              "lifecycle_state": "running", "attention_debt": 0, "depends_on": []},
             {"project_id": "p2", "display_name": "Proj Two", "folder_path": "p2",
              "lifecycle_state": "candidate", "attention_debt": 0, "depends_on": ["p1"]},
+            {"project_id": "p3", "display_name": "Proj Three", "folder_path": "p3",
+             "lifecycle_state": "complete", "attention_debt": 0, "depends_on": []},
+            {"project_id": "pg", "display_name": "Proj Gate", "folder_path": "pg",
+             "lifecycle_state": "paused_gate", "attention_debt": 1, "depends_on": []},
+        ]
+        self.completed_runs: list[dict[str, object]] = [
+            {"run_id": "r1", "project_id": "p3", "status": "complete", "terminal_cost_usd": "2.50",
+             "spawned_at": "2026-06-08T08:00:00+00:00", "terminated_at": "2026-06-08T09:00:00+00:00"},
+            {"run_id": "r2", "project_id": "p1", "status": "failed", "terminal_cost_usd": "0.00",
+             "spawned_at": "2026-06-08T07:00:00+00:00", "terminated_at": "2026-06-08T07:30:00+00:00"},
         ]
         self.cumulative_spend = Decimal("12.00")
         self.status_calls: list[tuple[str, str, str]] = []
@@ -66,6 +76,7 @@ class FakeRegistry:
     def read_audit_effects(self): return self.effects
     def read_correction_summary(self): return self.corrections_rows
     def read_learning_records(self): return self.learning_rows
+    def read_completed_runs(self): return self.completed_runs
     def read_cumulative_spend_usd(self): return self.cumulative_spend
 
     def read_events_db(self, *, project_id=None, event_type=None, limit=50):
@@ -307,10 +318,50 @@ def test_commands_lists_pending(client: tuple[TestClient, FakeRegistry]) -> None
     assert pending["count"] == 1 and pending["pending"][0]["command_type"] == "pause"
 
 
+def test_projects_lists_all_with_cost_and_runs(client: tuple[TestClient, FakeRegistry]) -> None:
+    c, _ = client
+    body = c.get("/api/projects").json()
+    by_id = {p["project_id"]: p for p in body["projects"]}
+    assert set(by_id) == {"p1", "p2", "p3", "pg"}            # ALL lifecycle states, not just active
+    assert by_id["p3"]["lifecycle_state"] == "complete" and by_id["p3"]["cost_usd"] == "2.50"
+    assert by_id["pg"]["lifecycle_state"] == "paused_gate"   # the otherwise-hidden one
+    assert by_id["p1"]["runs"] == 1
+
+
+def test_runs_history(client: tuple[TestClient, FakeRegistry]) -> None:
+    c, _ = client
+    body = c.get("/api/runs").json()
+    assert body["count"] == 2 and body["total_cost_usd"] == "2.50"
+    assert body["runs"][0]["terminated_at"] >= body["runs"][1]["terminated_at"]  # most recent first
+
+
+def test_loop_status_reports_last_activity(client: tuple[TestClient, FakeRegistry]) -> None:
+    c, _ = client
+    body = c.get("/api/loop-status").json()
+    assert "active_guess" in body and "seconds_since" in body
+
+
+def test_inbox_surfaces_paused_gate_project(client: tuple[TestClient, FakeRegistry]) -> None:
+    c, _ = client
+    cards = c.get("/api/inbox").json()["cards"]
+    gate = [card for card in cards if card["kind"] == "gate" and card["subject"] == "pg"]
+    assert gate and "investigate" in gate[0]["actions"]  # paused_gate project 'pg' is now visible
+
+
+def test_revert_records_request(client: tuple[TestClient, FakeRegistry]) -> None:
+    c, _ = client
+    c.post("/api/findings/session_shape:s/promote")  # exists; any status
+    r = c.post("/api/findings/session_shape:s/revert", json={"by": "greg"})
+    assert r.status_code == 200 and r.json()["state"] == "revert-requested"
+    acts = c.get("/api/actions").json()["actions"]
+    assert any(a["action"] == "revert-requested" for a in acts)
+    assert c.post("/api/findings/nope/revert").status_code == 404
+
+
 def test_graph_nodes_and_depends_on_edges(client: tuple[TestClient, FakeRegistry]) -> None:
     c, _ = client
     g = c.get("/api/graph").json()
-    assert {n["id"] for n in g["nodes"]} == {"p1", "p2"}
+    assert {"p1", "p2", "p3", "pg"} <= {n["id"] for n in g["nodes"]}
     assert {"from": "p2", "to": "p1"} in g["edges"]  # p2 depends_on p1
 
 

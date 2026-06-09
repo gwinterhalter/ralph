@@ -111,6 +111,25 @@ def test_lifecycle_gate_card_kept_when_no_request_file() -> None:
     assert cards[0].subject == "pg"
 
 
+def test_paused_gate_project_surfaces_even_when_absent_from_fleet() -> None:
+    # The live-found defect: a paused_gate project is neither candidate nor running (not in the
+    # snapshot) and has no gate file -> it must STILL raise an attention card.
+    projects = [{"project_id": "oltest_c2", "display_name": "oltest_c2", "lifecycle_state": "paused_gate"}]
+    cards = build_inbox(fleet_rows=[], projects=projects)
+    assert len(cards) == 1 and cards[0].kind == KIND_GATE
+    assert cards[0].subject == "oltest_c2" and "investigate" in cards[0].actions
+
+
+def test_paused_gate_not_double_counted_across_sources() -> None:
+    # same project in projects AND fleet AND a file -> exactly one gate card
+    projects = [{"project_id": "pg", "lifecycle_state": "paused_gate"}]
+    rows = [_row("pg", lifecycle="paused_gate")]
+    gates = [{"request_file": "gate_request_1_0.json", "gate_id": "g", "project_id": "pg",
+              "question_text": "q?", "options": [{"id": "yes"}]}]
+    cards = build_inbox(fleet_rows=rows, projects=projects, gates=gates)
+    assert len([c for c in cards if c.kind == KIND_GATE]) == 1
+
+
 def test_churn_threshold() -> None:
     corrections = [
         {"item_id": "OLB-07", "attempts": 5, "projects": 2, "max_level": "L4"},

@@ -55,6 +55,7 @@ class RegistryLike(Protocol):
     def read_audit_effects(self) -> Sequence[Mapping[str, object]]: ...
     def read_correction_summary(self) -> Sequence[Mapping[str, object]]: ...
     def read_learning_records(self) -> Sequence[Mapping[str, object]]: ...
+    def read_completed_runs(self) -> Sequence[Mapping[str, object]]: ...
     def read_cumulative_spend_usd(self) -> Decimal: ...
     def read_events_db(
         self, *, project_id: str | None = ..., event_type: str | None = ..., limit: int = ...
@@ -180,9 +181,22 @@ def create_app(
             effects=reg.read_audit_effects(),
             corrections=reg.read_correction_summary(),
             gates=gates.list_pending_gates(sdir),
+            projects=reg.read_all_projects(),  # surfaces paused_gate projects absent from the snapshot
             budget_breach=_budget_breach(reg),
         )
         return {"cards": [asdict(c) for c in cards], "count": len(cards)}, _snapshot_dict(snap)
+
+    def _cost_by_project(reg: RegistryLike) -> dict[str, Decimal]:
+        totals: dict[str, Decimal] = {}
+        for run in reg.read_completed_runs():
+            pid = str(run.get("project_id") or "")
+            raw = run.get("terminal_cost_usd")
+            try:
+                cost = Decimal(str(raw)) if raw is not None else Decimal("0")
+            except Exception:  # noqa: BLE001
+                cost = Decimal("0")
+            totals[pid] = totals.get(pid, Decimal("0")) + cost
+        return totals
 
     # ---- reads -------------------------------------------------------------------------------
 
@@ -237,6 +251,82 @@ def create_app(
             if isinstance(deps, (list, tuple)):
                 edges.extend({"from": pid, "to": str(d)} for d in deps)
         return {"nodes": nodes, "edges": edges}
+
+    @app.get("/api/projects")
+    def projects() -> dict[str, Any]:
+        """ALL projects (every lifecycle state) + per-project cumulative cost + run count — the full
+        fleet picture the active-only FR-058 snapshot omits (completed/failed/paused projects)."""
+        reg = registry_provider()
+        cost = _cost_by_project(reg)
+        runs_by_project: dict[str, int] = {}
+        for run in reg.read_completed_runs():
+            pid = str(run.get("project_id") or "")
+            runs_by_project[pid] = runs_by_project.get(pid, 0) + 1
+        out: list[dict[str, Any]] = []
+        for p in reg.read_all_projects():
+            pid = str(p.get("project_id"))
+            deps = p.get("depends_on")
+            out.append({
+                "project_id": pid,
+                "display_name": str(p.get("display_name") or pid),
+                "lifecycle_state": str(p.get("lifecycle_state") or ""),
+                "attention_debt": p.get("attention_debt") or 0,
+                "depends_on": list(deps) if isinstance(deps, (list, tuple)) else [],
+                "cost_usd": str(cost.get(pid, Decimal("0"))),
+                "runs": runs_by_project.get(pid, 0),
+            })
+        out.sort(key=lambda r: r["project_id"])
+        return {"projects": out, "count": len(out)}
+
+    @app.get("/api/runs")
+    def runs() -> dict[str, Any]:
+        """Past terminal runs (complete/failed) with cost + duration boundaries — closed activity."""
+        reg = registry_provider()
+        out = [
+            {
+                "run_id": str(r.get("run_id") or ""),
+                "project_id": str(r.get("project_id") or ""),
+                "status": str(r.get("status") or ""),
+                "cost_usd": str(r.get("terminal_cost_usd") or "0"),
+                "spawned_at": _jsonable(r.get("spawned_at")),
+                "terminated_at": _jsonable(r.get("terminated_at")),
+            }
+            for r in reg.read_completed_runs()
+        ]
+        out.sort(key=lambda r: str(r["terminated_at"] or ""), reverse=True)
+        total = sum((Decimal(str(r["cost_usd"] or "0")) for r in out), Decimal("0"))
+        return {"runs": out, "count": len(out), "total_cost_usd": str(total)}
+
+    @app.get("/api/loop-status")
+    def loop_status() -> dict[str, Any]:
+        """Heuristic 'is the supervisor loop active?' from the most-recent fleet activity (honest:
+        it reports last-activity, not a definitive process probe). The GUI is a window on the DB —
+        it does not run the loop."""
+        reg = registry_provider()
+        stamps: list[datetime] = []
+        try:
+            recent = list(reg.read_events_db(limit=1))
+            for e in recent:
+                ts = e.get("ts_utc")
+                if isinstance(ts, datetime):
+                    stamps.append(ts)
+        except Exception:  # noqa: BLE001
+            pass
+        for run in reg.read_completed_runs():
+            raw = run.get("terminated_at")
+            if isinstance(raw, str) and raw:
+                try:
+                    stamps.append(datetime.fromisoformat(raw.replace("Z", "+00:00")))
+                except ValueError:
+                    pass
+        if not stamps:
+            return {"last_activity": None, "seconds_since": None, "active_guess": False}
+        last = max(stamps)
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        secs = (datetime.now(timezone.utc) - last).total_seconds()
+        return {"last_activity": last.isoformat(), "seconds_since": int(secs),
+                "active_guess": secs < 600}
 
     @app.get("/api/gates")
     def list_gates() -> dict[str, Any]:
@@ -382,6 +472,22 @@ def create_app(
                    f"Ensure CLAUDE_SKILLS_DIR resolves /{finding.get('authoring_skill')}. "
                    f"Output tail: {output[-300:]}",
         )
+
+    @app.post("/api/findings/{finding_key}/revert")
+    def revert(finding_key: str, by: str = Body(default="operator", embed=True)) -> dict[str, object]:
+        """Operator rollback REQUEST for an applied learning (surface-only, D1): records the intent to
+        the action log + names the authoring skill to reverse it. Does NOT auto-undo — the change was
+        applied by a cf-* skill under review, so reversal is an operator-driven re-dispatch, not a
+        silent revert. The finding stays 'applied' (effect-measurement keys on it); the request is the
+        signal."""
+        reg = registry_provider()
+        finding = {str(f.get("finding_key")): f for f in reg.read_audit_findings()}.get(finding_key)
+        if finding is None:
+            raise HTTPException(status_code=404, detail=f"no finding {finding_key!r}")
+        skill = str(finding.get("authoring_skill") or "?")
+        _record("revert-requested", finding_key, by, f"route to {skill}")
+        return {"finding_key": finding_key, "state": "revert-requested",
+                "detail": f"recorded — reverse via {skill} (operator/CC), not auto-undone."}
 
     @app.post("/api/onramp-abs")
     def onramp_abs(

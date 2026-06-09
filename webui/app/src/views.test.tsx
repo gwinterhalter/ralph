@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { InboxView, ImproveView, EffectsView, SpendView, ActionsView, GraphView } from "./views";
-import type { InboxCard, Finding, EffectRow, Forecast, ActionRow, GraphNode, GraphEdge } from "./api";
+import { InboxView, ImproveView, EffectsView, SpendView, ActionsView, GraphView, FleetView, RunsView } from "./views";
+import type { InboxCard, Finding, EffectRow, Forecast, ActionRow, GraphNode, GraphEdge, ProjectRow, RunRow } from "./api";
 
 describe("InboxView", () => {
   it("shows the all-clear when there are no cards", () => {
@@ -34,13 +34,45 @@ describe("ImproveView", () => {
       { finding_key: "k2", outcome: "regressed", before_metric: 0.2, after_metric: 0.9,
         post_adoption_runs: 3 },
     ];
+    const revert = vi.fn();
     render(
       <ImproveView findings={findings} effects={effects}
-        onPromote={() => {}} onReject={() => {}} onApply={() => {}} />,
+        onPromote={() => {}} onReject={() => {}} onApply={() => {}} onRevert={revert} />,
     );
-    // proposed column has the Adopt action; applied card carries its measured effect
+    // proposed column has the Adopt action; applied card carries its measured effect + Roll back
     expect(screen.getByRole("button", { name: "Adopt" })).toBeInTheDocument();
     expect(screen.getByText("effect: regressed")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Roll back" })).toBeInTheDocument();
+  });
+
+  it("shows an explanatory empty state when there are no findings", () => {
+    render(<ImproveView findings={[]} effects={[]} onPromote={() => {}} onReject={() => {}} onApply={() => {}} onRevert={() => {}} />);
+    expect(screen.getByText(/No learnings captured yet/)).toBeInTheDocument();
+  });
+});
+
+describe("FleetView", () => {
+  it("shows ALL projects incl completed/failed with cost + lifecycle badge", () => {
+    const projects: ProjectRow[] = [
+      { project_id: "p1", display_name: "p1", lifecycle_state: "complete", attention_debt: 0, depends_on: [], cost_usd: "2.50", runs: 1 },
+      { project_id: "pg", display_name: "pg", lifecycle_state: "paused_gate", attention_debt: 1, depends_on: ["p1"], cost_usd: "0", runs: 0 },
+    ];
+    render(<FleetView projects={projects} snapshot={null} expandedId={null} rowEvents={[]}
+      onToggleRow={() => {}} onPause={() => {}} onBump={() => {}} />);
+    expect(screen.getByText("complete")).toBeInTheDocument();   // closed activity shown
+    expect(screen.getByText("paused_gate")).toBeInTheDocument();
+    expect(screen.getByText("$2.50")).toBeInTheDocument();      // per-project cost
+  });
+});
+
+describe("RunsView", () => {
+  it("lists past runs with cost", () => {
+    const runs: RunRow[] = [
+      { run_id: "r1", project_id: "p1", status: "complete", cost_usd: "2.50", spawned_at: "t0", terminated_at: "t1" },
+    ];
+    render(<RunsView runs={runs} totalCost="2.50" />);
+    expect(screen.getByText(/total \$2\.50/)).toBeInTheDocument();
+    expect(screen.getByText("complete")).toBeInTheDocument();
   });
 });
 

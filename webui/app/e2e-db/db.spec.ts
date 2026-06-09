@@ -14,10 +14,19 @@ test("real-DB console renders across tabs with zero runtime errors", async ({ pa
 
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Needs You" })).toBeVisible();
+  await page.screenshot({ path: "test-results/db-00-home.png", fullPage: true });
 
-  // Fleet — the real snapshot table renders (header present whether or not rows exist).
+  // Fleet — ALL real projects (incl your completed/failed/paused_gate), not just active.
   await page.getByRole("button", { name: "Fleet", exact: true }).click();
   await expect(page.getByRole("columnheader", { name: "Project" })).toBeVisible();
+  // your dev branch has 5 projects → the table has real rows (the "fleet is empty" fix).
+  await expect(page.locator("table.fleet tbody tr").first()).toBeVisible();
+  await page.screenshot({ path: "test-results/db-02-fleet.png", fullPage: true });
+
+  // Runs — your real past runs ($10.74 across 5).
+  await page.getByRole("button", { name: "Runs", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Run history" })).toBeVisible();
+  await page.screenshot({ path: "test-results/db-03-runs.png", fullPage: true });
 
   // Events — /api/events hit the real DB; the rollup ("<n> event(s)") always renders.
   await page.getByRole("button", { name: "Events", exact: true }).click();

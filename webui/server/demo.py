@@ -33,16 +33,13 @@ class _SeededRegistry:
         ]
 
     def read_candidates(self) -> Sequence[Mapping[str, object]]:
-        # oltest_c2 is a candidate (shows in Fleet); its gate is surfaced via the seeded
-        # gate_request file below, so resolving it cleanly removes the gate card.
-        return [{"project_id": "oltest_c2", "display_name": "oltest_c2", "lifecycle_state": "candidate",
-                 "attention_debt": 0}]
+        return [{"project_id": "abs_phase2", "display_name": "abs_phase2",
+                 "lifecycle_state": "candidate", "attention_debt": 0}]
 
     def read_running(self) -> Sequence[Mapping[str, object]]:
-        return [
-            {"project_id": "oltest_d2", "display_name": "oltest_d2", "lifecycle_state": "running",
-             "attention_debt": 0},
-        ]
+        # abs_phase1 carries the seeded gate (resolving removes that card) + the drill-down events.
+        return [{"project_id": "abs_phase1", "display_name": "abs_phase1",
+                 "lifecycle_state": "running", "attention_debt": 0}]
 
     def read_audit_findings(self) -> Sequence[Mapping[str, object]]:
         return self._findings
@@ -66,10 +63,24 @@ class _SeededRegistry:
              "lifecycle_state": "running", "attention_debt": 0, "depends_on": ["abs_phase0"]},
             {"project_id": "abs_phase2", "display_name": "abs_phase2", "folder_path": "abs_phase2",
              "lifecycle_state": "candidate", "attention_debt": 0, "depends_on": ["abs_phase1"]},
+            {"project_id": "oltest_old", "display_name": "oltest_old", "folder_path": "oltest_old",
+             "lifecycle_state": "failed", "attention_debt": 0, "depends_on": []},
+            {"project_id": "oltest_paused", "display_name": "oltest_paused", "folder_path": "oltest_paused",
+             "lifecycle_state": "paused_gate", "attention_debt": 1, "depends_on": []},
         ]
 
     def read_learning_records(self) -> Sequence[Mapping[str, object]]:
         return [{"project_slug": "oltest_d2", "cost_usd": "2.50"}]
+
+    def read_completed_runs(self) -> Sequence[Mapping[str, object]]:
+        return [
+            {"run_id": "rA", "project_id": "abs_phase0", "status": "complete",
+             "terminal_cost_usd": "2.76", "spawned_at": "2026-06-08T08:00:00+00:00",
+             "terminated_at": "2026-06-08T09:00:00+00:00"},
+            {"run_id": "rB", "project_id": "oltest_old", "status": "failed",
+             "terminal_cost_usd": "0.41", "spawned_at": "2026-06-07T10:00:00+00:00",
+             "terminated_at": "2026-06-07T10:20:00+00:00"},
+        ]
 
     def read_cumulative_spend_usd(self) -> Decimal:
         return Decimal("5.30")
@@ -87,8 +98,10 @@ class _SeededRegistry:
         self, *, project_id: str | None = None, event_type: str | None = None, limit: int = 50
     ) -> Sequence[Mapping[str, object]]:
         rows = [
-            {"ts_utc": "2026-06-08T10:00:00+00:00", "project_id": "oltest_c2", "role": "gate",
+            {"ts_utc": "2026-06-08T10:00:00+00:00", "project_id": "abs_phase1", "role": "gate",
              "event_type": "gate_fire", "subject_id": "abs-phase-boundary", "payload": {}},
+            {"ts_utc": "2026-06-08T09:30:00+00:00", "project_id": "abs_phase1", "role": "executor",
+             "event_type": "phase_complete", "subject_id": "plan", "payload": {}},
         ]
         if project_id is not None:
             rows = [r for r in rows if r["project_id"] == project_id]
@@ -112,7 +125,7 @@ def _seed_pending_gate(state_dir: Path) -> None:
         json.dumps({
             "gate_id": "abs-phase-boundary",
             "question_text": "proceed to Phase 1?",
-            "project_id": "oltest_c2",
+            "project_id": "abs_phase1",
             "options": [
                 {"id": "proceed", "label": "Proceed", "consequence": "advance to Phase 1"},
                 {"id": "hold", "label": "Hold", "consequence": "stay in Phase 0"},
