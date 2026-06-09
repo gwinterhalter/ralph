@@ -31,6 +31,10 @@ test.beforeEach(async ({ page }) => {
   );
   await page.route("**/api/events*", (r) => r.fulfill({ json: { events: [], metrics: { total: 0, failures: 0 } } }));
   await page.route("**/api/actions", (r) => r.fulfill({ json: { actions: [] } }));
+  await page.route("**/api/graph", (r) => r.fulfill({ json: { nodes: [], edges: [] } }));
+  await page.route("**/api/stream*", (r) =>
+    r.fulfill({ headers: { "content-type": "text/event-stream" }, body: "data: {}\n\n" }),
+  );
 });
 
 test("home renders the needs-you inbox and Adopt fires a promote POST", async ({ page }) => {

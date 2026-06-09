@@ -34,8 +34,8 @@ test("full console: real data renders, gate resolves, adopt round-trips, all tab
 
   // Fleet tab — real snapshot rows.
   await page.getByRole("button", { name: "Fleet", exact: true }).click();
-  await expect(page.getByRole("cell", { name: "oltest_c2" })).toBeVisible();
-  await expect(page.getByRole("cell", { name: "oltest_d2" })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "oltest_c2", exact: true })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "oltest_d2", exact: true })).toBeVisible();
   await page.screenshot({ path: "test-results/02-fleet.png", fullPage: true });
 
   // Improve tab — Adopt round-trips proposed→accepted via the real server.
@@ -54,8 +54,21 @@ test("full console: real data renders, gate resolves, adopt round-trips, all tab
 
   // Events tab — real events.
   await page.getByRole("button", { name: "Events", exact: true }).click();
-  await expect(page.getByText(/gate_fire/)).toBeVisible();
+  await expect(page.getByText(/gate_fire/).first()).toBeVisible();
   await page.screenshot({ path: "test-results/05-events.png", fullPage: true });
+
+  // Graph tab — real depends_on chain (abs_phase0 ← phase1 ← phase2).
+  await page.getByRole("button", { name: "Graph", exact: true }).click();
+  await expect(page.getByText("→ abs_phase1")).toBeVisible();          // phase2 depends_on phase1
+  await expect(page.getByText("level 2")).toBeVisible();               // layered by depth
+  await page.screenshot({ path: "test-results/07-graph.png", fullPage: true });
+
+  // Fleet row drill-down — expand oltest_c2 → its recent events load from the real API.
+  await page.getByRole("button", { name: "Fleet", exact: true }).click();
+  await page.getByRole("button", { name: "expand oltest_c2" }).click();
+  await expect(page.getByText("Recent events")).toBeVisible();
+  await expect(page.getByText(/gate_fire/).first()).toBeVisible();   // real event under the row
+  await page.screenshot({ path: "test-results/08-fleet-detail.png", fullPage: true });
 
   // Actions tab — every action we took was recorded (gate-resolve + promote).
   await page.getByRole("button", { name: "Actions", exact: true }).click();

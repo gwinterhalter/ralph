@@ -50,7 +50,9 @@ class FakeRegistry:
         ]
         self.projects: list[dict[str, object]] = [
             {"project_id": "p1", "display_name": "Proj One", "folder_path": "p1",
-             "lifecycle_state": "running", "attention_debt": 0},
+             "lifecycle_state": "running", "attention_debt": 0, "depends_on": []},
+            {"project_id": "p2", "display_name": "Proj Two", "folder_path": "p2",
+             "lifecycle_state": "candidate", "attention_debt": 0, "depends_on": ["p1"]},
         ]
         self.cumulative_spend = Decimal("12.00")
         self.status_calls: list[tuple[str, str, str]] = []
@@ -287,3 +289,30 @@ def test_commands_lists_pending(client: tuple[TestClient, FakeRegistry]) -> None
     c.post("/api/projects/p1/pause", json={"by": "greg"})
     pending = c.get("/api/commands").json()
     assert pending["count"] == 1 and pending["pending"][0]["command_type"] == "pause"
+
+
+def test_graph_nodes_and_depends_on_edges(client: tuple[TestClient, FakeRegistry]) -> None:
+    c, _ = client
+    g = c.get("/api/graph").json()
+    assert {n["id"] for n in g["nodes"]} == {"p1", "p2"}
+    assert {"from": "p2", "to": "p1"} in g["edges"]  # p2 depends_on p1
+
+
+def test_stream_pushes_inbox_and_fleet(client: tuple[TestClient, FakeRegistry]) -> None:
+    c, _ = client
+    with c.stream("GET", "/api/stream", params={"max_events": 1}) as r:
+        body = "".join(r.iter_text())
+    assert body.startswith("data: ")
+    payload = json.loads(body[len("data: "):].strip())
+    assert "inbox" in payload and "fleet" in payload
+    assert "cards" in payload["inbox"] and "rows" in payload["fleet"]
+
+
+def test_auth_required_when_token_set(tmp_path: Path) -> None:
+    reg = FakeRegistry()
+    c = TestClient(create_app(registry_provider=lambda: reg, state_dir=tmp_path, token="s3cret"))
+    assert c.get("/api/health").status_code == 200          # health is always open
+    assert c.get("/api/inbox").status_code == 401            # no token -> blocked
+    assert c.get("/api/inbox", headers={"Authorization": "Bearer s3cret"}).status_code == 200
+    assert c.get("/api/inbox", params={"token": "s3cret"}).status_code == 200   # SSE query path
+    assert c.get("/api/inbox", params={"token": "wrong"}).status_code == 401

@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { InboxView, ImproveView, EffectsView, SpendView, ActionsView } from "./views";
-import type { InboxCard, Finding, EffectRow, Forecast, ActionRow } from "./api";
+import { InboxView, ImproveView, EffectsView, SpendView, ActionsView, GraphView } from "./views";
+import type { InboxCard, Finding, EffectRow, Forecast, ActionRow, GraphNode, GraphEdge } from "./api";
 
 describe("InboxView", () => {
   it("shows the all-clear when there are no cards", () => {
@@ -67,6 +67,27 @@ describe("ActionsView", () => {
     render(<ActionsView actions={actions} />);
     expect(screen.getByText(/gate-resolve/)).toBeInTheDocument();
     expect(screen.getByText(/proceed/)).toBeInTheDocument();
+  });
+});
+
+describe("GraphView", () => {
+  it("renders nodes layered by depends_on depth with their edges", () => {
+    const nodes: GraphNode[] = [
+      { id: "abs_phase0", lifecycle_state: "complete" },
+      { id: "abs_phase1", lifecycle_state: "running" },
+      { id: "abs_phase2", lifecycle_state: "candidate" },
+    ];
+    const edges: GraphEdge[] = [
+      { from: "abs_phase1", to: "abs_phase0" },
+      { from: "abs_phase2", to: "abs_phase1" },
+    ];
+    render(<GraphView nodes={nodes} edges={edges} />);
+    expect(screen.getByText("abs_phase2")).toBeInTheDocument();
+    expect(screen.getByText("→ abs_phase1")).toBeInTheDocument();  // edge rendered
+    // phase2 (depth 2) sits in a deeper level than phase0 (depth 0)
+    const labels = screen.getAllByText(/level \d/).map((e) => e.textContent);
+    expect(labels).toContain("level 0");
+    expect(labels).toContain("level 2");
   });
 });
 

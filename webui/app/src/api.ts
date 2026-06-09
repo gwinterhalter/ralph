@@ -87,8 +87,17 @@ export interface EventRow {
 
 export interface ActionRow { ts: string; action: string; target: string; by: string; detail: string; }
 
+// Optional bearer token for the API. A local tool can't set headers on the page load, so we read
+// it from the URL (?token=…) once and reuse it on every fetch + the SSE URL. Unset = open server.
+const AUTH_TOKEN =
+  typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("token") : null;
+
+function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
+  return AUTH_TOKEN ? { ...extra, Authorization: `Bearer ${AUTH_TOKEN}` } : extra;
+}
+
 async function getJSON<T>(path: string): Promise<T> {
-  const res = await fetch(path);
+  const res = await fetch(path, { headers: authHeaders() });
   if (!res.ok) throw new Error(`${path} → ${res.status}`);
   return (await res.json()) as T;
 }
@@ -96,12 +105,15 @@ async function getJSON<T>(path: string): Promise<T> {
 async function post<T>(path: string, body: Record<string, unknown> = {}): Promise<T> {
   const res = await fetch(path, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`${path} → ${res.status}`);
   return (await res.json()) as T;
 }
+
+export interface GraphNode { id: string; lifecycle_state: string; }
+export interface GraphEdge { from: string; to: string; }
 
 export const api = {
   inbox: () => getJSON<{ cards: InboxCard[]; count: number }>("/api/inbox"),
@@ -121,6 +133,8 @@ export const api = {
     return getJSON<{ events: EventRow[]; metrics: { total: number; failures: number } }>(`/api/events?${q}`);
   },
   actions: () => getJSON<{ actions: ActionRow[] }>("/api/actions"),
+  graph: () => getJSON<{ nodes: GraphNode[]; edges: GraphEdge[] }>("/api/graph"),
+  streamUrl: () => "/api/stream" + (AUTH_TOKEN ? `?token=${encodeURIComponent(AUTH_TOKEN)}` : ""),
   pause: (projectId: string, by = "operator") =>
     post(`/api/projects/${encodeURIComponent(projectId)}/pause`, { by }),
   bumpBudget: (projectId: string, newCapUsd: string, by = "operator") =>

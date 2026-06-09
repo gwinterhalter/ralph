@@ -1,6 +1,6 @@
 // Presentational views — pure functions of props (no fetching), so they unit-test cleanly.
 import type {
-  InboxCard, FleetSnapshot, Finding, EffectRow, Forecast, EventRow, ActionRow,
+  InboxCard, FleetSnapshot, Finding, EffectRow, Forecast, EventRow, ActionRow, GraphNode, GraphEdge,
 } from "./api";
 
 const KIND_ICON: Record<string, string> = {
@@ -46,6 +46,9 @@ export function InboxView(props: {
 
 export function FleetView(props: {
   snapshot: FleetSnapshot | null;
+  expandedId: string | null;
+  rowEvents: EventRow[];
+  onToggleRow: (projectId: string) => void;
   onPause: (projectId: string) => void;
   onBump: (projectId: string) => void;
 }) {
@@ -55,23 +58,19 @@ export function FleetView(props: {
     <div>
       <table className="fleet" aria-label="Fleet">
         <thead>
-          <tr><th>Project</th><th>Lifecycle</th><th>Run</th><th>Attn</th><th>Open</th><th>Cost</th><th>♥</th><th></th></tr>
+          <tr><th></th><th>Project</th><th>Lifecycle</th><th>Run</th><th>Attn</th><th>Open</th><th>Cost</th><th>♥</th><th></th></tr>
         </thead>
         <tbody>
           {s.rows.map((r) => (
-            <tr key={r.project_id} data-stalled={r.heartbeat_state === "STALLED"}>
-              <td>{r.display_name}</td>
-              <td>{r.lifecycle_state}</td>
-              <td>{r.active_run_status}</td>
-              <td>{r.attention_debt}</td>
-              <td>{r.open_work_count}</td>
-              <td>${r.cumulative_cost_usd}</td>
-              <td>{r.heartbeat_state}</td>
-              <td>
-                <button onClick={() => props.onPause(r.project_id)}>Pause</button>
-                <button onClick={() => props.onBump(r.project_id)}>$</button>
-              </td>
-            </tr>
+            <FleetRow
+              key={r.project_id}
+              row={r}
+              expanded={props.expandedId === r.project_id}
+              events={props.expandedId === r.project_id ? props.rowEvents : []}
+              onToggle={() => props.onToggleRow(r.project_id)}
+              onPause={() => props.onPause(r.project_id)}
+              onBump={() => props.onBump(r.project_id)}
+            />
           ))}
         </tbody>
       </table>
@@ -79,6 +78,97 @@ export function FleetView(props: {
         Running {s.running_count}/{s.concurrency_ceiling} · headroom {s.headroom} · stalled{" "}
         {s.stalled_count} · total ${s.total_cumulative_cost_usd} (info)
       </p>
+    </div>
+  );
+}
+
+function FleetRow(props: {
+  row: FleetSnapshot["rows"][number];
+  expanded: boolean;
+  events: EventRow[];
+  onToggle: () => void;
+  onPause: () => void;
+  onBump: () => void;
+}) {
+  const r = props.row;
+  return (
+    <>
+      <tr data-stalled={r.heartbeat_state === "STALLED"}>
+        <td>
+          <button aria-label={`expand ${r.project_id}`} className="expander" onClick={props.onToggle}>
+            {props.expanded ? "▾" : "▸"}
+          </button>
+        </td>
+        <td>{r.display_name}</td><td>{r.lifecycle_state}</td><td>{r.active_run_status}</td>
+        <td>{r.attention_debt}</td><td>{r.open_work_count}</td><td>${r.cumulative_cost_usd}</td>
+        <td>{r.heartbeat_state}</td>
+        <td>
+          <button onClick={props.onPause}>Pause</button>
+          <button onClick={props.onBump}>$</button>
+        </td>
+      </tr>
+      {props.expanded && (
+        <tr className="detail-row">
+          <td></td>
+          <td colSpan={8}>
+            <div className="row-detail" aria-label={`detail ${r.project_id}`}>
+              <strong>Recent events</strong>
+              {props.events.length === 0 ? <p>No recent events.</p> : (
+                <ul className="events">
+                  {props.events.map((e, i) => (
+                    <li key={`${e.ts_utc}:${i}`}>
+                      <span className="e-ts">{e.ts_utc}</span> {e.role}/{e.event_type}
+                      {e.subject_id ? ` · ${e.subject_id}` : ""}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+export function GraphView(props: { nodes: GraphNode[]; edges: GraphEdge[] }) {
+  // Layered dependency view: depth = longest depends_on chain to a root. Each node lists what it
+  // depends on (the Item 1 cross-initiative gate edges). Pure + deterministic.
+  const depsOf = new Map<string, string[]>();
+  props.nodes.forEach((n) => depsOf.set(n.id, []));
+  props.edges.forEach((e) => depsOf.get(e.from)?.push(e.to));
+  const depth = (id: string, seen = new Set<string>()): number => {
+    if (seen.has(id)) return 0;
+    seen.add(id);
+    const ds = depsOf.get(id) ?? [];
+    return ds.length === 0 ? 0 : 1 + Math.max(...ds.map((d) => depth(d, seen)));
+  };
+  const levels: GraphNode[][] = [];
+  props.nodes.forEach((n) => {
+    const lvl = depth(n.id);
+    (levels[lvl] ??= []).push(n);
+  });
+  return (
+    <div>
+      <h2>Dependency graph</h2>
+      {props.nodes.length === 0 ? <p>No projects.</p> : (
+        <div className="graph" aria-label="Dependency graph">
+          {levels.map((nodesAtLevel, lvl) => (
+            <div key={lvl} className="graph-level">
+              <div className="graph-level-label">level {lvl}</div>
+              {nodesAtLevel.map((n) => (
+                <div key={n.id} className={`graph-node lc-${n.lifecycle_state}`} data-node={n.id}>
+                  <div className="gn-id">{n.id}</div>
+                  <div className="gn-state">{n.lifecycle_state}</div>
+                  {(depsOf.get(n.id) ?? []).length > 0 && (
+                    <div className="gn-deps">→ {(depsOf.get(n.id) ?? []).join(", ")}</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

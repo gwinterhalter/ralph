@@ -26,9 +26,15 @@ resolution writes a real `gate_response_*.json`; `apply` actually dispatches the
 (injectable; guarded against false success); every action is recorded to the operator action log;
 the budget-breach card wires `read_cumulative_spend_usd` vs `OL_SUPERVISOR_BUDGET_CEILING_USD`.
 
-Still future: SSE live-push (the UI polls every 5s), a browser-through-real-DB E2E (the live E2E
-uses a seeded in-memory registry), the dependency-graph view, fleet-row drill-down, and CI wiring
-for the JS/Playwright tests.
+**Live push (SSE):** the UI no longer polls — it subscribes to `GET /api/stream` (Server-Sent
+Events) and the server pushes `{inbox, fleet}` every few seconds. **Graph** tab renders the project
+`depends_on` chain (layered by depth). **Fleet** rows expand to a per-project recent-events
+drill-down. **Auth:** set `OL_SUPERVISOR_WEBUI_TOKEN` and every `/api/*` route except `/api/health`
+requires it via `Authorization: Bearer <token>` or `?token=` (open by default — localhost
+single-operator assumption); the UI reads the token from its own `?token=` URL param.
+
+Still future: richer graph layout (a real graph lib), per-run cost drill-down, multi-initiative
+grouping.
 
 ## Run
 
@@ -65,6 +71,12 @@ Two E2E modes:
   Python server nor a DB; verifies the browser render + interaction + fetch wiring fast.
 - **Live backend** (`e2e-live/live.spec.ts`): drives the UI against the REAL FastAPI server
   (`webui.server.demo`) over a seeded in-memory registry — NO mocking. Proves the genuine
-  UI ↔ API ↔ pure-core JSON contract and a full action round-trip (Adopt → real `/promote` →
-  the finding moves proposed→accepted in the UI). The server static-mounts the built UI, so it
-  needs `npm run build` first (the config's webServer runs uvicorn against `dist`).
+  UI ↔ API ↔ pure-core JSON contract and full action round-trips (gate resolve, Adopt
+  proposed→accepted, Spend/Events/Graph/Actions, fleet drill-down). `npm run build` first.
+- **Real DB** (`e2e-db/db.spec.ts`, opt-in): drives the UI against the REAL app wired to the live
+  Registry → the actual database. Read-only; proves the UI ↔ API ↔ Registry ↔ DB path through the
+  browser. Needs the disposable-branch DSN:
+  `$env:OL_SUPERVISOR_DB_URL="<dev DSN>"; npx playwright test -c playwright.db.config.ts` (NEVER prod).
+
+CI: `.github/workflows/webui-ci.yml` runs the Python gates + Vitest + the mocked & live-backend E2E
+on every push/PR touching `supervisor/` or `webui/`.

@@ -60,10 +60,12 @@ class _SeededRegistry:
 
     def read_all_projects(self) -> Sequence[Mapping[str, object]]:
         return [
-            {"project_id": "oltest_c2", "display_name": "oltest_c2", "folder_path": "oltest_c2",
-             "lifecycle_state": "paused_gate", "attention_debt": 1},
-            {"project_id": "oltest_d2", "display_name": "oltest_d2", "folder_path": "oltest_d2",
-             "lifecycle_state": "running", "attention_debt": 0},
+            {"project_id": "abs_phase0", "display_name": "abs_phase0", "folder_path": "abs_phase0",
+             "lifecycle_state": "complete", "attention_debt": 0, "depends_on": []},
+            {"project_id": "abs_phase1", "display_name": "abs_phase1", "folder_path": "abs_phase1",
+             "lifecycle_state": "running", "attention_debt": 0, "depends_on": ["abs_phase0"]},
+            {"project_id": "abs_phase2", "display_name": "abs_phase2", "folder_path": "abs_phase2",
+             "lifecycle_state": "candidate", "attention_debt": 0, "depends_on": ["abs_phase1"]},
         ]
 
     def read_learning_records(self) -> Sequence[Mapping[str, object]]:

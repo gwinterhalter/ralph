@@ -51,3 +51,17 @@ table.fleet { border-collapse: collapse; width: 100%; max-width: 900px; backgrou
 .e-ts { color: #64748b; font-variant-numeric: tabular-nums; }
 .admin-actions { margin-top: 16px; display: flex; gap: 8px; }
 .admin-actions button { padding: 6px 14px; border: 1px solid #cbd5e1; background: #fff; border-radius: 6px; cursor: pointer; }
+.expander { border: 0; background: transparent; cursor: pointer; font-size: 1em; }
+.detail-row td { background: #f8fafc; }
+.row-detail { padding: 6px 4px; }
+.graph { display: flex; gap: 24px; align-items: flex-start; overflow-x: auto; padding: 8px 0; }
+.graph-level { display: flex; flex-direction: column; gap: 10px; min-width: 150px; }
+.graph-level-label { font-size: 0.75em; text-transform: uppercase; color: #94a3b8; }
+.graph-node { background: #fff; border: 1px solid #cbd5e1; border-radius: 8px; padding: 8px 10px; box-shadow: 0 1px 2px rgba(0,0,0,.06); }
+.graph-node.lc-complete { border-left: 4px solid #22c55e; }
+.graph-node.lc-running { border-left: 4px solid #3b82f6; }
+.graph-node.lc-candidate { border-left: 4px solid #94a3b8; }
+.graph-node.lc-paused_gate { border-left: 4px solid #ef4444; }
+.gn-id { font-weight: 600; }
+.gn-state { font-size: 0.8em; color: #64748b; }
+.gn-deps { font-size: 0.8em; color: #2563eb; margin-top: 4px; }

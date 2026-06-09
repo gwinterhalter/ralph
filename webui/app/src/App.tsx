@@ -1,9 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "./api";
-import type { InboxCard, FleetSnapshot, Finding, EffectRow, Forecast, EventRow, ActionRow } from "./api";
-import { InboxView, FleetView, ImproveView, EffectsView, SpendView, EventsView, ActionsView } from "./views";
+import type {
+  InboxCard, FleetSnapshot, Finding, EffectRow, Forecast, EventRow, ActionRow, GraphNode, GraphEdge,
+} from "./api";
+import {
+  InboxView, FleetView, ImproveView, EffectsView, SpendView, EventsView, ActionsView, GraphView,
+} from "./views";
 
-type Tab = "home" | "fleet" | "improve" | "effects" | "spend" | "events" | "actions";
+type Tab = "home" | "fleet" | "improve" | "effects" | "spend" | "events" | "graph" | "actions";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "home", label: "Home" },
@@ -12,6 +16,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "effects", label: "Effects" },
   { id: "spend", label: "Spend" },
   { id: "events", label: "Events" },
+  { id: "graph", label: "Graph" },
   { id: "actions", label: "Actions" },
 ];
 
@@ -26,44 +31,61 @@ export default function App() {
   const [events, setEvents] = useState<EventRow[]>([]);
   const [eventMeta, setEventMeta] = useState<{ total: number; failures: number }>({ total: 0, failures: 0 });
   const [actions, setActions] = useState<ActionRow[]>([]);
+  const [graph, setGraph] = useState<{ nodes: GraphNode[]; edges: GraphEdge[] }>({ nodes: [], edges: [] });
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [rowEvents, setRowEvents] = useState<EventRow[]>([]);
   const [error, setError] = useState<string | null>(null);
 
-  const refresh = useCallback(async () => {
+  // The slow-changing data (everything except the live inbox/fleet, which arrive via SSE).
+  const loadAll = useCallback(async () => {
     try {
       setError(null);
-      const [inbox, fl, learn, eff, fc, ev, acts] = await Promise.all([
-        api.inbox(), api.fleet(), api.learnings(), api.effects(), api.forecast(), api.events(), api.actions(),
+      const [inbox, fl, learn, eff, fc, ev, acts, gr] = await Promise.all([
+        api.inbox(), api.fleet(), api.learnings(), api.effects(), api.forecast(), api.events(),
+        api.actions(), api.graph(),
       ]);
-      setCards(inbox.cards);
-      setFleet(fl);
-      setFindings(learn.findings);
-      setEffects(eff.effects);
-      setByOutcome(eff.by_outcome);
-      setForecast(fc);
-      setEvents(ev.events);
-      setEventMeta(ev.metrics);
-      setActions(acts.actions);
+      setCards(inbox.cards); setFleet(fl);
+      setFindings(learn.findings); setEffects(eff.effects); setByOutcome(eff.by_outcome);
+      setForecast(fc); setEvents(ev.events); setEventMeta(ev.metrics);
+      setActions(acts.actions); setGraph(gr);
     } catch (e) {
       setError(String(e));
     }
   }, []);
 
   useEffect(() => {
-    void refresh();
-    const t = setInterval(() => void refresh(), 5000);
-    return () => clearInterval(t);
-  }, [refresh]);
+    void loadAll();
+    // Live push for the inbox + fleet (replaces client polling).
+    const es = new EventSource(api.streamUrl());
+    es.onmessage = (m) => {
+      try {
+        const payload = JSON.parse(m.data) as { inbox: { cards: InboxCard[] }; fleet: FleetSnapshot };
+        setCards(payload.inbox.cards);
+        setFleet(payload.fleet);
+      } catch { /* ignore a malformed frame */ }
+    };
+    es.onerror = () => { /* EventSource auto-reconnects; transient errors are normal */ };
+    return () => es.close();
+  }, [loadAll]);
+
+  const toggleRow = useCallback(async (projectId: string) => {
+    if (expandedId === projectId) { setExpandedId(null); return; }
+    try {
+      const ev = await api.events(projectId, undefined, 10);
+      setRowEvents(ev.events);
+      setExpandedId(projectId);
+    } catch (e) { setError(String(e)); }
+  }, [expandedId]);
 
   const onCardAction = useCallback(
     async (card: InboxCard, action: string) => {
       if (card.kind === "gate" && action !== "details") await api.resolveGate(card.subject, action);
       else if (card.kind === "learning" && action === "adopt") await api.promote(card.subject);
       else if (card.kind === "learning" && action === "reject") await api.reject(card.subject);
-      else if (card.kind === "stall" && action === "pause") await api.pause(card.subject);
-      else if (card.kind === "budget" && action === "pause") await api.pause(card.subject);
-      await refresh();
+      else if ((card.kind === "stall" || card.kind === "budget") && action === "pause") await api.pause(card.subject);
+      await loadAll();
     },
-    [refresh],
+    [loadAll],
   );
 
   return (
@@ -91,10 +113,13 @@ export default function App() {
         {tab === "fleet" && (
           <FleetView
             snapshot={fleet}
-            onPause={(p) => void api.pause(p).then(refresh)}
+            expandedId={expandedId}
+            rowEvents={rowEvents}
+            onToggleRow={(p) => void toggleRow(p)}
+            onPause={(p) => void api.pause(p).then(loadAll)}
             onBump={(p) => {
               const cap = window.prompt(`New budget cap (USD) for ${p}?`);
-              if (cap) void api.bumpBudget(p, cap).then(refresh);
+              if (cap) void api.bumpBudget(p, cap).then(loadAll);
             }}
           />
         )}
@@ -102,9 +127,9 @@ export default function App() {
           <ImproveView
             findings={findings}
             effects={effects}
-            onPromote={(k) => void api.promote(k).then(refresh)}
-            onReject={(k) => void api.reject(k).then(refresh)}
-            onApply={(k) => void api.apply(k).then(refresh).catch((e) => setError(String(e)))}
+            onPromote={(k) => void api.promote(k).then(loadAll)}
+            onReject={(k) => void api.reject(k).then(loadAll)}
+            onApply={(k) => void api.apply(k).then(loadAll).catch((e) => setError(String(e)))}
           />
         )}
         {tab === "effects" && <EffectsView effects={effects} byOutcome={byOutcome} />}
@@ -113,15 +138,16 @@ export default function App() {
             forecast={forecast}
             onProvision={() => {
               if (window.confirm("Provision the ABS Phase 0→1→2 chain as candidate projects?"))
-                void api.onramp(true).then(refresh);
+                void api.onramp(true).then(loadAll);
             }}
             onPrune={(days) => {
               if (window.confirm(`Delete events older than ${days} days?`))
-                void api.prune(days).then(refresh);
+                void api.prune(days).then(loadAll);
             }}
           />
         )}
         {tab === "events" && <EventsView events={events} total={eventMeta.total} failures={eventMeta.failures} />}
+        {tab === "graph" && <GraphView nodes={graph.nodes} edges={graph.edges} />}
         {tab === "actions" && <ActionsView actions={actions} />}
       </main>
     </div>

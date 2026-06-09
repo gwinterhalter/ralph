@@ -23,8 +23,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Protocol
 
-from fastapi import Body, FastAPI, HTTPException, Query
-from fastapi.responses import JSONResponse
+from fastapi import Body, FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from supervisor.abs_onramp import abs_chain_plan
 from supervisor.candidate_enrichment import open_work_counts_for
@@ -137,14 +137,29 @@ def create_app(
     static_dir: str | Path | None = None,
     allow_apply: bool = True,
     dispatcher: Dispatcher = _default_dispatcher,
+    token: str | None = None,
 ) -> FastAPI:
     """Build the API. ``registry_provider`` is called per request (inject a fake in tests).
 
     ``state_dir`` is where command/gate JSONs + the action log are written (default:
     OL_SUPERVISOR_STATE_DIR or '.'). ``allow_apply`` gates the dispatch-to-skill endpoint;
-    ``dispatcher`` runs the apply argv (default spawns ``claude``)."""
-    app = FastAPI(title="Outer Loop Supervisor — Control Panel", version="1.1")
+    ``dispatcher`` runs the apply argv (default spawns ``claude``). ``token`` (default:
+    OL_SUPERVISOR_WEBUI_TOKEN) — when set, every ``/api/*`` route except ``/api/health`` requires it
+    via ``Authorization: Bearer <token>`` or a ``?token=`` query param (the SSE/EventSource path).
+    Unset = open (the localhost single-operator assumption)."""
+    app = FastAPI(title="Outer Loop Supervisor — Control Panel", version="1.2")
     sdir = Path(state_dir or os.environ.get("OL_SUPERVISOR_STATE_DIR", "."))
+    auth_token = token if token is not None else os.environ.get("OL_SUPERVISOR_WEBUI_TOKEN")
+
+    @app.middleware("http")
+    async def _auth(request: Request, call_next: Callable[[Request], Any]) -> Any:
+        path = request.url.path
+        if auth_token and path.startswith("/api/") and path != "/api/health":
+            header = request.headers.get("authorization", "")
+            supplied = header[7:] if header.startswith("Bearer ") else request.query_params.get("token")
+            if supplied != auth_token:
+                return JSONResponse({"detail": "unauthorized"}, status_code=401)
+        return await call_next(request)
 
     def _now_iso() -> str:
         return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -156,21 +171,8 @@ def create_app(
         except OSError:
             pass
 
-    # ---- reads -------------------------------------------------------------------------------
-
-    @app.get("/api/health")
-    def health() -> dict[str, object]:
-        return {"ok": True, "db_configured": bool(os.environ.get("OL_SUPERVISOR_DB_URL"))}
-
-    @app.get("/api/fleet")
-    def fleet() -> dict[str, Any]:
-        reg = registry_provider()
-        snap = build_full_fleet_snapshot(reg, now=datetime.now(timezone.utc))  # type: ignore[arg-type]
-        return _snapshot_dict(snap)
-
-    @app.get("/api/inbox")
-    def inbox() -> dict[str, Any]:
-        reg = registry_provider()
+    def _inbox_payload(reg: RegistryLike) -> tuple[dict[str, Any], dict[str, Any]]:
+        """(inbox, fleet) dicts from one snapshot — shared by /api/inbox, /api/fleet, /api/stream."""
         snap = build_full_fleet_snapshot(reg, now=datetime.now(timezone.utc))  # type: ignore[arg-type]
         cards = build_inbox(
             fleet_rows=snap.rows,
@@ -180,7 +182,61 @@ def create_app(
             gates=gates.list_pending_gates(sdir),
             budget_breach=_budget_breach(reg),
         )
-        return {"cards": [asdict(c) for c in cards], "count": len(cards)}
+        return {"cards": [asdict(c) for c in cards], "count": len(cards)}, _snapshot_dict(snap)
+
+    # ---- reads -------------------------------------------------------------------------------
+
+    @app.get("/api/health")
+    def health() -> dict[str, object]:
+        return {"ok": True, "db_configured": bool(os.environ.get("OL_SUPERVISOR_DB_URL"))}
+
+    @app.get("/api/fleet")
+    def fleet() -> dict[str, Any]:
+        _, fl = _inbox_payload(registry_provider())
+        return fl
+
+    @app.get("/api/inbox")
+    def inbox() -> dict[str, Any]:
+        ib, _ = _inbox_payload(registry_provider())
+        return ib
+
+    @app.get("/api/stream")
+    def stream(
+        interval: float = Query(default=5.0, ge=0.5, le=60.0),
+        max_events: int | None = Query(default=None, ge=1),
+    ) -> StreamingResponse:
+        """Server-Sent Events: push {inbox, fleet} every ``interval`` s (replaces client polling).
+
+        ``max_events`` bounds the stream (tests pass 1); unbounded by default until the client
+        disconnects. The sync generator is iterated in Starlette's threadpool, so the sleep + sync
+        DB reads don't block the event loop."""
+        def gen() -> "Any":
+            import time  # noqa: PLC0415
+
+            count = 0
+            while True:
+                ib, fl = _inbox_payload(registry_provider())
+                yield f"data: {json.dumps({'inbox': ib, 'fleet': fl})}\n\n"
+                count += 1
+                if max_events is not None and count >= max_events:
+                    return
+                time.sleep(interval)
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    @app.get("/api/graph")
+    def graph() -> dict[str, Any]:
+        """Project dependency graph (Item 1 ``depends_on`` edges) for the graph view."""
+        reg = registry_provider()
+        nodes: list[dict[str, object]] = []
+        edges: list[dict[str, str]] = []
+        for p in reg.read_all_projects():
+            pid = str(p.get("project_id"))
+            nodes.append({"id": pid, "lifecycle_state": str(p.get("lifecycle_state") or "")})
+            deps = p.get("depends_on")
+            if isinstance(deps, (list, tuple)):
+                edges.extend({"from": pid, "to": str(d)} for d in deps)
+        return {"nodes": nodes, "edges": edges}
 
     @app.get("/api/gates")
     def list_gates() -> dict[str, Any]:
