@@ -135,6 +135,31 @@ def _seed_pending_gate(state_dir: Path) -> None:
     )
 
 
+class _DemoRunner:
+    """In-memory loop runner — the demo/E2E exercises Start/Stop/Run-once WITHOUT spawning a real
+    supervisor (no real orchestrators, no $)."""
+
+    def __init__(self) -> None:
+        self._running = False
+
+    def run_once(self) -> int:
+        return 1111
+
+    def start_loop(self, interval: float = 30.0) -> int:
+        if self._running:
+            raise RuntimeError("supervisor loop already running")
+        self._running = True
+        return 2222
+
+    def stop_loop(self) -> bool:
+        was = self._running
+        self._running = False
+        return was
+
+    def loop_running(self) -> bool:
+        return self._running
+
+
 _STATE_DIR = Path(os.environ.get("OL_SUPERVISOR_STATE_DIR", "."))
 _seed_pending_gate(_STATE_DIR)
 _REGISTRY = _SeededRegistry()
@@ -143,4 +168,5 @@ app = create_app(
     registry_provider=lambda: _REGISTRY,
     state_dir=_STATE_DIR,
     static_dir=os.environ.get("OL_SUPERVISOR_WEBUI_STATIC"),
+    runner=_DemoRunner(),
 )

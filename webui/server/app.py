@@ -40,6 +40,7 @@ from supervisor.cost_forecast import forecast_fleet
 from supervisor.full_status_surface import FullFleetSnapshot, build_full_fleet_snapshot
 from supervisor.inbox import build_inbox
 from webui.server import audit_log, gates
+from webui.server.supervisor_control import SupervisorRunner
 
 #: argv -> (returncode, stdout). The apply dispatcher; injected in tests (default spawns claude).
 Dispatcher = Callable[[list[str]], "tuple[int, str]"]
@@ -139,6 +140,8 @@ def create_app(
     allow_apply: bool = True,
     dispatcher: Dispatcher = _default_dispatcher,
     token: str | None = None,
+    runner: "SupervisorRunner | Any | None" = None,
+    allow_supervisor_control: bool = True,
 ) -> FastAPI:
     """Build the API. ``registry_provider`` is called per request (inject a fake in tests).
 
@@ -148,9 +151,24 @@ def create_app(
     OL_SUPERVISOR_WEBUI_TOKEN) — when set, every ``/api/*`` route except ``/api/health`` requires it
     via ``Authorization: Bearer <token>`` or a ``?token=`` query param (the SSE/EventSource path).
     Unset = open (the localhost single-operator assumption)."""
-    app = FastAPI(title="Outer Loop Supervisor — Control Panel", version="1.2")
+    app = FastAPI(title="Outer Loop Supervisor — Control Panel", version="1.3")
     sdir = Path(state_dir or os.environ.get("OL_SUPERVISOR_STATE_DIR", "."))
     auth_token = token if token is not None else os.environ.get("OL_SUPERVISOR_WEBUI_TOKEN")
+    repo_root = Path(__file__).resolve().parent.parent.parent  # ...\Ralph-dev
+    sup_runner = runner if runner is not None else SupervisorRunner(repo_root, sdir / "supervisor_loop.pid")
+
+    def _gate_dirs(reg: RegistryLike) -> list[Path]:
+        """The supervisor state dir + each project's own state dir (real fleets keep per-project
+        gate files at <workspace_root>/<folder_path>/state/)."""
+        dirs = [sdir]
+        root = os.environ.get("OL_SUPERVISOR_WORKSPACE_ROOT")
+        if root:
+            for p in reg.read_all_projects():
+                folder = p.get("folder_path")
+                if isinstance(folder, str) and folder:
+                    fp = Path(folder)
+                    dirs.append((fp if fp.is_absolute() else Path(root) / fp) / "state")
+        return dirs
 
     @app.middleware("http")
     async def _auth(request: Request, call_next: Callable[[Request], Any]) -> Any:
@@ -180,8 +198,8 @@ def create_app(
             findings=reg.read_audit_findings(),
             effects=reg.read_audit_effects(),
             corrections=reg.read_correction_summary(),
-            gates=gates.list_pending_gates(sdir),
-            projects=reg.read_all_projects(),  # surfaces paused_gate projects absent from the snapshot
+            gates=gates.list_pending_gates(_gate_dirs(reg)),
+            projects=reg.read_all_projects(),  # surfaces paused_gate/failed projects absent from the snapshot
             budget_breach=_budget_breach(reg),
         )
         return {"cards": [asdict(c) for c in cards], "count": len(cards)}, _snapshot_dict(snap)
@@ -319,18 +337,20 @@ def create_app(
                     stamps.append(datetime.fromisoformat(raw.replace("Z", "+00:00")))
                 except ValueError:
                     pass
+        managed = bool(sup_runner.loop_running())
         if not stamps:
-            return {"last_activity": None, "seconds_since": None, "active_guess": False}
+            return {"last_activity": None, "seconds_since": None, "active_guess": managed,
+                    "managed_running": managed}
         last = max(stamps)
         if last.tzinfo is None:
             last = last.replace(tzinfo=timezone.utc)
         secs = (datetime.now(timezone.utc) - last).total_seconds()
         return {"last_activity": last.isoformat(), "seconds_since": int(secs),
-                "active_guess": secs < 600}
+                "active_guess": managed or secs < 600, "managed_running": managed}
 
     @app.get("/api/gates")
     def list_gates() -> dict[str, Any]:
-        return {"gates": gates.list_pending_gates(sdir)}
+        return {"gates": gates.list_pending_gates(_gate_dirs(registry_provider()))}
 
     @app.get("/api/learnings")
     def learnings(status: str | None = Query(default=None)) -> dict[str, Any]:
@@ -415,22 +435,22 @@ def create_app(
 
     @app.post("/api/gates/resolve")
     def resolve_gate(
-        request_file: str = Body(embed=True),
+        request_path: str = Body(embed=True),
         selected_option: str = Body(embed=True),
         reasoning: str = Body(default="", embed=True),
         by: str = Body(default="operator", embed=True),
     ) -> dict[str, object]:
         try:
             out = gates.write_gate_response(
-                sdir, request_file, selected_option=selected_option,
+                request_path, selected_option=selected_option,
                 reasoning=reasoning or f"operator decision via control panel ({by})",
             )
         except FileNotFoundError:
-            raise HTTPException(status_code=404, detail=f"no pending gate {request_file!r}") from None
+            raise HTTPException(status_code=404, detail=f"no pending gate {request_path!r}") from None
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from None
-        _record("gate-resolve", request_file, by, selected_option)
-        return {"request_file": request_file, "selected_option": selected_option,
+        _record("gate-resolve", Path(request_path).name, by, selected_option)
+        return {"request_path": request_path, "selected_option": selected_option,
                 "response_file": out.name, "state": "written"}
 
     @app.post("/api/findings/{finding_key}/promote")
@@ -516,6 +536,47 @@ def create_app(
         deleted = reg.prune_events(before_iso=cutoff)
         _record("events-prune", f"{days}d", by, f"deleted {deleted}")
         return {"deleted": deleted, "before": cutoff}
+
+    @app.post("/api/commands/query")
+    def query_register(by: str = Body(default="operator", embed=True)) -> dict[str, object]:
+        """Queue a query_register_state command (CLI `query` parity)."""
+        cid = f"query_{uuid.uuid4().hex[:12]}"
+        write_command(sdir, "query_register_state", command_id=cid, issued_by=by, issued_at=_now_iso())
+        _record("query", "register", by, cid)
+        return {"command_id": cid, "state": "queued"}
+
+    # ---- supervisor loop control (SPAWNS REAL WORK — gated + confirmed in the UI) -------------
+
+    def _require_control() -> None:
+        if not allow_supervisor_control:
+            raise HTTPException(status_code=403, detail="supervisor control is disabled on this server.")
+
+    @app.post("/api/supervisor/run-once")
+    def supervisor_run_once(by: str = Body(default="operator", embed=True)) -> dict[str, object]:
+        _require_control()
+        pid = sup_runner.run_once()
+        _record("supervisor-run-once", "fleet", by, f"pid {pid}")
+        return {"started": True, "pid": pid, "mode": "once"}
+
+    @app.post("/api/supervisor/start")
+    def supervisor_start(
+        interval: float = Query(default=30.0, ge=1.0, le=3600.0),
+        by: str = Body(default="operator", embed=True),
+    ) -> dict[str, object]:
+        _require_control()
+        try:
+            pid = sup_runner.start_loop(interval)
+        except RuntimeError as e:
+            raise HTTPException(status_code=409, detail=str(e)) from None
+        _record("supervisor-start", "fleet", by, f"pid {pid} interval {interval}s")
+        return {"started": True, "pid": pid, "mode": "loop", "interval": interval}
+
+    @app.post("/api/supervisor/stop")
+    def supervisor_stop(by: str = Body(default="operator", embed=True)) -> dict[str, object]:
+        _require_control()
+        stopped = sup_runner.stop_loop()
+        _record("supervisor-stop", "fleet", by, "stopped" if stopped else "none-tracked")
+        return {"stopped": stopped}
 
     if static_dir is not None and Path(static_dir).is_dir():
         from fastapi.staticfiles import StaticFiles  # noqa: PLC0415 - only when serving a built UI

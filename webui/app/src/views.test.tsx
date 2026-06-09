@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { InboxView, ImproveView, EffectsView, SpendView, ActionsView, GraphView, FleetView, RunsView } from "./views";
-import type { InboxCard, Finding, EffectRow, Forecast, ActionRow, GraphNode, GraphEdge, ProjectRow, RunRow } from "./api";
+import { InboxView, ImproveView, EffectsView, SpendView, ActionsView, GraphView, FleetView, RunsView, SupervisorControls } from "./views";
+import type { InboxCard, Finding, EffectRow, Forecast, ActionRow, GraphNode, GraphEdge, ProjectRow, RunRow, LoopStatus } from "./api";
 
 describe("InboxView", () => {
   it("shows the all-clear when there are no cards", () => {
@@ -84,7 +84,7 @@ describe("SpendView", () => {
       fleet_spent_usd: "5.00", fleet_projected_remaining_usd: "10.00", fleet_projected_total_usd: "15.00",
     };
     const provision = vi.fn();
-    render(<SpendView forecast={forecast} onProvision={provision} onPrune={() => {}} />);
+    render(<SpendView forecast={forecast} onProvision={provision} onPrune={() => {}} onQuery={() => {}} />);
     expect(screen.getByText(/projected total \$15\.00/)).toBeInTheDocument();
     expect(screen.getByRole("cell", { name: "per_item" })).toBeInTheDocument();
   });
@@ -99,6 +99,29 @@ describe("ActionsView", () => {
     render(<ActionsView actions={actions} />);
     expect(screen.getByText(/gate-resolve/)).toBeInTheDocument();
     expect(screen.getByText(/proceed/)).toBeInTheDocument();
+  });
+});
+
+describe("SupervisorControls", () => {
+  const loop = (managed: boolean): LoopStatus => ({ last_activity: null, seconds_since: null, active_guess: managed, managed_running: managed });
+
+  it("shows Start when stopped and fires onStart", async () => {
+    const onStart = vi.fn();
+    render(<SupervisorControls loop={loop(false)} onRunOnce={() => {}} onStart={onStart} onStop={() => {}} />);
+    expect(screen.getByText("○ loop stopped")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Start loop" }));
+    expect(onStart).toHaveBeenCalled();
+  });
+
+  it("shows Stop when running and fires onStop + onRunOnce", async () => {
+    const onStop = vi.fn();
+    const onRunOnce = vi.fn();
+    render(<SupervisorControls loop={loop(true)} onRunOnce={onRunOnce} onStart={() => {}} onStop={onStop} />);
+    expect(screen.getByText("● loop running")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Stop" }));
+    await userEvent.click(screen.getByRole("button", { name: "Run once" }));
+    expect(onStop).toHaveBeenCalled();
+    expect(onRunOnce).toHaveBeenCalled();
   });
 });
 

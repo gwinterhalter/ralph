@@ -33,6 +33,7 @@ if TYPE_CHECKING:
 KIND_BUDGET = "budget"
 KIND_GATE = "gate"
 KIND_STALL = "stall"
+KIND_FAILED = "failed"
 KIND_REGRESSED = "regressed"
 KIND_LEARNING = "learning"
 KIND_CHURN = "churn"
@@ -42,10 +43,13 @@ _URGENCY: dict[str, int] = {
     KIND_BUDGET: 0,
     KIND_GATE: 1,
     KIND_STALL: 2,
+    KIND_FAILED: 3,
     KIND_REGRESSED: 3,
     KIND_LEARNING: 4,
     KIND_CHURN: 5,
 }
+
+_FAILED_STATE = "failed"
 
 #: The lifecycle state a Project sits in while a gate awaits an operator decision.
 _PAUSED_GATE_STATE = "paused_gate"
@@ -125,7 +129,7 @@ def build_inbox(
                 kind=KIND_GATE,
                 urgency=_URGENCY[KIND_GATE],
                 title=f"Gate · {gid}" + (f" · {pid}" if pid else ""),
-                subject=str(gate.get("request_file") or gid),
+                subject=str(gate.get("request_path") or gate.get("request_file") or gid),
                 detail=str(gate.get("question_text") or "operator decision required"),
                 actions=(*option_ids, "details"),
             )
@@ -136,22 +140,33 @@ def build_inbox(
     # file — without this it would be INVISIBLE. Emit an investigate card for any such Project not
     # already covered by a file-gate (live-found 2026-06-08: a paused_gate project raised no card).
     for proj in projects:
-        if str(proj.get("lifecycle_state")) != _PAUSED_GATE_STATE:
-            continue
+        state = str(proj.get("lifecycle_state"))
         pid = str(proj.get("project_id") or "")
-        if not pid or pid in gated_projects:
+        if not pid:
             continue
-        gated_projects.add(pid)
-        cards.append(
-            InboxCard(
-                kind=KIND_GATE,
-                urgency=_URGENCY[KIND_GATE],
-                title=f"Gate awaiting decision · {proj.get('display_name') or pid}",
-                subject=pid,
-                detail="paused on a gate — open the project to investigate / answer it",
-                actions=("investigate",),
+        if state == _PAUSED_GATE_STATE and pid not in gated_projects:
+            gated_projects.add(pid)
+            cards.append(
+                InboxCard(
+                    kind=KIND_GATE,
+                    urgency=_URGENCY[KIND_GATE],
+                    title=f"Gate awaiting decision · {proj.get('display_name') or pid}",
+                    subject=pid,
+                    detail="paused on a gate — open the project to investigate / answer it",
+                    actions=("investigate",),
+                )
             )
-        )
+        elif state == _FAILED_STATE:
+            cards.append(
+                InboxCard(
+                    kind=KIND_FAILED,
+                    urgency=_URGENCY[KIND_FAILED],
+                    title=f"Project failed · {proj.get('display_name') or pid}",
+                    subject=pid,
+                    detail="a run terminated as failed — review the runs/events",
+                    actions=("investigate",),
+                )
+            )
 
     for row in fleet_rows:
         if row.lifecycle_state == _PAUSED_GATE_STATE and row.project_id not in gated_projects:
@@ -247,6 +262,7 @@ __all__ = [
     "KIND_BUDGET",
     "KIND_GATE",
     "KIND_STALL",
+    "KIND_FAILED",
     "KIND_REGRESSED",
     "KIND_LEARNING",
     "KIND_CHURN",

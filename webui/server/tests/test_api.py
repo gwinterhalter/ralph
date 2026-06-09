@@ -102,17 +102,43 @@ class FakeRegistry:
         return True
 
 
+class FakeRunner:
+    def __init__(self) -> None:
+        self.calls: list[object] = []
+        self.running = False
+
+    def run_once(self) -> int:
+        self.calls.append("once")
+        return 4242
+
+    def start_loop(self, interval: float = 30.0) -> int:
+        if self.running:
+            raise RuntimeError("supervisor loop already running")
+        self.running = True
+        self.calls.append(("start", interval))
+        return 4243
+
+    def stop_loop(self) -> bool:
+        self.calls.append("stop")
+        was = self.running
+        self.running = False
+        return was
+
+    def loop_running(self) -> bool:
+        return self.running
+
+
 @pytest.fixture()
 def client(tmp_path: Path) -> tuple[TestClient, FakeRegistry]:
     reg = FakeRegistry()
-    # capture apply dispatches instead of spawning claude
     dispatched: list[list[str]] = []
 
     def _fake_dispatch(argv: list[str]) -> tuple[int, str]:
         dispatched.append(argv)
         return 0, "ok"
 
-    app = create_app(registry_provider=lambda: reg, state_dir=tmp_path, dispatcher=_fake_dispatch)
+    app = create_app(registry_provider=lambda: reg, state_dir=tmp_path, dispatcher=_fake_dispatch,
+                     runner=FakeRunner())
     tc = TestClient(app)
     tc.dispatched = dispatched  # type: ignore[attr-defined]
     tc.state_dir = tmp_path  # type: ignore[attr-defined]
@@ -120,14 +146,14 @@ def client(tmp_path: Path) -> tuple[TestClient, FakeRegistry]:
 
 
 def _seed_gate(state_dir: Path) -> str:
-    name = "gate_request_0012_0000.json"
-    (state_dir / name).write_text(json.dumps({
+    p = state_dir / "gate_request_0012_0000.json"
+    p.write_text(json.dumps({
         "gate_id": "abs-phase-boundary",
         "question_text": "proceed to Phase 1?",
         "project_id": "p1",
         "options": [{"id": "proceed", "label": "Proceed"}, {"id": "hold", "label": "Hold"}],
     }), encoding="utf-8")
-    return name
+    return str(p)  # absolute request_path is the resolution key
 
 
 def test_health(client: tuple[TestClient, FakeRegistry]) -> None:
@@ -247,26 +273,59 @@ def test_apply_failure_leaves_accepted(tmp_path: Path) -> None:
 
 def test_gates_list_and_resolve(client: tuple[TestClient, FakeRegistry]) -> None:
     c, _ = client
-    name = _seed_gate(c.state_dir)  # type: ignore[attr-defined]
+    path = _seed_gate(c.state_dir)  # type: ignore[attr-defined]
     listed = c.get("/api/gates").json()["gates"]
     assert listed and listed[0]["gate_id"] == "abs-phase-boundary"
+    assert listed[0]["request_path"] == path
     assert {o["id"] for o in listed[0]["options"]} == {"proceed", "hold"}
-    # resolve writes a gate_response_*.json the orchestrator consumes
-    r = c.post("/api/gates/resolve", json={"request_file": name, "selected_option": "proceed", "by": "greg"})
+    # resolve writes a gate_response_*.json next to the request the orchestrator consumes
+    r = c.post("/api/gates/resolve", json={"request_path": path, "selected_option": "proceed", "by": "greg"})
     assert r.status_code == 200
     resp = json.loads((c.state_dir / "gate_response_0012_0000.json").read_text())  # type: ignore[attr-defined]
     assert resp["gate_id"] == "abs-phase-boundary" and resp["selected_option"] == "proceed"
-    # once answered, it's no longer pending
-    assert c.get("/api/gates").json()["gates"] == []
+    assert c.get("/api/gates").json()["gates"] == []  # no longer pending
 
 
 def test_gate_resolve_rejects_bad_option(client: tuple[TestClient, FakeRegistry]) -> None:
     c, _ = client
-    name = _seed_gate(c.state_dir)  # type: ignore[attr-defined]
-    bad = c.post("/api/gates/resolve", json={"request_file": name, "selected_option": "nonsense"})
+    path = _seed_gate(c.state_dir)  # type: ignore[attr-defined]
+    bad = c.post("/api/gates/resolve", json={"request_path": path, "selected_option": "nonsense"})
     assert bad.status_code == 400
-    missing = c.post("/api/gates/resolve", json={"request_file": "gate_request_9999_0.json", "selected_option": "x"})
+    missing = c.post("/api/gates/resolve", json={"request_path": str(c.state_dir / "gate_request_9_0.json"), "selected_option": "x"})  # type: ignore[attr-defined]
     assert missing.status_code == 404
+
+
+def test_supervisor_control(client: tuple[TestClient, FakeRegistry]) -> None:
+    c, _ = client
+    assert c.post("/api/supervisor/run-once").json() == {"started": True, "pid": 4242, "mode": "once"}
+    started = c.post("/api/supervisor/start", params={"interval": 15}).json()
+    assert started["started"] is True and started["pid"] == 4243
+    assert c.get("/api/loop-status").json()["managed_running"] is True   # probe sees it
+    assert c.post("/api/supervisor/start").status_code == 409             # already running
+    assert c.post("/api/supervisor/stop").json()["stopped"] is True
+    assert c.get("/api/loop-status").json()["managed_running"] is False
+
+
+def test_supervisor_control_can_be_disabled(tmp_path: Path) -> None:
+    c = TestClient(create_app(registry_provider=lambda: FakeRegistry(), state_dir=tmp_path,
+                              allow_supervisor_control=False))
+    assert c.post("/api/supervisor/run-once").status_code == 403
+
+
+def test_query_command(client: tuple[TestClient, FakeRegistry]) -> None:
+    c, _ = client
+    body = c.post("/api/commands/query", json={"by": "greg"}).json()
+    assert body["state"] == "queued"
+    payloads = [json.loads(p.read_text()) for p in (c.state_dir / "commands").glob("*.json")]  # type: ignore[attr-defined]
+    assert any(p["command_type"] == "query_register_state" for p in payloads)
+
+
+def test_inbox_surfaces_failed_project(client: tuple[TestClient, FakeRegistry]) -> None:
+    c, reg = client
+    reg.projects.append({"project_id": "pf", "display_name": "Pf", "folder_path": "pf",
+                         "lifecycle_state": "failed", "attention_debt": 0, "depends_on": []})
+    cards = c.get("/api/inbox").json()["cards"]
+    assert any(card["kind"] == "failed" and card["subject"] == "pf" for card in cards)
 
 
 def test_inbox_includes_gate_card_and_budget_breach(client: tuple[TestClient, FakeRegistry], monkeypatch) -> None:

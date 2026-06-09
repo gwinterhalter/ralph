@@ -92,5 +92,11 @@ regressions, churn), Fleet (ALL projects: lifecycle + cost + runs + depends-on, 
 events, pause/bump), Runs (past run history + cost), Improve (proposed→accepted→applied→measured
 kanban, with Adopt/Reject/Apply/**Roll back**), Effects, Spend (forecast + provision + prune),
 Events, Graph (depends_on chain), Actions (operator log). Topbar shows a **loop-status** banner
-("loop: active/idle — last activity N ago"); actions emit toasts; "investigate" navigates to the
-project drill-down.
+("loop: active/idle — last activity N ago") + **supervisor controls** (Run once / Start loop / Stop
+— these spawn real orchestrators, gated behind a confirm); actions emit toasts; "investigate"
+navigates to the project drill-down.
+
+**Operator control parity with the CLI:** pause / bump / **query register state** (Spend tab) /
+promote / reject / apply / **roll back** / provision / prune / events — plus the GUI-only
+loop control. Gates are resolved from **each project's own state dir** (real fleets), not just the
+supervisor's; paused-gate AND failed projects surface as attention cards.

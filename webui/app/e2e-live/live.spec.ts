@@ -13,6 +13,7 @@ test("full console: real data, gate resolve, adopt, all tabs, paused-gate visibi
   page.on("console", (m) => { if (m.type() === "error") consoleErrors.push(m.text()); });
   page.on("pageerror", (e) => pageErrors.push(String(e)));
   page.on("response", (r) => { if (r.status() >= 400 && r.status() !== 502) badResponses.push(`${r.status()} ${r.url()}`); });
+  page.on("dialog", (d) => d.accept());   // auto-confirm the "dispatch real work?" prompts
 
   await page.goto("/");
 
@@ -22,10 +23,19 @@ test("full console: real data, gate resolve, adopt, all tabs, paused-gate visibi
   await expect(page.getByText(/Gate · abs-phase-boundary/)).toBeVisible();           // rich gate (file)
   await expect(page.getByText("proceed to Phase 1?")).toBeVisible();
   await expect(page.getByText(/Gate awaiting decision · oltest_paused/)).toBeVisible(); // paused_gate PROJECT surfaced (the fixed defect)
+  await expect(page.getByText(/Project failed · oltest_old/)).toBeVisible();           // failed PROJECT surfaced
   await expect(page.getByText(/Learning ready .*abs-phase-boundary/)).toBeVisible();
   await expect(page.getByText(/Adopted learning regressed/)).toBeVisible();
   await expect(page.getByText(/Chronic correction churn · OLB-07/)).toBeVisible();
   await page.screenshot({ path: "test-results/01-home.png", fullPage: true });
+
+  // Supervisor loop control (demo runner — no real spawn): Start → running → Stop → stopped.
+  await expect(page.getByText("○ loop stopped")).toBeVisible();
+  await page.getByRole("button", { name: "Start loop" }).click();
+  await expect(page.getByText("● loop running")).toBeVisible();
+  await page.getByRole("button", { name: "Stop" }).click();
+  await expect(page.getByText("○ loop stopped")).toBeVisible();
+  await page.getByRole("button", { name: "Run once" }).click();   // one-shot cycle
 
   // Resolve the file gate: its real option "proceed" → POST /api/gates/resolve; card disappears.
   await page.getByRole("button", { name: "proceed" }).click();
@@ -59,9 +69,10 @@ test("full console: real data, gate resolve, adopt, all tabs, paused-gate visibi
   await expect(page.getByRole("button", { name: "Roll back" })).toBeVisible();   // rollback control present
   await page.screenshot({ path: "test-results/03-improve.png", fullPage: true });
 
-  // Spend, Graph, Events tabs render real data.
+  // Spend, Graph, Events tabs render real data; Query-register command works (CLI parity).
   await page.getByRole("button", { name: "Spend", exact: true }).click();
   await expect(page.getByText(/Fleet spent \$/)).toBeVisible();
+  await page.getByRole("button", { name: "Query register state" }).click();
   await page.getByRole("button", { name: "Graph", exact: true }).click();
   await expect(page.getByText("→ abs_phase1")).toBeVisible();
   await expect(page.getByText("level 2")).toBeVisible();
@@ -73,6 +84,8 @@ test("full console: real data, gate resolve, adopt, all tabs, paused-gate visibi
   await page.screenshot({ path: "test-results/06-actions.png", fullPage: true });
   await expect(page.getByText(/gate-resolve/).first()).toBeVisible();
   await expect(page.getByText(/promote/).first()).toBeVisible();
+  await expect(page.getByText(/supervisor-start/).first()).toBeVisible();  // loop control logged
+  await expect(page.getByText(/query/).first()).toBeVisible();
 
   expect(consoleErrors, "browser console errors").toEqual([]);
   expect(pageErrors, "uncaught page errors").toEqual([]);

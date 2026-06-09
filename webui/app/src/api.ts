@@ -54,6 +54,7 @@ export interface EffectRow {
 
 export interface GateOption { id: string; label: string; consequence: string; }
 export interface PendingGate {
+  request_path: string;
   request_file: string;
   gate_id: string;
   question_text: string;
@@ -108,6 +109,7 @@ export interface LoopStatus {
   last_activity: string | null;
   seconds_since: number | null;
   active_guess: boolean;
+  managed_running: boolean;
 }
 
 // Optional bearer token for the API. A local tool can't set headers on the page load, so we read
@@ -165,8 +167,13 @@ export const api = {
     post(`/api/projects/${encodeURIComponent(projectId)}/pause`, { by }),
   bumpBudget: (projectId: string, newCapUsd: string, by = "operator") =>
     post(`/api/projects/${encodeURIComponent(projectId)}/budget`, { new_cap_usd: newCapUsd, by }),
-  resolveGate: (requestFile: string, selectedOption: string, by = "operator") =>
-    post("/api/gates/resolve", { request_file: requestFile, selected_option: selectedOption, by }),
+  resolveGate: (requestPath: string, selectedOption: string, by = "operator") =>
+    post("/api/gates/resolve", { request_path: requestPath, selected_option: selectedOption, by }),
+  query: (by = "operator") => post("/api/commands/query", { by }),
+  supervisorRunOnce: (by = "operator") => post<{ pid: number }>("/api/supervisor/run-once", { by }),
+  supervisorStart: (interval = 30, by = "operator") =>
+    post<{ pid: number }>(`/api/supervisor/start?interval=${interval}`, { by }),
+  supervisorStop: (by = "operator") => post<{ stopped: boolean }>("/api/supervisor/stop", { by }),
   promote: (key: string, by = "operator") =>
     post(`/api/findings/${encodeURIComponent(key)}/promote`, { by }),
   reject: (key: string, by = "operator") =>

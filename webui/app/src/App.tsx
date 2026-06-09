@@ -5,7 +5,8 @@ import type {
   ProjectRow, RunRow, LoopStatus,
 } from "./api";
 import {
-  InboxView, FleetView, RunsView, ImproveView, EffectsView, SpendView, EventsView, ActionsView, GraphView,
+  InboxView, FleetView, RunsView, ImproveView, EffectsView, SpendView, EventsView, ActionsView,
+  GraphView, SupervisorControls,
 } from "./views";
 
 type Tab = "home" | "fleet" | "runs" | "improve" | "effects" | "spend" | "events" | "graph" | "actions";
@@ -120,7 +121,19 @@ export default function App() {
     <div className="console">
       <header className="topbar">
         <strong>Outer Loop Supervisor</strong>
-        <span className={loop?.active_guess ? "live" : "idle"}>● {loopLabel(loop)}</span>
+        <span className="loop-label">{loopLabel(loop)}</span>
+        <SupervisorControls
+          loop={loop}
+          onRunOnce={() => {
+            if (window.confirm("Run ONE supervisor cycle now? It dispatches real work (real $)."))
+              void api.supervisorRunOnce().then((r) => { flash(`Cycle started (pid ${r.pid})`); return loadAll(); }).catch((e) => setError(String(e)));
+          }}
+          onStart={() => {
+            if (window.confirm("Start the autonomous supervisor loop? It keeps dispatching real work until you Stop it."))
+              void api.supervisorStart(30).then((r) => { flash(`Loop started (pid ${r.pid})`); return loadAll(); }).catch((e) => setError(String(e)));
+          }}
+          onStop={() => void api.supervisorStop().then(() => { flash("Loop stopped"); return loadAll(); }).catch((e) => setError(String(e)))}
+        />
         {fleet && <span className="cost">${fleet.total_cumulative_cost_usd}</span>}
       </header>
       <nav className="rail">
@@ -176,6 +189,7 @@ export default function App() {
               if (window.confirm(`Delete events older than ${days} days?`))
                 void api.prune(days).then(() => { flash("Old events pruned"); return loadAll(); });
             }}
+            onQuery={() => void api.query().then(() => { flash("Query-register command queued"); return loadAll(); }).catch((e) => setError(String(e)))}
           />
         )}
         {tab === "events" && <EventsView events={events} total={eventMeta.total} failures={eventMeta.failures} />}

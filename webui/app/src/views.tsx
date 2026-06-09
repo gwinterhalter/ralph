@@ -1,8 +1,26 @@
 // Presentational views — pure functions of props (no fetching), so they unit-test cleanly.
 import type {
   InboxCard, FleetSnapshot, Finding, EffectRow, Forecast, EventRow, ActionRow, GraphNode, GraphEdge,
-  ProjectRow, RunRow,
+  ProjectRow, RunRow, LoopStatus,
 } from "./api";
+
+export function SupervisorControls(props: {
+  loop: LoopStatus | null;
+  onRunOnce: () => void;
+  onStart: () => void;
+  onStop: () => void;
+}) {
+  const running = !!props.loop?.managed_running;
+  return (
+    <span className="sup-controls">
+      <span className={running ? "live" : "idle"}>{running ? "● loop running" : "○ loop stopped"}</span>
+      {running
+        ? <button onClick={props.onStop}>Stop</button>
+        : <button onClick={props.onStart}>Start loop</button>}
+      <button onClick={props.onRunOnce}>Run once</button>
+    </span>
+  );
+}
 
 const KIND_ICON: Record<string, string> = {
   budget: "🔴",
@@ -303,6 +321,7 @@ export function SpendView(props: {
   forecast: Forecast | null;
   onProvision: () => void;
   onPrune: (days: number) => void;
+  onQuery: () => void;
 }) {
   const f = props.forecast;
   return (
@@ -333,6 +352,7 @@ export function SpendView(props: {
       <div className="admin-actions">
         <button onClick={props.onProvision}>Provision ABS chain…</button>
         <button onClick={() => props.onPrune(30)}>Prune events &gt; 30d</button>
+        <button onClick={props.onQuery}>Query register state</button>
       </div>
     </div>
   );

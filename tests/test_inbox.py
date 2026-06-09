@@ -15,6 +15,7 @@ from supervisor.full_status_surface import (
 from supervisor.inbox import (
     KIND_BUDGET,
     KIND_CHURN,
+    KIND_FAILED,
     KIND_GATE,
     KIND_LEARNING,
     KIND_REGRESSED,
@@ -128,6 +129,12 @@ def test_paused_gate_not_double_counted_across_sources() -> None:
               "question_text": "q?", "options": [{"id": "yes"}]}]
     cards = build_inbox(fleet_rows=rows, projects=projects, gates=gates)
     assert len([c for c in cards if c.kind == KIND_GATE]) == 1
+
+
+def test_failed_project_surfaces_as_attention() -> None:
+    projects = [{"project_id": "pf", "lifecycle_state": "failed"}]
+    cards = build_inbox(projects=projects)
+    assert len(cards) == 1 and cards[0].kind == KIND_FAILED and cards[0].subject == "pf"
 
 
 def test_churn_threshold() -> None:

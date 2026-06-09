@@ -16,6 +16,11 @@ body { margin: 0; background: #f4f5f8; }
 .badge.lc-failed { background: #fee2e2; color: #991b1b; }
 button.danger { border-color: #ef4444; color: #b91c1c; }
 .topbar .cost { margin-left: auto; opacity: 0.8; }
+.topbar .loop-label { font-size: 0.82em; opacity: 0.75; }
+.sup-controls { display: inline-flex; gap: 6px; align-items: center; }
+.sup-controls .live { color: #4ade80; font-size: 0.82em; }
+.sup-controls .idle { color: #fbbf24; font-size: 0.82em; }
+.sup-controls button { padding: 3px 9px; border: 1px solid #3b3b4a; background: #23232f; color: #fff; border-radius: 6px; cursor: pointer; font-size: 0.8em; }
 .rail { display: flex; flex-direction: column; gap: 4px; padding: 12px 8px; background: #e7e9ef; }
 .rail button { text-align: left; padding: 8px 12px; border: 0; background: transparent; border-radius: 6px;
   cursor: pointer; font-size: 0.95em; }
