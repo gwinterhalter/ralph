@@ -348,6 +348,23 @@ class ScheduleConfig:
     spawn_port: SpawnPort
     kill_switch: KillSwitch = field(default_factory=KillSwitch)
     concurrency_ceiling: int = DEFAULT_CONCURRENCY_CEILING
+    #: Fill-to-ceiling dispatch bound (concurrency improvement, 2026-06-09): the max
+    #: number of Candidates :func:`run_schedule_fill_step` may spawn in ONE Schedule
+    #: pass. Default 1 preserves the historical one-dispatch-per-cycle behaviour (and
+    #: every existing single-dispatch test); production sets it to ``concurrency_ceiling``
+    #: so a cold fleet ramps to full concurrency in a single cycle instead of one
+    #: Project per ``--interval``. The live ``running_count`` / ceiling guard in the fill
+    #: loop is always authoritative, so a value above the ceiling never overshoots
+    #: (the §9.3 FR-019 / FR-037 hard floor).
+    max_dispatches_per_cycle: int = 1
+    #: Tier-2 usage-window pause hook (concurrency, 2026-06-09): returns ``True`` when new
+    #: Dispatch is allowed, ``False`` to PAUSE dispatch this pass WITHOUT touching running Runs
+    #: — reconcile / guard / attend still run and running Runs continue to completion (the
+    #: pause-not-kill lever, distinct from the FR-036 Kill-Switch which also safe-stops running).
+    #: Production wires it to the rolling usage-window guard (:mod:`supervisor.usage_window`) so
+    #: the fleet self-paces under the Max session/weekly cap. Default always-allow → no pacing
+    #: unless an operator configures a window ceiling.
+    dispatch_gate: Callable[[], bool] = field(default_factory=lambda: (lambda: True))
     starvation_threshold: int = STARVATION_ROUND_THRESHOLD
     round_state_store: RoundStateStore = field(default_factory=RoundStateStore)
     open_work_counts: Mapping[str, int] = field(default_factory=dict)
@@ -521,6 +538,60 @@ def run_schedule_step(
     # The resume arm (a `running` Project's next iteration) is OLB-16; it is never
     # selected here because every `running` Project is FR-027 in-flight-excluded.
     return decision
+
+
+def run_schedule_fill_step(
+    registry: RegistryPort, config: ScheduleConfig
+) -> list[SchedulerDecision]:
+    """Fill the running fleet toward the Concurrency Ceiling in ONE Schedule pass.
+
+    :func:`run_schedule_step` dispatches at most one Candidate per call (one
+    ``select_next_dispatch`` -> at most one spawn). On the bounded ``--interval``
+    cadence that ramps a cold fleet only one Project per cycle, so reaching a ceiling
+    of N takes N cycles. This wrapper repeats the single-pass primitive WITHIN one
+    cycle until the fleet is at the ceiling, nothing more is runnable, or
+    ``config.max_dispatches_per_cycle`` attempts are spent — turning the proven
+    concurrency headroom into actual fleet throughput (concurrency improvement,
+    2026-06-09; the empirical N-way headroom measured 2026-06-09).
+
+    Each iteration re-reads the live ``running`` set through the OLB-02 seam (a spawn
+    in the previous iteration created a real ``ralph_runs`` ``running`` row the FR-027
+    unique index gates), so the loop is driven by the AUTHORITATIVE running count, not
+    a cached one. It terminates when:
+
+    * ``running_count >= concurrency_ceiling`` BEFORE a dispatch — the §9.3 hard floor,
+      so a ``max_dispatches_per_cycle`` larger than the ceiling never overshoots;
+    * :func:`run_schedule_step` returns ``None`` — nothing runnable this pass;
+    * an attempt did NOT grow the running set — an FR-019 ceiling HOLD (Candidate ->
+      ``admitted``, nothing spawned) or a non-spawn admission terminal, so a held /
+      rejected Candidate never spins the loop.
+
+    Returns the dispatch decisions made this pass (possibly empty). With the default
+    ``max_dispatches_per_cycle == 1`` this calls :func:`run_schedule_step` exactly once
+    — behaviourally identical to the pre-improvement single-dispatch cycle, which is why
+    every existing single-dispatch test holds unchanged.
+    """
+    decisions: list[SchedulerDecision] = []
+    if not config.dispatch_gate():
+        # Tier-2 usage-window pause (concurrency, 2026-06-09): the rolling Max session/weekly
+        # cap is reached — pause NEW dispatch this pass. Running Runs are untouched (this hook
+        # gates only the spawn path); they continue and the window frees as their usage ages out.
+        return decisions
+    attempts = max(config.max_dispatches_per_cycle, 1)
+    for _ in range(attempts):
+        before = sum(1 for row in registry.read_running() if config.project_filter(row))
+        if before >= config.concurrency_ceiling:
+            break  # at the ceiling — fill complete (§9.3 hard floor, never overshoot)
+        decision = run_schedule_step(registry, config)
+        if decision is None:
+            break  # nothing runnable this pass
+        decisions.append(decision)
+        after = sum(1 for row in registry.read_running() if config.project_filter(row))
+        if after <= before:
+            # No running row was created (FR-019 hold / non-spawn terminal) — stop so a
+            # held or rejected Candidate cannot spin the loop to the attempt bound.
+            break
+    return decisions
 
 
 def _spawn_selected(
@@ -1025,6 +1096,7 @@ __all__ = [
     "to_project_records",
     "to_attention_escalation",
     "run_schedule_step",
+    "run_schedule_fill_step",
     "run_attend_step",
     "run_guard_step",
     "run_kill_switch_halt",

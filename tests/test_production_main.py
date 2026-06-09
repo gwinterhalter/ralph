@@ -118,6 +118,118 @@ def test_hang_timeout_is_threaded_into_reconcile_config() -> None:
     assert cycle._reconcile_config.hang_timeout_seconds == 60.0  # type: ignore[attr-defined]
 
 
+# --- concurrency improvement (2026-06-09): tunable ceiling + fill-to-ceiling dispatch ---
+
+
+def test_default_ceiling_is_the_safe_library_default() -> None:
+    """Unset → the Schedule config keeps DEFAULT_CONCURRENCY_CEILING, so the status surfaces
+    (which default to the same constant) stay consistent with the dispatcher."""
+    from supervisor.safety_gates import DEFAULT_CONCURRENCY_CEILING
+
+    _reg, cycle = _build()
+    sc = cycle._schedule_config  # type: ignore[attr-defined]
+    assert sc.concurrency_ceiling == DEFAULT_CONCURRENCY_CEILING
+    # max_dispatches defaults to the ceiling → a cold fleet fills in one cycle.
+    assert sc.max_dispatches_per_cycle == DEFAULT_CONCURRENCY_CEILING
+
+
+def test_concurrency_ceiling_threads_into_schedule_config() -> None:
+    """OL_SUPERVISOR_CONCURRENCY_CEILING (read in main, passed here) reaches the Schedule
+    step's FR-037 ceiling and, by default, its fill-to-ceiling bound."""
+    cycle = build_production_cycle(
+        _FakeRegistry(),  # type: ignore[arg-type]
+        seed_validator=_FakeSeedValidator(),
+        spawn_port=_FakeSpawnPort(),
+        active_runs_source=lambda: [],
+        concurrency_ceiling=7,
+    )
+    sc = cycle._schedule_config  # type: ignore[attr-defined]
+    assert sc.concurrency_ceiling == 7
+    assert sc.max_dispatches_per_cycle == 7  # defaults to the ceiling (fill in one pass)
+
+
+def test_max_dispatches_override_threads_through() -> None:
+    """OL_SUPERVISOR_MAX_DISPATCHES_PER_CYCLE can stagger spawns below the ceiling."""
+    cycle = build_production_cycle(
+        _FakeRegistry(),  # type: ignore[arg-type]
+        seed_validator=_FakeSeedValidator(),
+        spawn_port=_FakeSpawnPort(),
+        active_runs_source=lambda: [],
+        concurrency_ceiling=7,
+        max_dispatches_per_cycle=2,
+    )
+    sc = cycle._schedule_config  # type: ignore[attr-defined]
+    assert sc.concurrency_ceiling == 7
+    assert sc.max_dispatches_per_cycle == 2
+
+
+# --- Tier-2 concurrency (2026-06-09): usage-window dispatch gate threads into Schedule ---
+
+
+def test_dispatch_gate_threads_into_schedule_config() -> None:
+    """The Tier-2 usage-window pause hook reaches the Schedule step (pauses new dispatch)."""
+    gate = lambda: False  # noqa: E731 - terse test stand-in for the usage guard
+
+    cycle = build_production_cycle(
+        _FakeRegistry(),  # type: ignore[arg-type]
+        seed_validator=_FakeSeedValidator(),
+        spawn_port=_FakeSpawnPort(),
+        active_runs_source=lambda: [],
+        dispatch_gate=gate,
+    )
+    assert cycle._schedule_config.dispatch_gate is gate  # type: ignore[attr-defined]
+
+
+def test_default_dispatch_gate_allows() -> None:
+    _reg, cycle = _build()
+    assert cycle._schedule_config.dispatch_gate() is True  # type: ignore[attr-defined]
+
+
+# --- Tier-2: Registry.read_usage_events_since parses cost from the event payload jsonb ---
+
+
+class _RowsCursor:
+    def __init__(self, rows: object) -> None:
+        self._rows = rows
+
+    def __enter__(self) -> _RowsCursor:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def execute(self, query: str, params: object = ()) -> None:
+        self.query = query
+
+    def fetchall(self) -> object:
+        return self._rows
+
+
+class _RowsConn:
+    def __init__(self, rows: object) -> None:
+        self._rows = rows
+
+    def cursor(self) -> _RowsCursor:
+        return _RowsCursor(self._rows)
+
+    def commit(self) -> None:  # pragma: no cover - reads don't commit
+        pass
+
+
+def test_read_usage_events_parses_payload_cost() -> None:
+    from datetime import datetime, timezone
+
+    t1 = datetime(2026, 6, 9, 10, 0, tzinfo=timezone.utc)
+    t2 = datetime(2026, 6, 9, 11, 0, tzinfo=timezone.utc)
+    rows = [
+        (t1, {"cost_usd": "1.25"}),  # dict payload, primary key
+        (t2, '{"total_cost_usd": 2.5}'),  # str payload, alternate key
+        (t2, {"role": "planner"}),  # no cost → skipped (contributes nothing)
+    ]
+    got = Registry(_RowsConn(rows)).read_usage_events_since("2026-06-09T00:00:00+00:00")
+    assert got == [(t1, Decimal("1.25")), (t2, Decimal("2.5"))]
+
+
 # --- Registry.read_cumulative_spend_usd (the spend-backstop input) ---
 
 

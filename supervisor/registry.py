@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Protocol, cast
 
@@ -602,6 +603,50 @@ class Registry:
             cur.execute(sql, tuple(params))
             rows = cur.fetchall()
         return [dict(zip(self._EVENT_COLUMNS, row)) for row in rows]
+
+    def read_usage_events_since(self, since_iso: str) -> list[tuple[datetime, Decimal]]:
+        """Per-``llm_call`` usage in the rolling window — ``(ts_utc, cost_usd)`` oldest-first,
+        the Tier-2 usage-window guard's input (concurrency, 2026-06-09).
+
+        Reads cost-bearing ``llm_call`` events at or after ``since_iso`` (the widest window's
+        cutoff). Cost lives in the event ``payload`` jsonb (``cost_usd``, or ``total_cost_usd``),
+        so it is parsed in Python; an event with no parseable cost is skipped (contributes
+        nothing). Money is exact ``Decimal`` (NFR-007). NOTE: ``cost_usd`` is the API-equivalent
+        figure ``claude`` reports even under a Max subscription — a consistent USAGE PROXY, not
+        the subscription's internal (non-queryable) quota unit.
+        """
+        sql = (  # nosec B608 — fixed columns; cutoff parameterised
+            "SELECT ts_utc, payload FROM events "
+            "WHERE event_type = 'llm_call' AND ts_utc >= %s ORDER BY ts_utc ASC"
+        )
+        with self._conn.cursor() as cur:
+            cur.execute(sql, (since_iso,))
+            rows = cur.fetchall()
+
+        def _cost(payload: object) -> "Decimal | None":
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except (ValueError, TypeError):
+                    return None
+            if not isinstance(payload, dict):
+                return None
+            for key in ("cost_usd", "total_cost_usd"):
+                val = payload.get(key)
+                if val is None:
+                    continue
+                try:
+                    return Decimal(str(val))
+                except (ArithmeticError, ValueError):
+                    return None
+            return None
+
+        out: list[tuple[datetime, Decimal]] = []
+        for ts, payload in rows:
+            cost = _cost(payload)
+            if cost is not None:
+                out.append((cast("datetime", ts), cost))
+        return out
 
     def prune_events(self, *, before_iso: str) -> int:
         """Delete events older than ``before_iso`` (the retention policy); return rows deleted.

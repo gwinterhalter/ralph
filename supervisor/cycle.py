@@ -29,7 +29,7 @@ from supervisor.cycle_wiring import (
     run_guard_step,
     run_learn_step,
     run_reconcile_step,
-    run_schedule_step,
+    run_schedule_fill_step,
 )
 
 if TYPE_CHECKING:
@@ -118,15 +118,20 @@ class SupervisionCycle:
         """
 
     def _schedule(self) -> None:
-        """§4.4(3) Schedule — select the next Project to Dispatch (OLB-11).
+        """§4.4(3) Schedule — dispatch Projects up to the Concurrency Ceiling (OLB-11).
 
         When a :class:`~supervisor.cycle_wiring.ScheduleConfig` is configured, runs
-        the OLB-09 scheduler -> OLB-07 admission composition for one pass (priority
-        order, the FR-019/FR-037 ceiling hold, FR-027 dispatch idempotency, FR-026
-        gate-blocked skip without demotion). Unconfigured, it is the OLB-01 no-op.
+        the OLB-09 scheduler -> OLB-07 admission composition via
+        :func:`~supervisor.cycle_wiring.run_schedule_fill_step` — repeating the
+        single-pass dispatch (priority order, the FR-019/FR-037 ceiling hold, FR-027
+        dispatch idempotency, FR-026 gate-blocked skip without demotion) up to
+        ``config.max_dispatches_per_cycle`` times so a cold fleet ramps to full
+        concurrency in one cycle rather than one Project per ``--interval``. With the
+        default ``max_dispatches_per_cycle == 1`` this is exactly the prior
+        single-dispatch pass. Unconfigured, it is the OLB-01 no-op.
         """
         if self._schedule_config is not None:
-            run_schedule_step(self._registry, self._schedule_config)
+            run_schedule_fill_step(self._registry, self._schedule_config)
 
     def _attend(self) -> None:
         """§4.4(4) Attend — route pending gate_human escalations (OLB-11).

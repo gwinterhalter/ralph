@@ -19,7 +19,7 @@ from __future__ import annotations
 import os
 import sys
 from collections.abc import Callable, Sequence
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from supervisor.candidate_enrichment import (
     make_seed_candidate_enricher,
@@ -46,7 +46,7 @@ from supervisor.pid_probe import format_pid_start_time, pid_alive, probe_pid_sta
 from supervisor.ports import RegistryPort, RegistryRow
 from supervisor.run_auditor import RunAuditReport
 from supervisor.run_auditor import RunRecord as AuditRunRecord
-from supervisor.safety_gates import KillSwitch
+from supervisor.safety_gates import DEFAULT_CONCURRENCY_CEILING, KillSwitch
 from supervisor.reattach import derive_reattach_decisions
 from supervisor.reconcile import RunCompletion, derive_reconcile_actions
 
@@ -96,6 +96,9 @@ def build_production_cycle(
     attention_store: AttentionStateStore | None = None,
     notification_port: NotificationPort | None = None,
     delivered_keys: "set[tuple[str, str, str]] | None" = None,
+    concurrency_ceiling: int = DEFAULT_CONCURRENCY_CEILING,
+    max_dispatches_per_cycle: int | None = None,
+    dispatch_gate: Callable[[], bool] | None = None,
 ) -> SupervisionCycle:
     """Assemble a :class:`SupervisionCycle` wired with all five §4.4 step configs.
 
@@ -154,6 +157,20 @@ def build_production_cycle(
     schedule_config = ScheduleConfig(
         seed_validator=seed_validator,  # type: ignore[arg-type]
         spawn_port=spawn_port,  # type: ignore[arg-type]
+        # Concurrency improvement (2026-06-09): the operator-tunable FR-037 ceiling and
+        # the fill-to-ceiling dispatch bound. ``max_dispatches_per_cycle`` defaults to the
+        # ceiling so a cold fleet ramps to full concurrency in one cycle (the empirically
+        # proven N-way headroom); the live running_count guard keeps it from overshooting.
+        concurrency_ceiling=concurrency_ceiling,
+        max_dispatches_per_cycle=(
+            max_dispatches_per_cycle
+            if max_dispatches_per_cycle is not None
+            else concurrency_ceiling
+        ),
+        # Tier-2 usage-window pause hook (concurrency, 2026-06-09): pauses NEW dispatch when
+        # the rolling Max session/weekly cap is reached; running Runs untouched. Default
+        # always-allow → no pacing unless an operator configures a window ceiling.
+        dispatch_gate=(dispatch_gate if dispatch_gate is not None else (lambda: True)),
         open_work_counts=open_work_counts_for(
             list(registry.read_running()), workspace_root=workspace_root
         ),
@@ -608,6 +625,117 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
                 _effect_escalated.add(f"{fkey}:{record.outcome}")
                 print(f"supervisor: EFFECT — '{fkey}' {record.outcome}; raised an operator offer.")
 
+    # Concurrency improvement (2026-06-09): the operator-tunable Concurrency Ceiling and
+    # fill-to-ceiling dispatch bound. Default ceiling stays DEFAULT_CONCURRENCY_CEILING so
+    # the status surfaces (which default to the same constant) keep matching; raise it via
+    # OL_SUPERVISOR_CONCURRENCY_CEILING. Empirically one Max account sustains >=12 concurrent
+    # heavy runs (measured 2026-06-09), so the ceiling — not the API — is the only governor.
+    def _positive_int_env(name: str, default: int) -> int:
+        raw = os.environ.get(name)
+        if not raw:
+            return default
+        try:
+            value = int(raw)
+        except ValueError:
+            print(f"supervisor: {name}={raw!r} is not an integer — using {default}.")
+            return default
+        if value < 1:
+            print(f"supervisor: {name}={value} must be >= 1 — using {default}.")
+            return default
+        return value
+
+    concurrency_ceiling = _positive_int_env(
+        "OL_SUPERVISOR_CONCURRENCY_CEILING", DEFAULT_CONCURRENCY_CEILING
+    )
+    # Defaults to the ceiling: fill the whole fleet in one cycle. Lower it to stagger spawns.
+    max_dispatches = _positive_int_env(
+        "OL_SUPERVISOR_MAX_DISPATCHES_PER_CYCLE", concurrency_ceiling
+    )
+    print(
+        f"supervisor: concurrency ceiling = {concurrency_ceiling}, "
+        f"max dispatches/cycle = {max_dispatches}."
+    )
+
+    # Tier-2 usage-window pacing (concurrency, 2026-06-09): opt-in ROLLING caps against the Max
+    # session (5-hour) + weekly allowance — the real governor (instantaneous concurrency is not,
+    # measured 2026-06-09). Unlike the emergency spend backstop (cumulative $, hard kill), this
+    # PAUSES new dispatch (running Runs continue) and reports when the window frees. Absent env →
+    # no windows → never paces (safe default OFF). The unit is our recorded cost_usd PROXY — the
+    # Max internal quota is not queryable; the operator sets the per-window proxy-dollar budget.
+    from supervisor.usage_window import UsageEvent, UsageWindow, evaluate_usage_windows
+
+    def _decimal_env(name: str) -> "Decimal | None":
+        raw = os.environ.get(name)
+        if not raw:
+            return None
+        try:
+            return Decimal(raw)
+        except (ArithmeticError, ValueError):
+            print(f"supervisor: {name}={raw!r} is not a decimal — that usage window disabled.")
+            return None
+
+    usage_windows: list[UsageWindow] = []
+    _u5 = _decimal_env("OL_SUPERVISOR_USAGE_5H_CEILING_USD")
+    if _u5 is not None:
+        usage_windows.append(UsageWindow("5h", timedelta(hours=5), _u5))
+    _uw = _decimal_env("OL_SUPERVISOR_USAGE_WEEKLY_CEILING_USD")
+    if _uw is not None:
+        usage_windows.append(UsageWindow("weekly", timedelta(days=7), _uw))
+    if usage_windows:
+        print(
+            "supervisor: usage-window pacing ENABLED — "
+            + ", ".join(f"{w.name}<=${w.budget_usd}" for w in usage_windows)
+        )
+    _usage_paced: set[str] = set()
+
+    def _dispatch_allowed_by_usage() -> bool:
+        """True if new Dispatch is allowed under the rolling usage windows (pause-not-kill).
+
+        Reads the widest window's worth of ``llm_call`` usage, evaluates every window, and on a
+        breach logs + raises ONE operator escalation per (window, reset) carrying the reset time.
+        Best-effort: a read error allows dispatch (never abort the cycle on the guard)."""
+        if not usage_windows:
+            return True
+        widest = max(w.duration for w in usage_windows)
+        now_dt = datetime.now(timezone.utc)
+        since = (now_dt - widest).isoformat()
+        try:
+            rows = registry.read_usage_events_since(since)
+        except Exception as exc:  # noqa: BLE001 - best-effort; never abort the cycle
+            print(f"supervisor: usage-window read skipped ({exc}); allowing dispatch.")
+            return True
+        events = [UsageEvent(ts=ts, cost_usd=cost) for ts, cost in rows]
+        decision = evaluate_usage_windows(events, usage_windows, now=now_dt)
+        for breach in decision.breaches:
+            key = f"{breach.name}:{breach.resets_at.isoformat()}"
+            if key in _usage_paced:
+                continue
+            _usage_paced.add(key)
+            print(
+                f"supervisor: USAGE PACING — {breach.name} window at "
+                f"${breach.used_usd}/${breach.budget_usd}; pausing NEW dispatch until "
+                f"~{breach.resets_at.isoformat()} (running Runs continue)."
+            )
+            escalation = Escalation(
+                project_id="*fleet*",
+                gate_id=f"usage:{breach.name}",
+                kind=ESCALATION_KIND_ROUTINE,
+                reversible=True,
+                suggested_option=(
+                    f"usage {breach.name} window ${breach.used_usd} >= ${breach.budget_usd} — new "
+                    f"dispatch paused until ~{breach.resets_at.isoformat()} (Max cap pacing)"
+                ),
+                confidence=0.9,
+                raised_at=now_dt,
+            )
+            state = attention_store.load()
+            attention_store.save(intake_escalation(state, escalation))
+        return decision.dispatch_allowed
+
+    def _const_gate(allowed: bool) -> "Callable[[], bool]":
+        """A by-value dispatch gate for this cycle's usage verdict (typed for mypy --strict)."""
+        return lambda: allowed
+
     cycles = 0
     while args.max_cycles is None or cycles < args.max_cycles:
         # Re-read the kill-switch each cycle: the operator can engage/disengage between
@@ -625,6 +753,9 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
                 )
         if kill_switch.engaged:
             print("supervisor: KILL-SWITCH ENGAGED — refusing new dispatch this cycle.")
+        # Tier-2: evaluate the rolling usage windows ONCE per cycle; the result gates only the
+        # spawn path (running Runs continue). Bound via default-arg so the gate is this cycle's.
+        usage_allowed = _dispatch_allowed_by_usage()
         cycle = build_production_cycle(
             registry,
             seed_validator=seed_validator,
@@ -643,6 +774,9 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
             attention_store=attention_store,
             notification_port=notification_port,
             delivered_keys=delivered_keys,
+            concurrency_ceiling=concurrency_ceiling,
+            max_dispatches_per_cycle=max_dispatches,
+            dispatch_gate=_const_gate(usage_allowed),
         )
         cycle.run_once()
         _ingest_fleet_events()  # Fleet Analytics §1: ship all projects' events.jsonl to the DB
