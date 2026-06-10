@@ -80,10 +80,22 @@ _CFG = SmtpConfig(
 def test_render_batch_lists_escalations() -> None:
     batch = NotificationBatch(tier=UrgencyTier.TOP, escalations=(_esc("p1"),))
     subject, body = render_batch(batch)
-    assert "TOP" in subject and "1 escalation" in subject
+    # Subject names the tier + the project/gate (the preview line the operator sees).
+    assert "TOP" in subject and "p1 / p1-gate" in subject
     assert "p1 / p1-gate" in body
     assert "suggested=A" in body
     assert "confidence=0.91" in body
+
+
+def test_render_batch_subject_names_project_for_multi_escalation() -> None:
+    batch = NotificationBatch(
+        tier=UrgencyTier.TOP, escalations=(_esc("p1"), _esc("p2"))
+    )
+    subject, _ = render_batch(batch)
+    # Multi-escalation subject still names the first project + the overflow count.
+    assert "TOP" in subject
+    assert "p1 / p1-gate" in subject
+    assert "+1 more" in subject
 
 
 def test_smtp_port_sends_one_message_per_batch() -> None:

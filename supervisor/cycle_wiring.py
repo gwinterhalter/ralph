@@ -279,6 +279,13 @@ class ReconcileConfig:
     hang_timeout_of: Callable[["RegistryRow"], "float | None"] = field(
         default=lambda _row: None
     )
+    #: Pending-gate probe: True iff the run persisted a needs-review gate that has no
+    #: matching gate_response yet (production reads ``state/escalations`` off
+    #: ``seed_path`` via run_signals.has_pending_gate). Checked before the dead-PID
+    #: branch so a gate-exited orchestrator reconciles ``paused_gate`` (recoverable +
+    #: surfaced) instead of being mislabelled ``failed``. Default never-pending →
+    #: unchanged behaviour.
+    gate_pending_of: Callable[["RegistryRow"], bool] = field(default=lambda _row: False)
 
 
 def run_reconcile_step(
@@ -303,6 +310,7 @@ def run_reconcile_step(
         progress_at=config.progress_at,
         completion_of=config.completion_of,
         hang_timeout_of=config.hang_timeout_of,
+        gate_pending_of=config.gate_pending_of,
     )
     if not actions:
         return actions

@@ -66,15 +66,21 @@ for round in 1 2 3 4 5; do
   # FUP-0842: revise_round — one event per plan_review ↔ planner --revise inner-loop round (§13 Q8
   # loop churn). Parse the reviewer's "Findings: N BLOCKER, N DRIFT" summary (best-effort; -1 when
   # unparseable); verdict=converged when the convergence regex matches, else revise. role=planner.
-  rr_converged=0
-  if printf '%s' "$CLEAN_RESULT" | grep -qF '## Session Plan Review Complete' \
-     && printf '%s' "$CLEAN_RESULT" | grep -qE '^-[[:space:]]*Findings:[[:space:]]*0[[:space:]]+BLOCKER,[[:space:]]*0[[:space:]]+DRIFT'; then
-    rr_converged=1
-  fi
+  # FUP-0770 + (2026-06-10) loop-convergence fix: parse the reviewer's
+  # "Findings: N BLOCKER, N DRIFT" counts FIRST, then converge whenever BLOCKER==0 AND
+  # DRIFT==0 under a real completion summary — keyed on the PARSED counts, not an exact
+  # line-format regex. Previously a clean 0/0 review whose Findings line varied in
+  # spacing/bold/leading-char failed the strict regex and looped to the 5-round cap
+  # despite zero blocking findings. COSMETIC never blocks (reviewer Step 6 model).
   rr_fb="$(printf '%s' "$CLEAN_RESULT" | grep -oE 'Findings:[[:space:]]*[0-9]+[[:space:]]+BLOCKER' | grep -oE '[0-9]+' | head -1)"
   rr_fd="$(printf '%s' "$CLEAN_RESULT" | grep -oE '[0-9]+[[:space:]]+DRIFT' | grep -oE '[0-9]+' | head -1)"
   [[ -z "$rr_fb" ]] && rr_fb=-1
   [[ -z "$rr_fd" ]] && rr_fd=-1
+  rr_converged=0
+  if printf '%s' "$CLEAN_RESULT" | grep -qF '## Session Plan Review Complete' \
+     && [[ "$rr_fb" -eq 0 && "$rr_fd" -eq 0 ]]; then
+    rr_converged=1
+  fi
   rr_verdict="revise"; [[ "$rr_converged" -eq 1 ]] && rr_verdict="converged"
   # Item-2 FR-052: stamp the session-plan shape on the revise_round event so the Run-Auditor's
   # learn_assembly can recover per-shape revision rates (which shapes keep needing reviewer

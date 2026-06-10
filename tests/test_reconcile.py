@@ -18,6 +18,7 @@ from supervisor.reconcile import (
     LIFECYCLE_PAUSED_GATE,
     REASON_COMPLETED,
     REASON_DEAD_PID,
+    REASON_PENDING_GATE,
     REASON_STALLED,
     RUN_COMPLETE,
     RUN_FAILED,
@@ -68,6 +69,33 @@ def test_stalled_run_paused_gate() -> None:
     assert actions[0].run_status == RUN_HALTED
     assert actions[0].lifecycle_state == LIFECYCLE_PAUSED_GATE
     assert actions[0].reason == REASON_STALLED
+
+
+def test_pending_gate_reconciles_paused_gate_not_failed() -> None:
+    # Orchestrator persisted a needs-review gate and EXITED (PID now dead). The gate
+    # check must precede the dead-PID branch → paused_gate (resumable + surfaced),
+    # NOT the failed mislabel that hides the gate and breaks gate_response→resume.
+    runs = [_run("p1", pid=4242, age_seconds=10)]
+    actions = derive_reconcile_actions(
+        runs,
+        pid_alive=lambda _pid: False,  # PID is dead (clean gate-exit)
+        now=_NOW,
+        hang_timeout_seconds=_HANG,
+        gate_pending_of=lambda _row: True,
+    )
+    assert len(actions) == 1
+    assert actions[0].run_status == RUN_HALTED
+    assert actions[0].lifecycle_state == LIFECYCLE_PAUSED_GATE
+    assert actions[0].reason == REASON_PENDING_GATE
+
+
+def test_gate_pending_default_off_preserves_dead_pid_failed() -> None:
+    # Without a gate_pending_of probe, a dead-PID run is still reaped failed (back-compat).
+    runs = [_run("p1", pid=4242, age_seconds=10)]
+    actions = derive_reconcile_actions(
+        runs, pid_alive=lambda _pid: False, now=_NOW, hang_timeout_seconds=_HANG
+    )
+    assert actions[0].reason == REASON_DEAD_PID
 
 
 def test_healthy_run_no_action() -> None:

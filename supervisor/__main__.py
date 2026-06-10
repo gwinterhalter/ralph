@@ -42,6 +42,7 @@ from supervisor.notifications import (
     build_notification_port,
 )
 from supervisor.heartbeats import read_heartbeats_from_log
+from supervisor.run_signals import has_pending_gate, latest_progress_ts
 from supervisor.pid_probe import format_pid_start_time, pid_alive, probe_pid_start_time
 from supervisor.ports import RegistryPort, RegistryRow
 from supervisor.run_auditor import RunAuditReport
@@ -117,13 +118,27 @@ def build_production_cycle(
     )
 
     def _progress_at(row: RegistryRow) -> str | None:
+        # Progress-based stall detection: read the run's OWN events.jsonl FRESH each
+        # pass (time since last progress), not a one-shot startup snapshot of one
+        # global log — the prior wiring froze ``heartbeats`` at build time, so a
+        # long-but-live multi-iteration Run was reaped on wall-clock-since-spawn.
+        seed = row.get("seed_path")
+        fresh = latest_progress_ts(seed if isinstance(seed, str) else None)
+        if fresh is not None:
+            return fresh
         project_id = row.get("project_id")
         if isinstance(project_id, str):
-            hb = heartbeats.get(project_id)
+            hb = heartbeats.get(project_id)  # startup-snapshot fallback
             if hb is not None:
                 return hb.isoformat()
         spawned = row.get("spawned_at")  # coarse fallback (D4 docstring)
         return str(spawned) if isinstance(spawned, str) and spawned else None
+
+    def _gate_pending_of(row: RegistryRow) -> bool:
+        # True iff the run escalated a needs-review gate awaiting an operator response
+        # → reconcile ``paused_gate`` (surfaced + resumable), not ``failed``.
+        seed = row.get("seed_path")
+        return has_pending_gate(seed if isinstance(seed, str) else None)
 
     def _hang_timeout_of(row: RegistryRow) -> "float | None":
         """Per-run stall budget (F-4): the run's seed ``budget.hang_timeout_seconds``
@@ -141,6 +156,7 @@ def build_production_cycle(
         clock=now,
         completion_of=completion_probe,
         hang_timeout_of=_hang_timeout_of,
+        gate_pending_of=_gate_pending_of,
     )
 
     def _stall_signals() -> dict[str, object]:
@@ -151,6 +167,7 @@ def build_production_cycle(
             hang_timeout_seconds=hang_timeout_seconds,
             progress_at=_progress_at,
             hang_timeout_of=_hang_timeout_of,
+            gate_pending_of=_gate_pending_of,
         )
         return dict(stall_signals_from_actions(actions))
 

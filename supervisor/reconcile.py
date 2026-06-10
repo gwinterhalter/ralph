@@ -50,6 +50,7 @@ LIFECYCLE_COMPLETE = "complete"
 REASON_DEAD_PID = "orchestrator_pid_dead"
 REASON_STALLED = "stalled_past_hang_timeout"
 REASON_COMPLETED = "initiative_complete"
+REASON_PENDING_GATE = "exited_with_pending_gate"
 
 
 @dataclass(frozen=True)
@@ -121,6 +122,12 @@ def _no_hang_override(_row: RegistryRow) -> "float | None":
     return None
 
 
+def _no_gate_pending(_row: RegistryRow) -> bool:
+    """Default pending-gate probe: never pending (preserves the failed/stall-only
+    behaviour for callers that don't wire a state-dir gate probe)."""
+    return False
+
+
 def derive_reconcile_actions(
     active_runs: Sequence[RegistryRow],
     *,
@@ -130,17 +137,23 @@ def derive_reconcile_actions(
     progress_at: Callable[[RegistryRow], str | None] = _default_progress_at,
     completion_of: Callable[[RegistryRow], "RunCompletion | None"] = _no_completion,
     hang_timeout_of: Callable[[RegistryRow], "float | None"] = _no_hang_override,
+    gate_pending_of: Callable[[RegistryRow], bool] = _no_gate_pending,
 ) -> list[ReconcileAction]:
     """Return the terminal reconciliations owed for ``active_runs``.
 
     A run whose ``completion_of`` probe reports a clean §13.1 INITIATIVE_COMPLETE is
     reconciled ``complete`` (checked FIRST — a completed orchestrator has already
     exited, so its PID is dead; without this it would be mis-reaped as ``failed``). A
-    run with a present ``orchestrator_pid`` that ``pid_alive`` reports dead is an
-    orphan -> ``failed``. A run still nominally alive (or with no pid recorded) whose
-    last progress is older than its hang budget is a stall -> ``halted`` /
-    ``paused_gate``. A run that is alive and progressing yields no action. Rows
-    missing a ``project_id`` are skipped (nothing to reconcile against).
+    run whose ``gate_pending_of`` probe reports an escalated-but-unanswered gate is
+    reconciled ``halted`` / ``paused_gate`` (checked BEFORE the dead-PID branch — a
+    needs-review gate makes the orchestrator persist the gate and EXIT, so its PID is
+    dead; without this it would be mis-reaped ``failed``, hiding the gate from the
+    operator surface and blocking the gate_response→resume path). A run with a present
+    ``orchestrator_pid`` that ``pid_alive`` reports dead is an orphan -> ``failed``. A
+    run still nominally alive (or with no pid recorded) whose last progress is older
+    than its hang budget is a stall -> ``halted`` / ``paused_gate``. A run that is
+    alive and progressing yields no action. Rows missing a ``project_id`` are skipped
+    (nothing to reconcile against).
 
     The stall budget is per-run: ``hang_timeout_of(row)`` (the production wiring reads
     the run's seed ``budget.hang_timeout_seconds``) when it returns a value, else the
@@ -163,6 +176,17 @@ def derive_reconcile_actions(
                     reason=REASON_COMPLETED,
                     terminated_at=completion.terminated_at,
                     terminal_cost_usd=completion.terminal_cost_usd,
+                )
+            )
+            continue
+
+        if gate_pending_of(row):
+            actions.append(
+                ReconcileAction(
+                    project_id=project_id,
+                    run_status=RUN_HALTED,
+                    lifecycle_state=LIFECYCLE_PAUSED_GATE,
+                    reason=REASON_PENDING_GATE,
                 )
             )
             continue
@@ -210,4 +234,5 @@ __all__ = [
     "REASON_DEAD_PID",
     "REASON_STALLED",
     "REASON_COMPLETED",
+    "REASON_PENDING_GATE",
 ]

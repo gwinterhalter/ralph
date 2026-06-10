@@ -96,7 +96,20 @@ def render_batch(batch: NotificationBatch) -> tuple[str, str]:
     """Render one planned batch to an ``(subject, body)`` pair (pure)."""
     tier = batch.tier.name
     count = len(batch.escalations)
-    subject = f"[ol-build supervisor] {tier} — {count} escalation(s) need attention"
+    # Name the project + gate in the SUBJECT (the line a phone/email preview shows). A
+    # single escalation names its project_id/gate_id directly; a batch names the first
+    # project + the overflow count so the operator knows what it concerns at a glance.
+    if count == 1:
+        esc0 = batch.escalations[0]
+        subject = f"[ol-build supervisor] {tier} — {esc0.project_id} / {esc0.gate_id} needs attention"
+    elif count > 1:
+        esc0 = batch.escalations[0]
+        subject = (
+            f"[ol-build supervisor] {tier} — {count} escalations "
+            f"({esc0.project_id} / {esc0.gate_id} +{count - 1} more)"
+        )
+    else:
+        subject = f"[ol-build supervisor] {tier} — escalation(s) need attention"
     lines = [f"{count} {tier.lower()}-tier escalation(s) require operator attention:", ""]
     for esc in batch.escalations:
         suggested = f" suggested={esc.suggested_option}" if esc.suggested_option else ""
