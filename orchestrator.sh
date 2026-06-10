@@ -413,7 +413,27 @@ while true; do
   # FUP-0790: skip plan_review when Planner escalated without a plan — execute_with_gates
   # below routes the gate_request files (broker writes pending_gate + exits 1 -> BLOCKED).
   if [[ -f "$ITER_DIR/session_plan_${ITER}.md" ]]; then
+    # Robustness (2026-06-10): capture plan_review.sh's exit code instead of a bare call under
+    # `set -e`. plan_review.sh exits 1 by DESIGN on 5-round non-convergence (writes an escalation
+    # file; its header says "orchestrator should block on gate_human") — the bare call let that
+    # designed non-zero (or any transient hook failure) propagate through `set -e` and KILL the
+    # orchestrator mid-transition (the intermittent "died around plan_review" crash → dead-PID
+    # reconcile → failed). Mirrors the execute_with_gates P4-03(b) carve below.
+    set +e
     "$SCRIPT_DIR/hooks/plan_review.sh" "$ITER_DIR/session_plan_${ITER}.md"
+    pr_rc=$?
+    set -e
+    if [[ "$pr_rc" -ne 0 ]]; then
+      log "ITERATION $ITER plan_review non-convergence/error (rc=$pr_rc) — routing as gate_human escalation, not crashing (§13.2)"
+      dispatch_notification "$SEED" "$STATE_DIR" gate_human \
+        "$(jq -nc --arg it "$ITER" --arg rc "$pr_rc" '{iteration:$it, reason:"plan_review_nonconvergence", plan_review_rc:$rc}')"
+      emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "orchestrator" "iteration_failed" "" "" "" \
+        "$(jq -nc --arg it "$ITER" --arg rc "$pr_rc" '{reason:"plan_review_nonconvergence", iteration:$it, plan_review_rc:$rc}')"
+      emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "orchestrator" "run_end" "" "" "" \
+        "$(jq -nc --arg it "$ITER" '{terminal_reason:"blocked_plan_review_nonconvergence", iteration:$it}')"
+      echo "BLOCKED: plan_review non-convergence (iteration $ITER) — awaiting operator gate_human" >&2
+      exit 0
+    fi
   else
     log "ITERATION $ITER Planner escalated without plan — skipping plan_review; routing gate_request(s) via execute_with_gates"
     # FUP-0842: iteration_failed — the Planner produced no session_plan (escalated-without-plan path);
