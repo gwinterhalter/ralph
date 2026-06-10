@@ -215,15 +215,18 @@ def test_cost_includes_live_inflight_spend(
     run_dir = tmp_path / "p1_run"
     (run_dir / "state").mkdir(parents=True)
     (run_dir / "state" / "spend.json").write_text(
-        json.dumps({"total_spend_usd": 3.25}), encoding="utf-8"
+        json.dumps({"total_spend_usd": 3.2567}), encoding="utf-8"  # >2dp → must round to cents
     )
     reg.active_runs = [{"project_id": "p1", "seed_path": str(run_dir / "seed.source.md")}]
-    # /api/projects: p1's completed cost is 0.00 (r2 failed); live in-flight 3.25 surfaces.
+    # /api/projects: p1's completed cost is 0.00 (r2 failed); live in-flight 3.2567 surfaces,
+    # formatted to a 2-decimal USD string (cents grain).
     projs = {p["project_id"]: p for p in c.get("/api/projects").json()["projects"]}
-    assert Decimal(projs["p1"]["cost_usd"]) == Decimal("3.25")
-    # /api/fleet total includes the live spend too (was 0 before the fix).
+    assert projs["p1"]["cost_usd"] == "3.26"  # 2dp, rounded
+    # /api/fleet total includes the live spend too, also 2dp.
     fleet = c.get("/api/fleet").json()
-    assert Decimal(fleet["total_cumulative_cost_usd"]) >= Decimal("3.25")
+    assert fleet["total_cumulative_cost_usd"].count(".") == 1
+    assert len(fleet["total_cumulative_cost_usd"].split(".")[1]) == 2
+    assert Decimal(fleet["total_cumulative_cost_usd"]) >= Decimal("3.26")
 
 
 def test_fleet_ceiling_reflects_env(

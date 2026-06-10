@@ -19,7 +19,7 @@ import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -108,6 +108,14 @@ def _resolve_ceiling() -> int:
     return DEFAULT_CONCURRENCY_CEILING
 
 
+def _money2(value: object) -> str:
+    """Format a cost to a 2-decimal USD string (e.g. '157.30') — cents grain for GUI display."""
+    try:
+        return str(Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+    except (ArithmeticError, ValueError, TypeError):
+        return "0.00"
+
+
 def _jsonable(value: object) -> Any:
     """Recursively coerce Decimals/datetimes/dataclasses into JSON-safe values."""
     if isinstance(value, Decimal):
@@ -124,11 +132,11 @@ def _jsonable(value: object) -> Any:
 def _snapshot_dict(snap: FullFleetSnapshot) -> dict[str, Any]:
     return {
         "as_of": snap.as_of.isoformat(),
-        "rows": [_jsonable(asdict(r)) for r in snap.rows],
+        "rows": [_jsonable({**asdict(r), "cumulative_cost_usd": _money2(r.cumulative_cost_usd)}) for r in snap.rows],
         "counts_by_lifecycle_state": dict(snap.counts_by_lifecycle_state),
         "total_attention_debt": snap.total_attention_debt,
         "total_open_work_count": snap.total_open_work_count,
-        "total_cumulative_cost_usd": str(snap.total_cumulative_cost_usd),
+        "total_cumulative_cost_usd": _money2(snap.total_cumulative_cost_usd),
         "running_count": snap.running_count,
         "stalled_count": snap.stalled_count,
         "concurrency_ceiling": snap.concurrency_ceiling,
@@ -354,7 +362,7 @@ def create_app(
                 "lifecycle_state": str(p.get("lifecycle_state") or ""),
                 "attention_debt": p.get("attention_debt") or 0,
                 "depends_on": list(deps) if isinstance(deps, (list, tuple)) else [],
-                "cost_usd": str(cost.get(pid, Decimal("0"))),
+                "cost_usd": _money2(cost.get(pid, Decimal("0"))),
                 "runs": runs_by_project.get(pid, 0),
             })
         out.sort(key=lambda r: r["project_id"])
@@ -369,7 +377,7 @@ def create_app(
                 "run_id": str(r.get("run_id") or ""),
                 "project_id": str(r.get("project_id") or ""),
                 "status": str(r.get("status") or ""),
-                "cost_usd": str(r.get("terminal_cost_usd") or "0"),
+                "cost_usd": _money2(r.get("terminal_cost_usd") or "0"),
                 "spawned_at": _jsonable(r.get("spawned_at")),
                 "terminated_at": _jsonable(r.get("terminated_at")),
             }
@@ -377,7 +385,7 @@ def create_app(
         ]
         out.sort(key=lambda r: str(r["terminated_at"] or ""), reverse=True)
         total = sum((Decimal(str(r["cost_usd"] or "0")) for r in out), Decimal("0"))
-        return {"runs": out, "count": len(out), "total_cost_usd": str(total)}
+        return {"runs": out, "count": len(out), "total_cost_usd": _money2(total)}
 
     @app.get("/api/loop-status")
     def loop_status() -> dict[str, Any]:
