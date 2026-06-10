@@ -62,6 +62,20 @@ export interface PendingGate {
   project_id: string;
 }
 
+export interface AnsweredGate {
+  request_path: string;
+  gate_id: string;
+  question_text: string;
+  options: GateOption[];
+  project_id: string;
+  selected_option: string | null;
+  custom_text: string | null;
+  reasoning: string;
+  confidence: number | null;
+  classification_check: string;
+  answered_via: string;
+}
+
 export interface ProjectForecast {
   project_id: string;
   basis: string;
@@ -153,6 +167,7 @@ export const api = {
   inbox: () => getJSON<{ cards: InboxCard[]; count: number }>("/api/inbox"),
   fleet: () => getJSON<FleetSnapshot>("/api/fleet"),
   gates: () => getJSON<{ gates: PendingGate[] }>("/api/gates"),
+  answeredGates: () => getJSON<{ gates: AnsweredGate[]; count: number }>("/api/gates/answered"),
   learnings: (status?: string) =>
     getJSON<{ findings: Finding[]; by_status: Record<string, number> }>(
       "/api/learnings" + (status ? `?status=${encodeURIComponent(status)}` : ""),

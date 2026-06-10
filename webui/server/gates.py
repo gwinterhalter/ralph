@@ -68,6 +68,53 @@ def list_pending_gates(dirs: Iterable[str | Path]) -> list[dict[str, Any]]:
     return pending
 
 
+def list_answered_gates(dirs: Iterable[str | Path]) -> list[dict[str, Any]]:
+    """Answered gates across all given dirs: each ``gate_request_*.json`` that HAS a matching
+    ``gate_response_*.json``, paired with the answer. Gives the operator a GUI audit of every
+    resolved gate — the question PLUS who answered it and how (selected_option / custom_text /
+    reasoning / confidence) — including auto-answers, which otherwise drop off the pending list
+    with no surface. Newest-first by response mtime."""
+    answered: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in dirs:
+        d = Path(raw)
+        if not d.is_dir() or str(d) in seen:
+            continue
+        seen.add(str(d))
+        for req in d.glob(GATE_REQUEST_GLOB):
+            resp = _response_path(req)
+            if not resp.is_file():
+                continue
+            try:
+                qd = json.loads(req.read_text(encoding="utf-8"))
+                rd = json.loads(resp.read_text(encoding="utf-8"))
+                resolved_at = resp.stat().st_mtime
+            except (json.JSONDecodeError, OSError):
+                continue
+            if not isinstance(qd, dict) or not isinstance(rd, dict):
+                continue
+            src = str(rd.get("source") or "")
+            answered.append({
+                "request_path": str(req),
+                "request_file": req.name,
+                "gate_id": str(qd.get("gate_id", "")),
+                "question_text": str(qd.get("question_text", "")),
+                "options": _normalize_options(qd.get("options")),
+                "cluster": qd.get("cluster"),
+                "project_id": str(qd.get("project_id") or qd.get("initiative_slug") or ""),
+                "selected_option": rd.get("selected_option"),
+                "custom_text": rd.get("custom_text"),
+                "reasoning": str(rd.get("reasoning", "")),
+                "confidence": rd.get("confidence"),
+                "classification_check": str(rd.get("classification_check") or ""),
+                # how it was answered: broker auto_resolve, operator/auto async response, or unknown
+                "answered_via": src or ("operator_or_auto" if rd.get("selected_option") or rd.get("custom_text") else ""),
+                "resolved_at": resolved_at,
+            })
+    answered.sort(key=lambda g: g.get("resolved_at") or 0.0, reverse=True)
+    return answered
+
+
 def write_gate_response(
     request_path: str | Path,
     *,
@@ -96,4 +143,4 @@ def write_gate_response(
     return out
 
 
-__all__ = ["GATE_REQUEST_GLOB", "list_pending_gates", "write_gate_response"]
+__all__ = ["GATE_REQUEST_GLOB", "list_pending_gates", "list_answered_gates", "write_gate_response"]

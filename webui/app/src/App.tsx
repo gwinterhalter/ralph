@@ -2,14 +2,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import type {
   InboxCard, FleetSnapshot, Finding, EffectRow, Forecast, EventRow, ActionRow, GraphNode, GraphEdge,
-  ProjectRow, RunRow, LoopStatus, Throttling,
+  ProjectRow, RunRow, LoopStatus, Throttling, AnsweredGate,
 } from "./api";
 import {
   InboxView, FleetView, RunsView, ImproveView, EffectsView, SpendView, EventsView, ActionsView,
-  GraphView, SupervisorControls,
+  GraphView, SupervisorControls, AnsweredGatesView,
 } from "./views";
 
-type Tab = "home" | "fleet" | "runs" | "improve" | "effects" | "spend" | "events" | "graph" | "actions";
+type Tab = "home" | "fleet" | "runs" | "improve" | "effects" | "spend" | "events" | "graph" | "actions" | "gates";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "home", label: "Home" },
@@ -21,6 +21,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "events", label: "Events" },
   { id: "graph", label: "Graph" },
   { id: "actions", label: "Actions" },
+  { id: "gates", label: "Gates" },
 ];
 
 function loopLabel(loop: LoopStatus | null): string {
@@ -46,6 +47,7 @@ export default function App() {
   const [events, setEvents] = useState<EventRow[]>([]);
   const [eventMeta, setEventMeta] = useState<{ total: number; failures: number }>({ total: 0, failures: 0 });
   const [actions, setActions] = useState<ActionRow[]>([]);
+  const [answeredGates, setAnsweredGates] = useState<AnsweredGate[]>([]);
   const [graph, setGraph] = useState<{ nodes: GraphNode[]; edges: GraphEdge[] }>({ nodes: [], edges: [] });
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [rowEvents, setRowEvents] = useState<EventRow[]>([]);
@@ -62,15 +64,16 @@ export default function App() {
   const loadAll = useCallback(async () => {
     try {
       setError(null);
-      const [inbox, fl, pr, rn, lp, learn, eff, fc, th, ev, acts, gr] = await Promise.all([
+      const [inbox, fl, pr, rn, lp, learn, eff, fc, th, ev, acts, gr, ag] = await Promise.all([
         api.inbox(), api.fleet(), api.projects(), api.runs(), api.loopStatus(), api.learnings(),
         api.effects(), api.forecast(), api.throttling(), api.events(), api.actions(), api.graph(),
+        api.answeredGates(),
       ]);
       setCards(inbox.cards); setFleet(fl); setProjects(pr.projects);
       setRuns(rn.runs); setRunsTotal(rn.total_cost_usd); setLoop(lp);
       setFindings(learn.findings); setEffects(eff.effects); setByOutcome(eff.by_outcome);
       setForecast(fc); setThrottling(th); setEvents(ev.events); setEventMeta(ev.metrics);
-      setActions(acts.actions); setGraph(gr);
+      setActions(acts.actions); setGraph(gr); setAnsweredGates(ag.gates);
     } catch (e) {
       setError(String(e));
     }
@@ -199,6 +202,7 @@ export default function App() {
         {tab === "events" && <EventsView events={events} total={eventMeta.total} failures={eventMeta.failures} />}
         {tab === "graph" && <GraphView nodes={graph.nodes} edges={graph.edges} />}
         {tab === "actions" && <ActionsView actions={actions} />}
+        {tab === "gates" && <AnsweredGatesView gates={answeredGates} />}
       </main>
     </div>
   );

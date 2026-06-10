@@ -287,6 +287,15 @@ def create_app(
         ib, _ = _inbox_payload(registry_provider())
         return ib
 
+    @app.get("/api/gates/answered")
+    def gates_answered() -> dict[str, Any]:
+        """Resolved gates (question + the answer: selected_option/custom_text + reasoning +
+        confidence + how it was answered) — the audit surface for auto-answers, which drop off
+        the pending /api/gates list once resolved."""
+        reg = registry_provider()
+        items = gates.list_answered_gates(_gate_dirs(reg))
+        return {"gates": items, "count": len(items)}
+
     @app.get("/api/stream")
     def stream(
         interval: float = Query(default=5.0, ge=0.5, le=60.0),

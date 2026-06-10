@@ -346,6 +346,25 @@ def test_gates_list_and_resolve(client: tuple[TestClient, FakeRegistry]) -> None
     assert c.get("/api/gates").json()["gates"] == []  # no longer pending
 
 
+def test_answered_gates_surfaces_question_and_answer(
+    client: tuple[TestClient, FakeRegistry]
+) -> None:
+    # Audit view: once a gate is resolved it drops off /api/gates (pending) but must appear in
+    # /api/gates/answered with the question + the answer (selected_option, reasoning, confidence).
+    c, _ = client
+    path = _seed_gate(c.state_dir)  # type: ignore[attr-defined]
+    assert c.get("/api/gates/answered").json()["count"] == 0  # nothing answered yet
+    c.post("/api/gates/resolve", json={"request_path": path, "selected_option": "proceed", "by": "greg"})
+    answered = c.get("/api/gates/answered").json()
+    assert answered["count"] == 1
+    g = answered["gates"][0]
+    assert g["gate_id"] == "abs-phase-boundary"
+    assert g["question_text"] == "proceed to Phase 1?"
+    assert g["selected_option"] == "proceed"
+    assert g["confidence"] is not None  # conformant response carries confidence
+    assert c.get("/api/gates").json()["gates"] == []  # no longer pending
+
+
 def test_gate_resolve_rejects_bad_option(client: tuple[TestClient, FakeRegistry]) -> None:
     c, _ = client
     path = _seed_gate(c.state_dir)  # type: ignore[attr-defined]

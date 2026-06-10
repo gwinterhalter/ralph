@@ -1,7 +1,7 @@
 // Presentational views — pure functions of props (no fetching), so they unit-test cleanly.
 import type {
   InboxCard, FleetSnapshot, Finding, EffectRow, Forecast, EventRow, ActionRow, GraphNode, GraphEdge,
-  ProjectRow, RunRow, LoopStatus, Throttling,
+  ProjectRow, RunRow, LoopStatus, Throttling, AnsweredGate,
 } from "./api";
 
 export function SupervisorControls(props: {
@@ -404,6 +404,29 @@ export function ActionsView(props: { actions: ActionRow[] }) {
             <li key={`${a.ts}:${i}`}>
               <span className="e-ts">{a.ts}</span> <strong>{a.action}</strong> {a.target}
               {a.detail ? ` (${a.detail})` : ""} — {a.by}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+export function AnsweredGatesView(props: { gates: AnsweredGate[] }) {
+  return (
+    <div>
+      <h2>Answered gates</h2>
+      <p className="muted">Resolved gate questions and the answer given (operator, auto-answer, or broker
+        auto-resolve) — the audit trail for gates that drop off the pending list once answered.</p>
+      {props.gates.length === 0 ? <p>No answered gates yet.</p> : (
+        <ul className="events" aria-label="Answered gates">
+          {props.gates.map((g, i) => (
+            <li key={`${g.request_path}:${i}`}>
+              <div><strong>{g.project_id}</strong> · {g.gate_id}
+                {" "}<span className="muted">[{g.answered_via || "?"}{g.confidence != null ? `, conf ${g.confidence}` : ""}]</span></div>
+              <div>Q: {g.question_text}</div>
+              <div>→ <strong>{g.selected_option ?? g.custom_text ?? "(none)"}</strong></div>
+              {g.reasoning ? <div className="muted">{g.reasoning}</div> : null}
             </li>
           ))}
         </ul>
