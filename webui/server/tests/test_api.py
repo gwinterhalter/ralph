@@ -64,6 +64,7 @@ class FakeRegistry:
             {"run_id": "r2", "project_id": "p1", "status": "failed", "terminal_cost_usd": "0.00",
              "spawned_at": "2026-06-08T07:00:00+00:00", "terminated_at": "2026-06-08T07:30:00+00:00"},
         ]
+        self.active_runs: list[dict[str, object]] = []
         self.cumulative_spend = Decimal("12.00")
         self.status_calls: list[tuple[str, str, str]] = []
         self.pruned: list[str] = []
@@ -77,6 +78,7 @@ class FakeRegistry:
     def read_correction_summary(self): return self.corrections_rows
     def read_learning_records(self): return self.learning_rows
     def read_completed_runs(self): return self.completed_runs
+    def read_active_runs(self): return self.active_runs
     def read_cumulative_spend_usd(self): return self.cumulative_spend
 
     def read_events_db(self, *, project_id=None, event_type=None, limit=50):
@@ -201,6 +203,27 @@ def test_fleet_serializes_rows(client: tuple[TestClient, FakeRegistry]) -> None:
     assert body["running_count"] == 1
     # Decimal serialized as a string, never a float (NFR-007).
     assert isinstance(body["total_cumulative_cost_usd"], str)
+
+
+def test_cost_includes_live_inflight_spend(
+    client: tuple[TestClient, FakeRegistry], tmp_path: Path
+) -> None:
+    # "old projects show cost, new ones don't" fix: a still-running run has no
+    # terminal_cost_usd yet, so its live spend (state/spend.json) must surface in the
+    # per-project cost AND the fleet total — not show $0 until it completes.
+    c, reg = client
+    run_dir = tmp_path / "p1_run"
+    (run_dir / "state").mkdir(parents=True)
+    (run_dir / "state" / "spend.json").write_text(
+        json.dumps({"total_spend_usd": 3.25}), encoding="utf-8"
+    )
+    reg.active_runs = [{"project_id": "p1", "seed_path": str(run_dir / "seed.source.md")}]
+    # /api/projects: p1's completed cost is 0.00 (r2 failed); live in-flight 3.25 surfaces.
+    projs = {p["project_id"]: p for p in c.get("/api/projects").json()["projects"]}
+    assert Decimal(projs["p1"]["cost_usd"]) == Decimal("3.25")
+    # /api/fleet total includes the live spend too (was 0 before the fix).
+    fleet = c.get("/api/fleet").json()
+    assert Decimal(fleet["total_cumulative_cost_usd"]) >= Decimal("3.25")
 
 
 def test_fleet_ceiling_reflects_env(

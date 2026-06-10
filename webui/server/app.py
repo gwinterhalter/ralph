@@ -58,6 +58,7 @@ class RegistryLike(Protocol):
     def read_correction_summary(self) -> Sequence[Mapping[str, object]]: ...
     def read_learning_records(self) -> Sequence[Mapping[str, object]]: ...
     def read_completed_runs(self) -> Sequence[Mapping[str, object]]: ...
+    def read_active_runs(self) -> Sequence[Mapping[str, object]]: ...
     def read_cumulative_spend_usd(self) -> Decimal: ...
     def read_events_db(
         self, *, project_id: str | None = ..., event_type: str | None = ..., limit: int = ...
@@ -213,7 +214,8 @@ def create_app(
     def _inbox_payload(reg: RegistryLike) -> tuple[dict[str, Any], dict[str, Any]]:
         """(inbox, fleet) dicts from one snapshot — shared by /api/inbox, /api/fleet, /api/stream."""
         snap = build_full_fleet_snapshot(
-            reg, now=datetime.now(timezone.utc), concurrency_ceiling=_resolve_ceiling()  # type: ignore[arg-type]
+            reg, now=datetime.now(timezone.utc), concurrency_ceiling=_resolve_ceiling(),  # type: ignore[arg-type]
+            cumulative_costs=_cost_by_project(reg),  # completed terminal + live in-flight spend
         )
         cards = build_inbox(
             fleet_rows=snap.rows,
@@ -226,7 +228,36 @@ def create_app(
         )
         return {"cards": [asdict(c) for c in cards], "count": len(cards)}, _snapshot_dict(snap)
 
+    def _live_spend_by_project(reg: RegistryLike) -> dict[str, Decimal]:
+        """In-flight spend for currently-running runs, read FRESH from each run's
+        ``state/spend.json`` (``total_spend_usd``). A running run has no
+        ``terminal_cost_usd`` yet (that's set at completion-reconcile), so without this
+        a still-running / reaped-before-completion project shows $0 cost in the GUI even
+        while it spends — the "old projects show cost, new ones don't" gap. Best-effort:
+        a missing/garbled spend.json contributes nothing."""
+        totals: dict[str, Decimal] = {}
+        try:
+            active = reg.read_active_runs()
+        except Exception:  # noqa: BLE001  (read_active_runs is additive; tolerate absence)
+            return totals
+        for run in active:
+            pid = str(run.get("project_id") or run.get("project_slug") or "")
+            seed = run.get("seed_path")
+            if not pid or not isinstance(seed, str) or not seed:
+                continue
+            try:
+                data = json.loads((Path(seed).parent / "state" / "spend.json").read_text(encoding="utf-8"))
+                raw = data.get("total_spend_usd")
+                cost = Decimal(str(raw)) if raw is not None else Decimal("0")
+            except (OSError, ValueError, json.JSONDecodeError, ArithmeticError):
+                continue
+            totals[pid] = totals.get(pid, Decimal("0")) + cost
+        return totals
+
     def _cost_by_project(reg: RegistryLike) -> dict[str, Decimal]:
+        """Per-project cost = completed runs' terminal cost PLUS live in-flight spend of
+        any currently-running run (so a project that is still running — or was reaped
+        before a clean completion-reconcile — surfaces its real spend, not $0)."""
         totals: dict[str, Decimal] = {}
         for run in reg.read_completed_runs():
             pid = str(run.get("project_id") or "")
@@ -236,6 +267,8 @@ def create_app(
             except Exception:  # noqa: BLE001
                 cost = Decimal("0")
             totals[pid] = totals.get(pid, Decimal("0")) + cost
+        for pid, live in _live_spend_by_project(reg).items():
+            totals[pid] = totals.get(pid, Decimal("0")) + live
         return totals
 
     # ---- reads -------------------------------------------------------------------------------
