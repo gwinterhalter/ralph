@@ -12,7 +12,7 @@ messages without opening a socket, and ``render_batch`` is a pure, golden-assert
 formatter. The port is a **no-op** when unconfigured (no recipients) or when the
 plan has no batches — quiet-hours deferral and an empty fleet stay silent. The
 production cycle builds the config from ``OL_SUPERVISOR_SMTP_*`` env vars (parallel
-to ``OL_SUPERVISOR_DB_URL``); when they are unset, :class:`NullNotificationPort` is
+to ``PROD_DB_URL``); when they are unset, :class:`NullNotificationPort` is
 used and nothing is sent.
 """
 
@@ -91,6 +91,11 @@ class NotificationPort(Protocol):
 
     def deliver(self, plan: NotificationPlan) -> int: ...
 
+    def send_message(self, subject: str, body: str) -> int:
+        """Send ONE ad-hoc message (a lifecycle milestone — project started / finished /
+        stopped), bypassing the escalation/attention machinery. Returns 1 if sent, 0 no-op."""
+        ...
+
 
 def render_batch(batch: NotificationBatch) -> tuple[str, str]:
     """Render one planned batch to an ``(subject, body)`` pair (pure)."""
@@ -132,6 +137,9 @@ class NullNotificationPort:
     def deliver(self, plan: NotificationPlan) -> int:
         return 0
 
+    def send_message(self, subject: str, body: str) -> int:
+        return 0
+
 
 @dataclass
 class SmtpNotificationPort:
@@ -171,6 +179,24 @@ class SmtpNotificationPort:
                 client.send_message(msg)
                 sent += 1
         return sent
+
+    def send_message(self, subject: str, body: str) -> int:
+        """Send one ad-hoc lifecycle-milestone email over the same SMTP config. No-op when
+        there are no recipients. Returns 1 on send, 0 otherwise."""
+        if not self.config.recipients:
+            return 0
+        with self._client() as client:
+            if self.config.use_tls:
+                client.starttls()
+            if self.config.username and self.config.password:
+                client.login(self.config.username, self.config.password)
+            msg = EmailMessage()
+            msg["From"] = self.config.sender
+            msg["To"] = ", ".join(self.config.recipients)
+            msg["Subject"] = subject
+            msg.set_content(body)
+            client.send_message(msg)
+        return 1
 
 
 def build_notification_port(

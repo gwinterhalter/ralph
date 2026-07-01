@@ -89,7 +89,12 @@ budget:
   iterations_max: 20
   tokens_usd: 50.00
   hang_timeout_seconds: 1800
-notification_channel: "wintoast:default"
+# FUP-0863: default to the DELIVERING channel (gmail_smtp) so a "needs operator answer"
+# escalation actually reaches you (email -> phone push). The scalar `gmail_smtp:default` form
+# auto-resolves the F_GMAIL_SMTP_USER / _TO / _APP_PASSWORD / _HOST / _PORT env vars and falls
+# back to a desktop win11toast when SMTP is unset. `wintoast:default` (the old default) is
+# DESKTOP-ONLY — it cannot reach a phone and is invisible on a headless/unattended host.
+notification_channel: "gmail_smtp:default"
 permission_posture: "--permission-mode auto"
 ---
 

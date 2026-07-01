@@ -13,7 +13,7 @@ illegal §5.3 transition (FR-008) is rejected at the write boundary.
 The DB connection is constructor-injected (a psycopg ``Connection``, or any object
 exposing the same ``cursor()`` / ``commit()`` surface), so the component suite
 substitutes an in-memory fake and runs hermetically. The live branch connection
-(env var ``OL_SUPERVISOR_DB_URL``) is provisioned and exercised only at C2/OLB-08
+(env var ``PROD_DB_URL``) is provisioned and exercised only at C2/OLB-08
 per the seed's no-big-bang principle; ``psycopg`` is imported lazily in
 :meth:`Registry.from_env` so importing this module needs no driver and no
 database.
@@ -76,7 +76,7 @@ class DBConnection(Protocol):
 # Env var carrying the branch session-pooler connection string. Read only by the
 # live-connection factory (:meth:`Registry.from_env`); the unit suite never sets
 # it (it injects a fake connection instead).
-DB_URL_ENV = "OL_SUPERVISOR_DB_URL"
+DB_URL_ENV = "PROD_DB_URL"
 
 # The columns read back by read_candidates / read_running: the seven legacy
 # ``projects`` columns plus the five supervision columns (Spec v1.3 §5.2). Named
@@ -830,6 +830,72 @@ class Registry:
             "WHERE project_slug = %s AND status = 'running'",
             (start_time, project_id),
         )
+
+    def record_run_failure_detail(self, project_id: str, detail: str) -> None:
+        """FUP-0868: persist a spawn / dispatch FAILURE reason into the Run's
+        ``metadata.failure_detail`` so a failed Run is diagnosable post-hoc.
+
+        The §6.3 ``admit_and_spawn`` reconcile path turns a failed spawn into a ``failed``
+        Run + ``failed`` Project, but the structured ``ReconciledFailure.detail`` (e.g. "no
+        bash executable on PATH", "Blast-Radius Scope declares no writable root") was dropped —
+        the 2026-06-11 M4G run left ``ralph_runs.metadata = {}`` on the failed S1 row, making
+        the spawn failure undiagnosable. This merges the detail (``||``, preserving other keys)
+        onto the Project's most-recent Run row. Concrete-only — NOT on the ``RegistryPort``
+        Protocol (no test-double ripple); the Schedule wiring consumes it via the injected
+        ``record_failure_detail`` callable. The value is parameterised; the JSON key is a SQL
+        literal (no injection vector)."""
+        self._execute_write(
+            "UPDATE ralph_runs SET "
+            "metadata = COALESCE(metadata, '{}'::jsonb) "
+            "|| jsonb_build_object('failure_detail', %s::text), "
+            "updated_at = now() "
+            "WHERE run_id = (SELECT run_id FROM ralph_runs "
+            "WHERE project_slug = %s ORDER BY created_at DESC LIMIT 1)",
+            (detail, project_id),
+        )
+
+    def read_latest_run_per_project(self) -> dict[str, dict[str, object]]:
+        """FUP-0873/0876: the most-recent ``ralph_runs`` row per project — its ``status``,
+        ``spawned_at`` / ``terminated_at`` (ISO strings) and ``metadata.failure_detail`` — so the
+        GUI Fleet view can show a blocked/failed shard's REASON (not a bare badge) and a
+        Duration(min) column. Read-only; ISO-coerces the timestamps."""
+        out: dict[str, dict[str, object]] = {}
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT ON (project_slug) project_slug, status, spawned_at, "
+                "terminated_at, metadata->>'failure_detail' "
+                "FROM ralph_runs ORDER BY project_slug, created_at DESC"
+            )
+            for slug, status, spawned, terminated, detail in cur.fetchall():
+                out[str(slug)] = {
+                    "run_status": status,
+                    "spawned_at": spawned.isoformat() if hasattr(spawned, "isoformat") else spawned,
+                    "terminated_at": (
+                        terminated.isoformat() if hasattr(terminated, "isoformat") else terminated
+                    ),
+                    "failure_detail": detail,
+                }
+        return out
+
+    def read_delivered_notification_keys(self) -> set[str]:
+        """FUP-0879: the set of already-delivered escalation keys (pipe-joined
+        ``project_id|gate_id|raised_at``). Loaded at supervisor startup so the notification
+        dedup ledger SURVIVES a loop restart — otherwise each restart resets an in-memory set
+        and re-sends every still-queued escalation (the 2026-06-11 restart re-spam, where 4
+        loop restarts re-emailed the routine offers)."""
+        with self._conn.cursor() as cur:
+            cur.execute("SELECT delivery_key FROM notification_deliveries")
+            return {str(row[0]) for row in cur.fetchall()}
+
+    def record_delivered_notification_keys(self, keys: Sequence[str]) -> None:
+        """FUP-0879: persist newly-delivered escalation keys (idempotent ON CONFLICT upsert) so
+        they are not re-sent after a restart. No-op on an empty set."""
+        for key in keys:
+            self._execute_write(
+                "INSERT INTO notification_deliveries (delivery_key) VALUES (%s) "
+                "ON CONFLICT (delivery_key) DO NOTHING",
+                (key,),
+            )
 
     @staticmethod
     def _assert_run_status_legal(status: str) -> None:

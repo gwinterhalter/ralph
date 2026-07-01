@@ -43,6 +43,25 @@ PLAN_REVIEW_MODEL="$(read_seed_field "$SEED_PATH" .plan_review_model 2>/dev/null
 PLAN_REVIEW_MODEL_FLAG=""
 [[ -n "$PLAN_REVIEW_MODEL" ]] && PLAN_REVIEW_MODEL_FLAG="--model $PLAN_REVIEW_MODEL"
 
+# Transient-resilience (2026-06-11): a single `claude` call can exit non-zero on a transient
+# rate-limit / usage / network blip. Under `set -euo pipefail` that abort propagated out of this
+# hook and was misreported by orchestrator.sh as plan_review *non-convergence* — a spurious
+# gate_human block (the genuine <=5-round non-convergence path writes an escalation file; a
+# transient abort does NOT, so the two were indistinguishable to the orchestrator). Retry the call
+# up to 3 attempts with linear backoff; only a persistent failure propagates. Usage:
+#   run_claude_retry <out_file> <claude args...>
+run_claude_retry() {
+  local _out="$1"; shift
+  local _attempt _rc=0
+  for _attempt in 1 2 3; do
+    _rc=0
+    claude "$@" > "$_out" || _rc=$?
+    [[ "$_rc" -eq 0 ]] && return 0
+    if [[ "$_attempt" -lt 3 ]]; then sleep $(( _attempt * 15 )); fi
+  done
+  return "$_rc"
+}
+
 for round in 1 2 3 4 5; do
   FINDINGS="$ITER_DIR/review_findings_${round}.json"
   RESULT_TEXT="$ITER_DIR/review_result_${round}.txt"
@@ -50,8 +69,8 @@ for round in 1 2 3 4 5; do
   # FUP-0743: --add-dir "$CLAUDE_SKILLS_DIR" -- required so the slash command resolves from
   # the ralph/ CWD (skills live in a SIBLING tree); env var exported by orchestrator.sh.
   # shellcheck disable=SC2086  # PLAN_REVIEW_MODEL_FLAG is intentionally word-split (flag + value or empty)
-  claude -p $PLAN_REVIEW_MODEL_FLAG --output-format json --max-budget-usd "$BUDGET_CAP" \
-    --add-dir "$CLAUDE_SKILLS_DIR" -- "/cf-session-plan-reviewer $PLAN_PATH" > "$FINDINGS"
+  run_claude_retry "$FINDINGS" -p $PLAN_REVIEW_MODEL_FLAG --output-format json --max-budget-usd "$BUDGET_CAP" \
+    --add-dir "$CLAUDE_SKILLS_DIR" -- "/cf-session-plan-reviewer $PLAN_PATH"
   # Extract .result field for convergence regex (newlines unescaped) — FUP-0720.
   jq -r '.result // empty' "$FINDINGS" > "$RESULT_TEXT"
   # Converged when the reviewer emits its completion block reporting zero BLOCKER
@@ -96,8 +115,8 @@ for round in 1 2 3 4 5; do
   # Else invoke planner --revise to produce a revised plan (overwrites $PLAN_PATH).
   # FUP-0743: --add-dir + -- (same rationale as the reviewer call above).
   # shellcheck disable=SC2086  # PLAN_REVIEW_MODEL_FLAG is intentionally word-split (flag + value or empty)
-  claude -p $PLAN_REVIEW_MODEL_FLAG --output-format json --max-budget-usd "$BUDGET_CAP" \
-    --add-dir "$CLAUDE_SKILLS_DIR" -- "/rl-initiative-planner --revise $FINDINGS" > "$ITER_DIR/revise_round_${round}.json"
+  run_claude_retry "$ITER_DIR/revise_round_${round}.json" -p $PLAN_REVIEW_MODEL_FLAG --output-format json --max-budget-usd "$BUDGET_CAP" \
+    --add-dir "$CLAUDE_SKILLS_DIR" -- "/rl-initiative-planner --revise $FINDINGS"
 done
 
 # Did not converge — write escalation (§13.2 exit 1).

@@ -461,9 +461,9 @@ def _main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI entry
     state_dir = Path(args.state_dir)
 
     if args.cmd == "metrics" and getattr(args, "fleet", False):
-        dsn = os.environ.get("OL_SUPERVISOR_DB_URL")
+        dsn = os.environ.get("PROD_DB_URL")
         if not dsn:
-            print("control_panel metrics --fleet: OL_SUPERVISOR_DB_URL is not set.")
+            print("control_panel metrics --fleet: PROD_DB_URL is not set.")
             return 1
         from supervisor.registry import Registry
 
@@ -473,9 +473,9 @@ def _main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI entry
         return 0
 
     if args.cmd == "events":
-        dsn = os.environ.get("OL_SUPERVISOR_DB_URL")
+        dsn = os.environ.get("PROD_DB_URL")
         if not dsn:
-            print("control_panel events: OL_SUPERVISOR_DB_URL is not set.")
+            print("control_panel events: PROD_DB_URL is not set.")
             return 1
         from supervisor.registry import Registry
 
@@ -506,9 +506,9 @@ def _main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI entry
         return 0
 
     if args.cmd == "status":
-        dsn = os.environ.get("OL_SUPERVISOR_DB_URL")
+        dsn = os.environ.get("PROD_DB_URL")
         if not dsn:
-            print("control_panel status: OL_SUPERVISOR_DB_URL is not set — cannot read the live fleet.")
+            print("control_panel status: PROD_DB_URL is not set — cannot read the live fleet.")
             return 1
         from supervisor.full_status_surface import build_full_fleet_snapshot
         from supervisor.registry import Registry
@@ -525,9 +525,9 @@ def _main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI entry
         return run_status_panel(_fetch, interval_seconds=args.interval, once=args.once)
 
     if args.cmd == "learnings":
-        dsn = os.environ.get("OL_SUPERVISOR_DB_URL")
+        dsn = os.environ.get("PROD_DB_URL")
         if not dsn:
-            print("control_panel learnings: OL_SUPERVISOR_DB_URL is not set — cannot read learnings.")
+            print("control_panel learnings: PROD_DB_URL is not set — cannot read learnings.")
             return 1
         from supervisor.registry import Registry
 
@@ -547,9 +547,9 @@ def _main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI entry
             print(render_chain_plan(plan))
             print("(dry-run — pass --apply to provision)")
             return 0
-        dsn = os.environ.get("OL_SUPERVISOR_DB_URL")
+        dsn = os.environ.get("PROD_DB_URL")
         if not dsn:
-            print("control_panel onramp-abs --apply: OL_SUPERVISOR_DB_URL is not set.")
+            print("control_panel onramp-abs --apply: PROD_DB_URL is not set.")
             return 1
         from supervisor.registry import Registry
 
@@ -570,9 +570,9 @@ def _main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI entry
         return 0
 
     if args.cmd == "events-prune":
-        dsn = os.environ.get("OL_SUPERVISOR_DB_URL")
+        dsn = os.environ.get("PROD_DB_URL")
         if not dsn:
-            print("control_panel events-prune: OL_SUPERVISOR_DB_URL is not set.")
+            print("control_panel events-prune: PROD_DB_URL is not set.")
             return 1
         from supervisor.registry import Registry
 
@@ -583,9 +583,9 @@ def _main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI entry
         return 0
 
     if args.cmd == "forecast":
-        dsn = os.environ.get("OL_SUPERVISOR_DB_URL")
+        dsn = os.environ.get("PROD_DB_URL")
         if not dsn:
-            print("control_panel forecast: OL_SUPERVISOR_DB_URL is not set.")
+            print("control_panel forecast: PROD_DB_URL is not set.")
             return 1
         from supervisor.candidate_enrichment import open_work_counts_for
         from supervisor.cost_forecast import forecast_fleet, render_forecast
@@ -602,9 +602,9 @@ def _main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI entry
         return 0
 
     if args.cmd == "effects":
-        dsn = os.environ.get("OL_SUPERVISOR_DB_URL")
+        dsn = os.environ.get("PROD_DB_URL")
         if not dsn:
-            print("control_panel effects: OL_SUPERVISOR_DB_URL is not set.")
+            print("control_panel effects: PROD_DB_URL is not set.")
             return 1
         from supervisor.registry import Registry
 
@@ -613,9 +613,9 @@ def _main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI entry
         return 0
 
     if args.cmd in ("corrections", "promote", "reject", "apply"):
-        dsn = os.environ.get("OL_SUPERVISOR_DB_URL")
+        dsn = os.environ.get("PROD_DB_URL")
         if not dsn:
-            print(f"control_panel {args.cmd}: OL_SUPERVISOR_DB_URL is not set.")
+            print(f"control_panel {args.cmd}: PROD_DB_URL is not set.")
             return 1
         from supervisor.registry import Registry
 

@@ -1,6 +1,6 @@
 """Run the control-panel API + UI:  python -m webui.server [--port 8787]
 
-Reads OL_SUPERVISOR_DB_URL (+ OL_SUPERVISOR_STATE_DIR for command writes). Serves the built UI at /
+Reads PROD_DB_URL (+ OL_SUPERVISOR_STATE_DIR for command writes). Serves the built UI at /
 automatically when `webui/app/dist` exists (build it with `cd webui/app && npm run build`);
 OL_SUPERVISOR_WEBUI_STATIC overrides the location. With no build present it runs API-only and `/`
 returns a short how-to instead of a bare 404.

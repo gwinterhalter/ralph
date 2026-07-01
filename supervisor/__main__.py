@@ -90,6 +90,7 @@ def build_production_cycle(
     completion_probe: Callable[[RegistryRow], "RunCompletion | None"] = lambda _row: None,
     admitted_source: Callable[[], Sequence[RegistryRow]] = lambda: [],
     record_start_time: Callable[[str, str], None] | None = None,
+    record_failure_detail: Callable[[str, str], None] | None = None,
     kill_switch: KillSwitch | None = None,
     completed_project_ids: Callable[[], frozenset[str]] = lambda: frozenset(),
     learn_runs_source: Callable[[], Sequence[AuditRunRecord]] | None = None,
@@ -194,6 +195,7 @@ def build_production_cycle(
         candidate_enricher=make_seed_candidate_enricher(workspace_root),
         admitted_source=admitted_source,
         record_start_time=record_start_time,
+        record_failure_detail=record_failure_detail,
         # FR-036: an engaged Kill-Switch makes admission refuse ALL new dispatch this
         # cycle (running Runs untouched). Default disengaged → normal scheduling.
         kill_switch=kill_switch if kill_switch is not None else KillSwitch(),
@@ -254,9 +256,9 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
     parser.add_argument("--skip-preflight", action="store_true", help="skip the schema gate")
     args = parser.parse_args(argv)
 
-    dsn = os.environ.get("OL_SUPERVISOR_DB_URL")
+    dsn = os.environ.get("PROD_DB_URL")
     if not dsn:
-        print("supervisor: OL_SUPERVISOR_DB_URL is not set — cannot reach the registry.")
+        print("supervisor: PROD_DB_URL is not set — cannot reach the registry.")
         return 1
     try:
         import psycopg
@@ -293,6 +295,16 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
     print(f"supervisor: re-attach pass — {reattached} re-attached, {orphaned} orphaned.")
 
     workspace_root = os.environ.get("OL_SUPERVISOR_WORKSPACE_ROOT")
+    # FUP-0869: OL_SUPERVISOR_WORKSPACE_ROOT is REQUIRED for candidate enrichment (seed_path /
+    # writable_paths / open_item_count). Missing -> enrichment silently no-ops -> the §6 admission
+    # gate refuses EVERY candidate (no blast-radius derivable) and the fleet never dispatches, with
+    # no error. Surface that loudly at startup rather than letting it fail invisibly (2026-06-11 M4G).
+    if not workspace_root:
+        print(
+            "supervisor: WARNING — OL_SUPERVISOR_WORKSPACE_ROOT is not set. Candidate enrichment "
+            "will no-op and admission will refuse every candidate (no seed_path / blast-radius "
+            "derivable), so nothing dispatches. Set it to the Sub_Projects root before launch."
+        )
     state_dir = os.environ.get("OL_SUPERVISOR_STATE_DIR", ".")
     events_log = os.path.join(state_dir, "logs", "events.jsonl")
     from pathlib import Path
@@ -542,7 +554,23 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
     # next cycle's Attend plan; the ledger pages each unresolved escalation once.
     attention_store = AttentionStateStore()
     notification_port = build_notification_port()
-    delivered_keys: set[tuple[str, str, str]] = set()
+    # FUP-0879: seed the dedup ledger from the DB so a loop restart does NOT re-send escalations
+    # that were already delivered (the in-memory-only ledger reset on each of the 4 restarts in the
+    # 2026-06-11 run, re-emailing the routine offers). Keys are pipe-joined project|gate|raised_at.
+    def _key_from_str(s: str) -> "tuple[str, str, str]":
+        parts = s.split("|", 2)
+        while len(parts) < 3:
+            parts.append("")
+        return (parts[0], parts[1], parts[2])
+
+    try:
+        delivered_keys: set[tuple[str, str, str]] = {
+            _key_from_str(s) for s in registry.read_delivered_notification_keys()
+        }
+    except Exception as exc:  # noqa: BLE001 - DB read is best-effort; fall back to empty ledger
+        print(f"supervisor: delivered-key ledger load skipped ({exc}); starting empty.")
+        delivered_keys = set()
+    _persisted_delivered_keys: set[tuple[str, str, str]] = set(delivered_keys)
     if not isinstance(notification_port, NullNotificationPort):
         print("supervisor: notification delivery ENABLED (OL_SUPERVISOR_SMTP_* configured).")
 
@@ -753,6 +781,81 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
         """A by-value dispatch gate for this cycle's usage verdict (typed for mypy --strict)."""
         return lambda: allowed
 
+    # Lifecycle milestone emails (operator 2026-06-12): email when RL STARTS a project
+    # (-> running), FINISHES one (-> complete), or a project STOPS despite this cycle's
+    # reconcile/repair (-> failed / halted, i.e. RL's recovery did not save it). These are FYI
+    # MILESTONES, not escalations — sent straight through the notification port, bypassing the
+    # routine-suppression filter, so the operator sees the signal they asked for. Restart-safe:
+    # the snapshot re-baselines on launch, so a restart never re-emails an already-running
+    # project (a milestone fires only on an observed transition). Default ON; OL_SUPERVISOR_
+    # NOTIFY_LIFECYCLE=0 disables. ROUTINE auto-feedback stays suppressed independently.
+    _notify_lifecycle = os.environ.get("OL_SUPERVISOR_NOTIFY_LIFECYCLE", "1") != "0"
+    _LIFECYCLE_MILESTONES = {
+        "running": "started",
+        "complete": "finished",
+        "failed": "stopped (recovery exhausted)",
+        "halted": "stopped (recovery exhausted)",
+        # FUP-0862: a project blocked on an operator-answerable gate (the broker / plan_review
+        # non-convergence / spend-limit paths now write a gate_request -> reconcile classifies
+        # `paused_gate`). This is the ACTION-REQUIRED "RL needs you" signal — emailed immediately
+        # (it is NOT a stop-state, so it bypasses the one-cycle stop-confirmation deferral).
+        "paused_gate": "NEEDS OPERATOR ANSWER",
+    }
+
+    def _lifecycle_snapshot() -> "dict[str, str]":
+        try:
+            return {
+                str(p.get("project_id")): str(p.get("lifecycle_state") or "")
+                for p in registry.read_all_projects()
+            }
+        except Exception as exc:  # noqa: BLE001 - best-effort; never abort the cycle
+            print(f"supervisor: lifecycle snapshot skipped ({exc}).")
+            return {}
+
+    _LIFECYCLE_STOP_STATES = {"failed", "halted"}
+    # FUP-0880 refinement: a project that stops and is auto-recovered (re-dispatched) next cycle
+    # should NOT read as a terminal stop. So STOP emails are DEFERRED one cycle: arm a failed/
+    # halted project, and only email if it is STILL stopped on the following cycle (not recovered).
+    # started/finished email immediately. _pending_stop maps project_id -> the armed stop state.
+    _pending_stop: "dict[str, str]" = {}
+
+    def _send_milestone(pid: str, state: str, verb: str, prev_state: "str | None") -> None:
+        subject = f"[ol-build supervisor] project {pid} {verb}"
+        body = (
+            f"Project {pid} is now '{state}' ({verb}).\n"
+            f"Previous state: {prev_state or '(new/unknown)'}.\n"
+        )
+        try:
+            notification_port.send_message(subject, body)
+            print(f"supervisor: LIFECYCLE — emailed '{pid} {verb}'.")
+        except Exception as exc:  # noqa: BLE001 - a notify failure must never abort the cycle
+            print(f"supervisor: lifecycle email for {pid} skipped ({exc}).")
+
+    def _emit_lifecycle(prev: "dict[str, str]", curr: "dict[str, str]") -> None:
+        if not _notify_lifecycle:
+            return
+        # 1. Immediate milestones — started (-> running) / finished (-> complete).
+        for pid, state in curr.items():
+            if state in _LIFECYCLE_STOP_STATES:
+                continue
+            verb = _LIFECYCLE_MILESTONES.get(state)
+            if verb is None or prev.get(pid) == state:
+                continue  # not a milestone, or no transition into it this cycle
+            _send_milestone(pid, state, verb, prev.get(pid))
+        # 2. Confirm deferred STOPs armed a cycle ago: email only if still stopped (else the
+        #    project was recovered/re-dispatched, so drop the arm silently — no false stop).
+        for pid in list(_pending_stop):
+            armed = _pending_stop.pop(pid)
+            now_state = curr.get(pid)
+            if now_state in _LIFECYCLE_STOP_STATES:
+                _send_milestone(pid, now_state, _LIFECYCLE_MILESTONES[now_state], armed)
+        # 3. Arm freshly-stopped projects for next-cycle confirmation.
+        for pid, state in curr.items():
+            if state in _LIFECYCLE_STOP_STATES and prev.get(pid) != state:
+                _pending_stop[pid] = state
+
+    _lifecycle_prev = _lifecycle_snapshot()
+
     cycles = 0
     while args.max_cycles is None or cycles < args.max_cycles:
         # Re-read the kill-switch each cycle: the operator can engage/disengage between
@@ -784,6 +887,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
             completion_probe=_completion_of,
             admitted_source=registry.read_admitted,
             record_start_time=registry.record_pid_start_time,
+            record_failure_detail=registry.record_run_failure_detail,
             kill_switch=kill_switch,
             completed_project_ids=registry.read_completed_project_ids,
             learn_runs_source=_learn_runs_source,
@@ -799,6 +903,21 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
         _ingest_fleet_events()  # Fleet Analytics §1: ship all projects' events.jsonl to the DB
         _forecast_guard()  # Fleet Analytics §2: warn-only projected-spend guard
         _measure_learning_effects()  # Effect-Measurement Loop: did adopted learnings help?
+        # Lifecycle milestone emails: diff project states vs the pre-cycle snapshot and email the
+        # operator on start / finish / unrecoverable-stop transitions (operator 2026-06-12).
+        _lifecycle_curr = _lifecycle_snapshot()
+        _emit_lifecycle(_lifecycle_prev, _lifecycle_curr)
+        _lifecycle_prev = _lifecycle_curr
+        # FUP-0879: persist escalation keys delivered this cycle so a restart will not re-send them.
+        _new_delivered = delivered_keys - _persisted_delivered_keys
+        if _new_delivered:
+            try:
+                registry.record_delivered_notification_keys(
+                    ["|".join(k) for k in _new_delivered]
+                )
+                _persisted_delivered_keys |= _new_delivered
+            except Exception as exc:  # noqa: BLE001 - persistence is best-effort; never abort
+                print(f"supervisor: delivered-key persist skipped ({exc}).")
         cycles += 1
         if args.once or (args.max_cycles is not None and cycles >= args.max_cycles):
             break

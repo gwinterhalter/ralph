@@ -7,7 +7,7 @@ apply dispatch). The Registry is resolved through an injectable provider so test
 (real-seam: the API wiring + the pure cores run for real; only the DB read/write is faked). Every
 action is recorded to the operator action log.
 
-Run (local): set OL_SUPERVISOR_DB_URL (+ OL_SUPERVISOR_STATE_DIR), then
+Run (local): set PROD_DB_URL (+ OL_SUPERVISOR_STATE_DIR), then
 ``python -m webui.server`` (serves the built UI when OL_SUPERVISOR_WEBUI_STATIC is set).
 """
 
@@ -53,6 +53,7 @@ class RegistryLike(Protocol):
     def read_candidates(self) -> Sequence[Mapping[str, object]]: ...
     def read_running(self) -> Sequence[Mapping[str, object]]: ...
     def read_all_projects(self) -> Sequence[Mapping[str, object]]: ...
+    def read_latest_run_per_project(self) -> Mapping[str, Mapping[str, object]]: ...
     def read_audit_findings(self) -> Sequence[Mapping[str, object]]: ...
     def read_audit_effects(self) -> Sequence[Mapping[str, object]]: ...
     def read_correction_summary(self) -> Sequence[Mapping[str, object]]: ...
@@ -76,8 +77,8 @@ class RegistryLike(Protocol):
 def _default_registry_provider() -> RegistryLike:
     from supervisor.registry import Registry  # noqa: PLC0415 - lazy: only the live server needs a DB
 
-    if not os.environ.get("OL_SUPERVISOR_DB_URL"):
-        raise HTTPException(status_code=503, detail="OL_SUPERVISOR_DB_URL is not set.")
+    if not os.environ.get("PROD_DB_URL"):
+        raise HTTPException(status_code=503, detail="PROD_DB_URL is not set.")
     return Registry.from_env()
 
 
@@ -283,7 +284,7 @@ def create_app(
 
     @app.get("/api/health")
     def health() -> dict[str, object]:
-        return {"ok": True, "db_configured": bool(os.environ.get("OL_SUPERVISOR_DB_URL"))}
+        return {"ok": True, "db_configured": bool(os.environ.get("PROD_DB_URL"))}
 
     @app.get("/api/fleet")
     def fleet() -> dict[str, Any]:
@@ -352,18 +353,33 @@ def create_app(
         for run in reg.read_completed_runs():
             pid = str(run.get("project_id") or "")
             runs_by_project[pid] = runs_by_project.get(pid, 0) + 1
+        # FUP-0873/0876: per-project latest run -> issue reason + spawned/terminated for duration.
+        try:
+            latest_run = dict(reg.read_latest_run_per_project())
+        except Exception:  # noqa: BLE001 - best-effort enrichment; never break the fleet view
+            latest_run = {}
         out: list[dict[str, Any]] = []
         for p in reg.read_all_projects():
             pid = str(p.get("project_id"))
             deps = p.get("depends_on")
+            lifecycle = str(p.get("lifecycle_state") or "")
+            lr = latest_run.get(pid) or {}
+            # FUP-0873: a blocked/failed shard's REASON (failure_detail; or just the run status for
+            # a paused_gate "waiting" row) so the GUI shows WHY, not a bare badge. FUP-0874: the
+            # waiting flag is derivable client-side from lifecycle_state == 'paused_gate'.
+            issue = lr.get("failure_detail")
             out.append({
                 "project_id": pid,
                 "display_name": str(p.get("display_name") or pid),
-                "lifecycle_state": str(p.get("lifecycle_state") or ""),
+                "lifecycle_state": lifecycle,
                 "attention_debt": p.get("attention_debt") or 0,
                 "depends_on": list(deps) if isinstance(deps, (list, tuple)) else [],
                 "cost_usd": _money2(cost.get(pid, Decimal("0"))),
                 "runs": runs_by_project.get(pid, 0),
+                "issue": str(issue) if issue else None,
+                "run_status": lr.get("run_status"),
+                "spawned_at": _jsonable(lr.get("spawned_at")),
+                "terminated_at": _jsonable(lr.get("terminated_at")),
             })
         out.sort(key=lambda r: r["project_id"])
         return {"projects": out, "count": len(out)}

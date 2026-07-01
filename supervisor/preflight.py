@@ -13,7 +13,7 @@ The checker is split so the decision logic is hermetically testable: ``introspec
 is the thin psycopg adapter that reads ``information_schema`` / ``pg_indexes`` into a
 :class:`SchemaSnapshot`, and ``evaluate_preflight`` is the pure verdict over a
 snapshot. ``run_preflight`` composes them; the ``__main__`` CLI wires it to a live
-connection from ``OL_SUPERVISOR_DB_URL`` and exits non-zero on drift.
+connection from ``PROD_DB_URL`` and exits non-zero on drift.
 """
 
 from __future__ import annotations

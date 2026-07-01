@@ -1,8 +1,20 @@
 // Presentational views — pure functions of props (no fetching), so they unit-test cleanly.
+import { useState } from "react";
 import type {
   InboxCard, FleetSnapshot, Finding, EffectRow, Forecast, EventRow, ActionRow, GraphNode, GraphEdge,
   ProjectRow, RunRow, LoopStatus, Throttling, AnsweredGate,
 } from "./api";
+
+// FUP-0876: elapsed minutes for the Fleet Duration column — now-spawned for a live run,
+// terminated-spawned for a finished one. "—" when no start timestamp is known.
+function durationMin(r: ProjectRow): string {
+  if (!r.spawned_at) return "—";
+  const start = Date.parse(r.spawned_at);
+  if (Number.isNaN(start)) return "—";
+  const end = r.terminated_at ? Date.parse(r.terminated_at) : Date.now();
+  if (Number.isNaN(end)) return "—";
+  return String(Math.max(0, Math.round((end - start) / 60000)));
+}
 
 export function SupervisorControls(props: {
   loop: LoopStatus | null;
@@ -77,15 +89,30 @@ export function FleetView(props: {
   onBump: (projectId: string) => void;
 }) {
   const s = props.snapshot;
+  // FUP-0875: multi-select lifecycle filter. `hidden` is the set of unchecked states; all states
+  // shown by default. Derived from the live data so new states appear automatically.
+  const [hidden, setHidden] = useState<Set<string>>(new Set());
   if (props.projects.length === 0) return <p>No projects yet. Provision work from the Spend tab.</p>;
+  const allStates = Array.from(new Set(props.projects.map((p) => p.lifecycle_state))).sort();
+  const toggle = (st: string) =>
+    setHidden((h) => { const n = new Set(h); n.has(st) ? n.delete(st) : n.add(st); return n; });
+  const visible = props.projects.filter((p) => !hidden.has(p.lifecycle_state));
   return (
     <div>
+      <div className="fleet-filter" aria-label="Lifecycle filter">
+        <span className="filter-label">Show:</span>
+        {allStates.map((st) => (
+          <label key={st} className={`filter-chip lc-${st}`}>
+            <input type="checkbox" checked={!hidden.has(st)} onChange={() => toggle(st)} /> {st}
+          </label>
+        ))}
+      </div>
       <table className="fleet" aria-label="Fleet">
         <thead>
-          <tr><th></th><th>Project</th><th>Lifecycle</th><th>Cost</th><th>Runs</th><th>Attn</th><th>Depends on</th><th></th></tr>
+          <tr><th></th><th>Project</th><th>Lifecycle</th><th>Issue</th><th>Dur (min)</th><th>Cost</th><th>Runs</th><th>Attn</th><th>Depends on</th><th></th></tr>
         </thead>
         <tbody>
-          {props.projects.map((r) => (
+          {visible.map((r) => (
             <FleetRow
               key={r.project_id}
               row={r}
@@ -127,7 +154,18 @@ function FleetRow(props: {
           </button>
         </td>
         <td>{r.display_name}</td>
-        <td><span className={`badge lc-${r.lifecycle_state}`}>{r.lifecycle_state}</span></td>
+        <td>
+          <span className={`badge lc-${r.lifecycle_state}`}>{r.lifecycle_state}</span>
+          {r.lifecycle_state === "paused_gate" && <span className="waiting"> ⏳ waiting</span>}
+        </td>
+        <td className="issue">
+          {r.lifecycle_state === "paused_gate"
+            ? "awaiting operator answer"
+            : r.issue
+            ? <span title={r.issue}>{r.issue.length > 60 ? r.issue.slice(0, 60) + "…" : r.issue}</span>
+            : "—"}
+        </td>
+        <td>{durationMin(r)}</td>
         <td>${r.cost_usd}</td><td>{r.runs}</td><td>{r.attention_debt}</td>
         <td>{r.depends_on.length ? r.depends_on.join(", ") : "—"}</td>
         <td>
@@ -138,7 +176,7 @@ function FleetRow(props: {
       {props.expanded && (
         <tr className="detail-row">
           <td></td>
-          <td colSpan={7}>
+          <td colSpan={9}>
             <div className="row-detail" aria-label={`detail ${r.project_id}`}>
               <strong>Recent events</strong>
               {props.events.length === 0 ? <p>No recent events.</p> : (

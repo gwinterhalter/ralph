@@ -119,6 +119,10 @@ export interface ProjectRow {
   depends_on: string[];
   cost_usd: string;
   runs: number;
+  issue?: string | null;          // FUP-0873: blocked/failed reason (latest run's failure_detail)
+  run_status?: string | null;
+  spawned_at?: string | null;     // FUP-0876: latest run start, for the Duration column
+  terminated_at?: string | null;
 }
 export interface RunRow {
   run_id: string;
