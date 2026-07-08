@@ -115,10 +115,15 @@ export interface ProjectRow {
   project_id: string;
   display_name: string;
   lifecycle_state: string;
+  status: string;                 // free-text registry status; 'archived' = retired (hidden by default)
   attention_debt: number;
   depends_on: string[];
   cost_usd: string;
   runs: number;
+  issue?: string | null;          // FUP-0873: blocked/failed reason (latest run's failure_detail)
+  run_status?: string | null;
+  spawned_at?: string | null;     // FUP-0876: latest run start, for the Duration column
+  terminated_at?: string | null;
 }
 export interface RunRow {
   run_id: string;
@@ -183,7 +188,10 @@ export const api = {
   },
   throttling: () => getJSON<Throttling>("/api/throttling"),
   actions: () => getJSON<{ actions: ActionRow[] }>("/api/actions"),
-  projects: () => getJSON<{ projects: ProjectRow[]; count: number }>("/api/projects"),
+  projects: (includeArchived = false) =>
+    getJSON<{ projects: ProjectRow[]; count: number }>(
+      "/api/projects" + (includeArchived ? "?include_archived=1" : ""),
+    ),
   runs: () => getJSON<{ runs: RunRow[]; count: number; total_cost_usd: string }>("/api/runs"),
   loopStatus: () => getJSON<LoopStatus>("/api/loop-status"),
   graph: () => getJSON<{ nodes: GraphNode[]; edges: GraphEdge[] }>("/api/graph"),

@@ -102,7 +102,16 @@ class OrchestratorSpawnPort:
         bash_executable: str | None = None,
     ) -> None:
         self._orchestrator_script = Path(orchestrator_script)
-        self._bash = bash_executable or shutil.which("bash")
+        # FUP-0867: resolve bash PATH-independently. Precedence: explicit arg >
+        # OL_SUPERVISOR_BASH env (an absolute path to bash.exe) > PATH lookup. A clean
+        # PowerShell launch shell has no `bash` on PATH, so `shutil.which("bash")` returned
+        # None and the spawn failed with "no bash executable on PATH" (the 2026-06-11 M4G S1
+        # blocker). The env override lets the operator pin Git bash without mutating PATH.
+        self._bash = (
+            bash_executable
+            or os.environ.get("OL_SUPERVISOR_BASH")
+            or shutil.which("bash")
+        )
         self.last_handle: SpawnHandle | None = None
 
     def spawn(

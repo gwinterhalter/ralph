@@ -49,6 +49,7 @@ gate-blocked skip).
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
@@ -74,10 +75,12 @@ from supervisor.attention import (
     NotificationBatch,
     NotificationPlan,
     QuietHours,
+    UrgencyTier,
     intake_escalation,
     plan_notifications,
 )
 from supervisor.candidate_enrichment import default_candidate_enricher
+from supervisor.transitions import IllegalTransitionError
 from supervisor.notifications import (
     NotificationPort,
     NullNotificationPort,
@@ -334,7 +337,16 @@ def run_reconcile_step(
             terminated_at=at,
             terminal_cost_usd=cost,
         )
-        registry.set_lifecycle_state(action.project_id, action.lifecycle_state)
+        try:
+            registry.set_lifecycle_state(action.project_id, action.lifecycle_state)
+        except IllegalTransitionError:
+            # FUP-0870: a stale 'running' run row whose project already left 'running'
+            # (e.g. manually reset to 'candidate', or completed via another path) yields a
+            # reconcile action for an illegal lifecycle transition. The run row is already
+            # reconciled above; skip THIS project-state write rather than aborting the whole
+            # supervision cycle on one stale row. The skipped action stays derivable from the
+            # now-terminal run row, so nothing is lost silently.
+            continue
     return actions
 
 
@@ -398,6 +410,11 @@ class ScheduleConfig:
     #: method, so the seam stays free of test-double ripple. Default ``None`` →
     #: start-time recording is skipped.
     record_start_time: Callable[[str, str], None] | None = None
+    #: FUP-0868: persist a reconciled spawn/dispatch FAILURE detail onto the Run's
+    #: ``metadata.failure_detail`` (production wires ``Registry.record_run_failure_detail``).
+    #: An injected callable, NOT a RegistryPort method — no test-double ripple. Default ``None``
+    #: → failure-detail persistence is skipped.
+    record_failure_detail: Callable[[str, str], None] | None = None
     # The fleet-scoping predicate applied to both the Candidate and running reads.
     # Defaults to accept-all — the production global fleet (the §3 Concurrency Ceiling
     # is fleet-wide). A bounded checkpoint supplies a predicate so it operates over,
@@ -540,9 +557,10 @@ def run_schedule_step(
     config.round_state_store.save(decision.round_state)
 
     if decision.dispatch_kind == "spawn":
-        _spawn_selected(
+        outcome = _spawn_selected(
             registry, config, decision.project_id, dispatchable, running_count, completed
         )
+        _surface_admission_outcome(decision.project_id, outcome, config)
     # The resume arm (a `running` Project's next iteration) is OLB-16; it is never
     # selected here because every `running` Project is FR-027 in-flight-excluded.
     return decision
@@ -643,6 +661,33 @@ def _spawn_selected(
     )
 
 
+def _surface_admission_outcome(
+    project_id: str, outcome: object, config: "ScheduleConfig"
+) -> None:
+    """FUP-0871/0868: surface a non-dispatching admission outcome so it is never silent,
+    and persist a spawn FAILURE detail onto the Run row.
+
+    An admission REJECTION (e.g. the §9.3 FR-034 read-only-corpus refusal that silently blocked
+    S7 in the 2026-06-11 M4G run) or a reconciled spawn FAILURE leaves a Candidate un-dispatched;
+    without this the cycle printed nothing and the Candidate looked like a no-op. FR-019 ceiling
+    holds and Item-1 dependency holds are normal backpressure and are NOT surfaced here. On a
+    reconciled spawn failure the structured detail is also persisted to ``metadata.failure_detail``
+    (FUP-0868) via the injected ``record_failure_detail`` callable when production wires it.
+    """
+    if isinstance(outcome, AdmissionRejection):
+        print(
+            f"supervisor: ADMISSION REJECTED {project_id} — {outcome.reason}: {outcome.detail}"
+        )
+    elif isinstance(outcome, ReconciledFailure):
+        detail = f": {outcome.detail}" if outcome.detail else ""
+        print(f"supervisor: DISPATCH FAILED {project_id} — spawn reconciled to failed{detail}")
+        if config.record_failure_detail is not None and outcome.detail:
+            try:
+                config.record_failure_detail(project_id, outcome.detail)
+            except Exception as exc:  # noqa: BLE001 - persistence is best-effort; never abort
+                print(f"supervisor: failure-detail persist for {project_id} skipped ({exc}).")
+
+
 # --- §4.4 step-4 Attend composition ------------------------------------------
 
 
@@ -690,6 +735,18 @@ def _deliver_notifications(config: AttendConfig, plan: NotificationPlan) -> None
     NullNotificationPort never marks) — those keys are recorded so an unresolved escalation is
     paged once, not re-sent every cycle.
     """
+    # Operator policy (2026-06-12): the operator's inbox must mean "RL needs ME". Only
+    # ACTION-REQUIRED escalations (UrgencyTier.TOP — safety-gate / kill-switch) are paged;
+    # routine auto-feedback (Run-Auditor learning offers, effect / forecast / usage notices —
+    # ESCALATION_KIND_ROUTINE) stays in the attention store + GUI Inbox and is NEVER emailed.
+    # Both tiers remain queued (this gates DELIVERY only, not intake). Opt routine emails back
+    # in with OL_SUPERVISOR_NOTIFY_ROUTINE=1. (This also spares the loop-restart re-spam, since
+    # the routine offers were what re-sent on each restart.)
+    if os.environ.get("OL_SUPERVISOR_NOTIFY_ROUTINE", "0") != "1":
+        top_batches = tuple(b for b in plan.batches if b.tier is UrgencyTier.TOP)
+        if not top_batches:
+            return
+        plan = NotificationPlan(batches=top_batches, deferred=plan.deferred)
     ledger = config.delivered_keys
     if ledger is None:
         config.notification_port.deliver(plan)

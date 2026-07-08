@@ -14,7 +14,7 @@ Conventions (defaults mirror the build's own; all overridable):
 
 * the project directory is ``projects.folder_path`` resolved against the
   supervisor's workspace root (the ``OL_SUPERVISOR_WORKSPACE_ROOT`` env, parallel
-  to ``OL_SUPERVISOR_DB_URL``); an absolute ``folder_path`` is used as-is;
+  to ``PROD_DB_URL``); an absolute ``folder_path`` is used as-is;
 * the seed is the newest top-level file matching ``*[Ss]eed*.md`` in that
   directory (scan-newest — the build's anti-shadow convention);
 * ``open_item_count`` is the number of OPEN gap rows in the seed's ``work_registry``
@@ -349,7 +349,7 @@ def default_candidate_enricher(row: RegistryRow) -> RegistryRow:
     configured (``OL_SUPERVISOR_WORKSPACE_ROOT``), otherwise pass the row through.
 
     This makes a production cycle that exports the workspace root (alongside
-    ``OL_SUPERVISOR_DB_URL``) get seed enrichment automatically, while a test or a
+    ``PROD_DB_URL``) get seed enrichment automatically, while a test or a
     cycle with no configured root — or one that supplies its own enricher — is
     unaffected.
     """

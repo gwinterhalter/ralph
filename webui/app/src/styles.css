@@ -87,3 +87,10 @@ table.fleet { border-collapse: collapse; width: 100%; max-width: 900px; backgrou
 /* Throttling indicator (concurrency 2026-06-09): rate/usage-limit events on the Spend tab. */
 .throttle-warn { border-left: 4px solid #ef4444; background: #fef2f2; padding: 8px 12px; margin: 8px 0; border-radius: 4px; }
 .throttle-warn .rollup { color: #b91c1c; font-weight: 600; }
+
+/* FUP-0873/0874/0875 Fleet additions: lifecycle filter, waiting indicator, issue cell. */
+.fleet-filter { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; font-size: 0.85em; }
+.fleet-filter .filter-label { font-weight: 600; color: #555; }
+.fleet-filter .filter-chip { display: inline-flex; align-items: center; gap: 3px; padding: 1px 6px; border: 1px solid #ddd; border-radius: 10px; cursor: pointer; user-select: none; }
+.fleet .waiting { color: #b45309; font-weight: 600; }
+.fleet td.issue { max-width: 320px; color: #b91c1c; font-size: 0.85em; }

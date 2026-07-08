@@ -526,6 +526,21 @@ def test_projects_lists_all_with_cost_and_runs(client: tuple[TestClient, FakeReg
     assert by_id["p3"]["lifecycle_state"] == "complete" and by_id["p3"]["cost_usd"] == "2.50"
     assert by_id["pg"]["lifecycle_state"] == "paused_gate"   # the otherwise-hidden one
     assert by_id["p1"]["runs"] == 1
+    assert by_id["p3"]["status"] == ""                        # non-archived rows carry an empty status
+
+
+def test_projects_hides_archived_by_default(client: tuple[TestClient, FakeRegistry]) -> None:
+    c, reg = client
+    reg.projects.append(
+        {"project_id": "retired1", "display_name": "Retired One", "folder_path": "Retired/retired1",
+         "lifecycle_state": "complete", "status": "archived", "attention_debt": 0, "depends_on": []}
+    )
+    # Default: the archived shard is hidden from the active fleet view.
+    default_ids = {p["project_id"] for p in c.get("/api/projects").json()["projects"]}
+    assert "retired1" not in default_ids
+    # Opt-in: ?include_archived=1 brings it back, carrying its status so the client can badge it.
+    incl = {p["project_id"]: p for p in c.get("/api/projects?include_archived=1").json()["projects"]}
+    assert "retired1" in incl and incl["retired1"]["status"] == "archived"
 
 
 def test_runs_history(client: tuple[TestClient, FakeRegistry]) -> None:

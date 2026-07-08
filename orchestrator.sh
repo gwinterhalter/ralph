@@ -156,6 +156,41 @@ run_claude_json() {
   fi
   [[ -s "$llm_err" ]] && cat "$llm_err" >&2   # preserve prior stderr visibility in the orchestrator log
   rm -f "$llm_err" 2>/dev/null || true
+  # FUP-0866: a spend-limit / quota 429 frequently comes back INSIDE the claude JSON
+  # envelope (is_error=true, api_error_status=429, result="You've hit your monthly spend
+  # limit ...") rather than on stderr, so the stderr scan above misses it (this is exactly
+  # what hid S7's 429 in the 2026-06-11 M4G run). Detect it from the captured JSON and emit
+  # the same rate_limit event so the §13 throttling surface + Learn pass see it. Best-effort.
+  if command -v emit_event >/dev/null 2>&1; then
+    local je_err je_status je_detail
+    je_err="$(jq -r '.is_error // false' "$out_file" 2>/dev/null || echo false)"
+    je_status="$(jq -r '.api_error_status // empty' "$out_file" 2>/dev/null || echo '')"
+    if [[ "$je_err" == "true" || "$je_status" == "429" ]]; then
+      je_detail="$(jq -r '.result // ""' "$out_file" 2>/dev/null | head -c 300)"
+      emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "${EVENT_ITER:-0}" "orchestrator" "rate_limit" "" "" "" \
+        "$(jq -nc --arg d "$je_detail" --arg s "${je_status:-}" '{detail:$d, api_error_status:$s, source:"json_envelope"}' 2>/dev/null || printf '{}')"
+      # FUP-0865: a SPEND-LIMIT / quota cap (vs a transient rate-limit the CLI already retried)
+      # cannot clear by retrying in place, so do NOT churn iterations into repeated 429s
+      # (~$0.92 each — observed burning ~$2.76 on S7). SURFACE-AND-WAIT: write a budget
+      # gate_request so reconcile classifies `paused_gate` (the Supervisor emails "needs operator
+      # answer" and can re-dispatch once budget returns), then exit the orchestrator cleanly
+      # instead of failing + looping. A non-spend-limit 429 falls through (the CLI handled it).
+      case "$(printf '%s' "$je_detail" | tr 'A-Z' 'a-z')" in
+        *"spend limit"*|*"monthly"*|*"usage limit"*|*quota*)
+          mkdir -p "$STATE_DIR/escalations" 2>/dev/null || true
+          printf '{"iteration":"%s","gate":"0002","kind":"budget","reason":"spend_limit_429","ts":"%s"}\n' \
+            "${EVENT_ITER:-0}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            > "$STATE_DIR/escalations/gate_request_${EVENT_ITER:-0}_0002.json" 2>/dev/null || true
+          dispatch_notification "$SEED" "$STATE_DIR" gate_human \
+            "$(jq -nc --arg it "${EVENT_ITER:-0}" '{iteration:$it, reason:"spend_limit_429"}')" 2>/dev/null || true
+          emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "${EVENT_ITER:-0}" "orchestrator" "run_end" "" "" "" \
+            "$(jq -nc --arg it "${EVENT_ITER:-0}" '{terminal_reason:"blocked_spend_limit", iteration:$it}')"
+          echo "BLOCKED: spend limit reached — surfaced as paused_gate; exiting to await budget" >&2
+          exit 0
+          ;;
+      esac
+    fi
+  fi
   call_cost="$(jq -r '.total_cost_usd // 0' "$out_file")"
   new_total="$(jq -rn --argjson cur "$current_spend" --argjson cc "$call_cost" '$cur + $cc')"
   jq --argjson nt "$new_total" '.total_spend_usd = $nt' "$RUNNING_SPEND_FILE" > "$RUNNING_SPEND_FILE.tmp" \
@@ -425,6 +460,15 @@ while true; do
     set -e
     if [[ "$pr_rc" -ne 0 ]]; then
       log "ITERATION $ITER plan_review non-convergence/error (rc=$pr_rc) — routing as gate_human escalation, not crashing (§13.2)"
+      # FUP-0862: persist a real gate_request in state/escalations/ so the Supervisor's
+      # has_pending_gate() probe detects it and reconcile classifies this block as
+      # `paused_gate` (recoverable, operator-answerable) instead of MISLABELLING it `failed`
+      # (the 2026-06-11 M4G mislabel). The numeric gate index 0001 matches the
+      # gate_request_<iter>_<num>.json convention the §6 broker uses (run_signals._GATE_REQ_RE).
+      mkdir -p "$STATE_DIR/escalations" 2>/dev/null || true
+      printf '{"iteration":"%s","gate":"0001","kind":"gate_human","reason":"plan_review_nonconvergence","plan_review_rc":"%s","ts":"%s"}\n' \
+        "$ITER" "$pr_rc" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        > "$STATE_DIR/escalations/gate_request_${ITER}_0001.json" 2>/dev/null || true
       dispatch_notification "$SEED" "$STATE_DIR" gate_human \
         "$(jq -nc --arg it "$ITER" --arg rc "$pr_rc" '{iteration:$it, reason:"plan_review_nonconvergence", plan_review_rc:$rc}')"
       emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "orchestrator" "iteration_failed" "" "" "" \

@@ -54,13 +54,14 @@ describe("ImproveView", () => {
 describe("FleetView", () => {
   it("shows ALL projects incl completed/failed with cost + lifecycle badge", () => {
     const projects: ProjectRow[] = [
-      { project_id: "p1", display_name: "p1", lifecycle_state: "complete", attention_debt: 0, depends_on: [], cost_usd: "2.50", runs: 1 },
-      { project_id: "pg", display_name: "pg", lifecycle_state: "paused_gate", attention_debt: 1, depends_on: ["p1"], cost_usd: "0", runs: 0 },
+      { project_id: "p1", display_name: "p1", lifecycle_state: "complete", status: "", attention_debt: 0, depends_on: [], cost_usd: "2.50", runs: 1 },
+      { project_id: "pg", display_name: "pg", lifecycle_state: "paused_gate", status: "", attention_debt: 1, depends_on: ["p1"], cost_usd: "0", runs: 0 },
     ];
     render(<FleetView projects={projects} snapshot={null} expandedId={null} rowEvents={[]}
       onToggleRow={() => {}} onPause={() => {}} onBump={() => {}} />);
-    expect(screen.getByText("complete")).toBeInTheDocument();   // closed activity shown
-    expect(screen.getByText("paused_gate")).toBeInTheDocument();
+    // Scope to the lifecycle BADGE — the same text also appears in the filter-chip row.
+    expect(screen.getByText("complete", { selector: ".badge" })).toBeInTheDocument();   // closed activity shown
+    expect(screen.getByText("paused_gate", { selector: ".badge" })).toBeInTheDocument();
     expect(screen.getByText("$2.50")).toBeInTheDocument();      // per-project cost
   });
 });
