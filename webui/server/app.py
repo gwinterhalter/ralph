@@ -344,9 +344,13 @@ def create_app(
         return {"nodes": nodes, "edges": edges}
 
     @app.get("/api/projects")
-    def projects() -> dict[str, Any]:
+    def projects(include_archived: bool = Query(default=False)) -> dict[str, Any]:
         """ALL projects (every lifecycle state) + per-project cumulative cost + run count — the full
-        fleet picture the active-only FR-058 snapshot omits (completed/failed/paused projects)."""
+        fleet picture the active-only FR-058 snapshot omits (completed/failed/paused projects).
+
+        Retired projects (``status='archived'``) are hidden from this fleet view by default so a
+        retired shard does not clutter the active picture; pass ``?include_archived=1`` to include
+        them (each row carries its ``status`` so the client can badge/section archived ones)."""
         reg = registry_provider()
         cost = _cost_by_project(reg)
         runs_by_project: dict[str, int] = {}
@@ -360,6 +364,9 @@ def create_app(
             latest_run = {}
         out: list[dict[str, Any]] = []
         for p in reg.read_all_projects():
+            status = str(p.get("status") or "")
+            if status == "archived" and not include_archived:
+                continue  # retired shard — hidden from the active fleet unless explicitly requested
             pid = str(p.get("project_id"))
             deps = p.get("depends_on")
             lifecycle = str(p.get("lifecycle_state") or "")
@@ -372,6 +379,7 @@ def create_app(
                 "project_id": pid,
                 "display_name": str(p.get("display_name") or pid),
                 "lifecycle_state": lifecycle,
+                "status": status,
                 "attention_debt": p.get("attention_debt") or 0,
                 "depends_on": list(deps) if isinstance(deps, (list, tuple)) else [],
                 "cost_usd": _money2(cost.get(pid, Decimal("0"))),
