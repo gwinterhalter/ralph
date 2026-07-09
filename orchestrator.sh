@@ -255,6 +255,18 @@ if [[ -f "$STATE_DIR/state_snapshot.json" ]]; then
       # §2.4 controller resume — present matching gate_response → re-invoke broker for the pending iteration.
       response_count=$(find "$pending_iter_dir" -maxdepth 1 -name "gate_response_${pending_iter}_*.json" 2>/dev/null | wc -l)
       if (( response_count > 0 )); then
+        if [[ ! -f "$pending_iter_dir/session_plan_${pending_iter}.md" ]]; then
+          # FUP-0932: the gate_human was raised by the Planner escalating WITHOUT a session_plan (the
+          # canonical pre-plan gate). The operator's answer now lives in the state tree, which the
+          # Planner reads (Inputs Contract: gate responses). Clear pending_gate and fall through to the
+          # main loop — the next Planner pass re-reads the answer and produces a plan. Do NOT re-run
+          # execute_with_gates here: there is no plan/deliverable to process, and doing so crashes at
+          # the _plan_shape extraction under set -euo pipefail (mislabeled as a read-only HALT).
+          log "RESUME: planner-escalated gate answered (no session_plan for $pending_iter) — clearing pending_gate; the next Planner pass re-plans with the inlined answer (FUP-0932)"
+          jq 'del(.pending_gate)' "$STATE_DIR/state_snapshot.json" > "$STATE_DIR/state_snapshot.json.tmp" \
+            && mv "$STATE_DIR/state_snapshot.json.tmp" "$STATE_DIR/state_snapshot.json"
+          # (fall through to the main loop below)
+        else
         log "RESUME: operator gate_response found for iteration $pending_iter — re-running execute_with_gates"
         set +e
         "$SCRIPT_DIR/hooks/execute_with_gates.sh" "$SEED" "$pending_iter_dir"
@@ -299,6 +311,7 @@ if [[ -f "$STATE_DIR/state_snapshot.json" ]]; then
             exit 3
             ;;
         esac
+        fi
       else
         log "RESUME: no operator gate_response for iteration $pending_iter — re-dispatching and blocking"
         dispatch_notification "$SEED" "$STATE_DIR" gate_human "$(jq -nc --arg it "$pending_iter" '{iteration:$it, reason:"awaiting_operator_response"}')"

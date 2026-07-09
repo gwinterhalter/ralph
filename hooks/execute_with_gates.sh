@@ -376,7 +376,13 @@ posture_value="${PERMISSION_POSTURE#--permission-mode }"
 # override never engaged). Match either the bullet/bold form OR a bare `shape:` line, take the
 # FIRST hit, and anchor on the literal `shape:` field so decoy lines ("- **shape verification
 # binding:**", "seam-shape probe", "no table re-shape") never match.
-_plan_shape="$(sed -nE 's/^[[:space:]]*(-[[:space:]]+)?\*{0,2}shape:\*{0,2}[[:space:]]*([A-Za-z_]+).*/\2/p' "$PLAN_PATH" 2>/dev/null | head -1)"
+# FUP-0932: guard against a missing session_plan (a gate-only iteration can reach here on the resume
+# path). A bare `sed` on an absent PLAN_PATH exits non-zero; under `set -euo pipefail` that becomes a
+# FATAL exit the orchestrator mislabels as a read-only HALT. Default the shape to empty when absent.
+_plan_shape=""
+if [[ -f "$PLAN_PATH" ]]; then
+  _plan_shape="$(sed -nE 's/^[[:space:]]*(-[[:space:]]+)?\*{0,2}shape:\*{0,2}[[:space:]]*([A-Za-z_]+).*/\2/p' "$PLAN_PATH" 2>/dev/null | head -1 || true)"
+fi
 CKPT_POSTURE="$(read_seed_field "$SEED" .checkpoint_permission_posture 2>/dev/null || echo "")"
 [[ "$CKPT_POSTURE" == "null" ]] && CKPT_POSTURE=""
 if [[ "$_plan_shape" == "integration_checkpoint" && -n "$CKPT_POSTURE" ]]; then
