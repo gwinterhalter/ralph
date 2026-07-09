@@ -313,6 +313,21 @@ else
   [[ -f "$STATE_DIR/seed.md" ]] || cp "$SEED" "$STATE_DIR/seed.md"   # seed written once, never modified (§6.1)
 fi
 
+# FUP-0931: bootstrap the initiative_narrative.md that BOTH the Planner and the Consumer require as an
+# input (no role creates it; a fresh initiative HALTs input-load on iteration 0001 without it). Seed a
+# minimal skeleton only when absent (covers both bootstrap and an anomalous resume); the Consumer
+# overwrites it with real per-iteration summaries thereafter.
+if [[ ! -f "$STATE_DIR/initiative_narrative.md" ]]; then
+  {
+    printf '# Initiative Narrative - %s\n\n' "${EVENT_SLUG:-initiative}"
+    printf 'Auto-seeded by orchestrator.sh at BOOTSTRAP (FUP-0931). The Consumer appends one iteration\n'
+    printf 'summary per close; the Planner reads the last K summaries plus the fail_counts tail.\n\n'
+    printf '## Iteration summaries\n\n(none yet - launch state.)\n\n'
+    printf '## fail_counts\n\n[]\n'
+  } > "$STATE_DIR/initiative_narrative.md"
+  log "BOOTSTRAP: seeded initiative_narrative.md skeleton (FUP-0931)"
+fi
+
 # Main role-call loop (§13.1 verbatim body).
 # FUP-0800 C.1: run_start — fires once on both bootstrap and resume paths that reach the loop.
 event_run_start_resumed=false

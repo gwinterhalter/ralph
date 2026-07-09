@@ -537,7 +537,14 @@ fi
 # report. `_report_complete` = the file exists AND carries that heading; the recovery prompt
 # already mandates the section, so it covers both the missing-file and missing-section cases.
 case "$_plan_shape" in
-  component_build|integration_checkpoint|skill_build|doc_stub)
+  # FUP-0930: the report-recovery net fires for EVERY shape the Consumer processes — it requires
+  # execution_report_NNNN.md for all of them (rl-iteration-consumer Failure Protocol Row 5 HALTs on
+  # a missing report regardless of shape). Only a noop/empty shape (Consumer skipped, no Executor
+  # ran) is exempt. This replaces the former hardcoded allowlist so new/custom shapes are covered
+  # without a per-shape edit.
+  ""|noop)
+    : ;;
+  *)
     _report_path="$ITER_DIR/execution_report_${ITER}.md"
     _report_complete() { [[ -f "$_report_path" ]] && grep -qiE '^##[[:space:]]+Items[[:space:]]+closed' "$_report_path"; }
     if ! _report_complete; then
