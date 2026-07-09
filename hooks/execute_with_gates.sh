@@ -537,7 +537,7 @@ fi
 # report. `_report_complete` = the file exists AND carries that heading; the recovery prompt
 # already mandates the section, so it covers both the missing-file and missing-section cases.
 case "$_plan_shape" in
-  component_build|integration_checkpoint|skill_build)
+  component_build|integration_checkpoint|skill_build|doc_stub)
     _report_path="$ITER_DIR/execution_report_${ITER}.md"
     _report_complete() { [[ -f "$_report_path" ]] && grep -qiE '^##[[:space:]]+Items[[:space:]]+closed' "$_report_path"; }
     if ! _report_complete; then
