@@ -14,6 +14,11 @@
 #   S5  STOP_CHECK_ERROR    — malformed completion_predicate -> stop_check rc>=3 -> rc3 STOP_CHECK_ERROR
 #   S6  GATE_RESUME (FUP-0932) — planner-escalated gate (no plan) -> answer -> resume RE-PLANS -> rc0 COMPLETE
 #   S7  PATHA_GUARD (FUP-0768) — planner emits INITIATIVE_COMPLETE while registry OPEN -> must NOT falsely complete
+#   S8  GATE_DC             — a gate_dc (no pre_classification match) is resolved inline by the Answerer, run proceeds
+#   S9  AUTO_RESOLVE (FUP-0791) — a pre_classification auto_resolve short-circuits the gate (no Answerer/operator)
+#   S10 READ_ONLY          — Executor writes under a read_only_paths[] dir -> ewg exit2 -> rc3 READ_ONLY_BOUNDARY_VIOLATION
+#   S11 INSTANCE_LOCK      — a live orchestrator.lock present -> rc7, refuse a concurrent instance on the same state dir
+#   S12 ARTEFACT_EXISTS    — the artefact_exists predicate gates completion on a RESOLVED item's named artefact
 #
 # Run: bash tests/test_ralph_loop_edge_conditions.sh   (exit 0 = all PASS)
 
@@ -43,9 +48,21 @@ mkdir -p "$ITER_DIR" 2>/dev/null || true
 
 if echo "$PROMPT" | grep -qw -- '--print'; then
   cat > /dev/null   # drain the executor prompt on stdin
-  # Optional: write outside the sandbox to trip the read-only scan (S-read-only; unused here).
-  [[ -n "${MOCK_EXEC_WRITE_OUTSIDE:-}" ]] && echo "violation" > "$MOCK_EXEC_WRITE_OUTSIDE" 2>/dev/null || true
+  [[ -n "${MOCK_EXEC_WRITE_OUTSIDE:-}" ]] && echo "violation" > "$MOCK_EXEC_WRITE_OUTSIDE" 2>/dev/null || true  # S10 read-only
+  [[ -n "${MOCK_EXEC_CREATE:-}" ]] && printf '# artefact\n' > "$MOCK_EXEC_CREATE" 2>/dev/null || true           # S12 artefact_exists
   printf '{"session_id":"mock","result":"mock exec","total_cost_usd":%s,"permission_denials":[],"terminal_reason":"%s"}\n' "${MOCK_EXEC_COST:-0.0}" "${MOCK_EXEC_TERMINAL:-completed}"
+  exit 0
+fi
+
+if echo "$PROMPT" | grep -q '/rl-operator-answerer'; then
+  # S8 gate_dc: resolve the referenced gate_request by writing a valid FR-008 gate_response beside it.
+  REQ="$(echo "$PROMPT" | grep -oE '/[^ ]*gate_request_[0-9]+_[0-9]+\.json' | head -1)"
+  if [[ -n "$REQ" && -f "$REQ" ]]; then
+    RESP="${REQ/gate_request/gate_response}"
+    GID="$(jq -r '.gate_id // "g"' "$REQ" 2>/dev/null || echo g)"
+    printf '{"gate_id":"%s","selected_option":"A","reasoning":"mock answerer resolves the gate_dc","confidence":0.9,"classification_check":"mock_answerer"}\n' "$GID" > "$RESP"
+  fi
+  echo '{"result":"mock answerer","total_cost_usd":0.0}'
   exit 0
 fi
 
@@ -253,6 +270,91 @@ if grep -q 'INITIATIVE_COMPLETE: Planner Path-A signal Consumer-confirmed' "$R/o
 else
   pass "S7 did NOT falsely complete on an unconfirmed Planner Path-A signal (guard held)"
 fi
+rm -rf "$R"
+
+run_ewg() {  # <root> <iter_dir> -> echoes rc; runs the REAL execute_with_gates directly with the mock
+  local root="$1" id="$2"
+  set +e
+  PATH="$root/bin:$PATH" CLAUDE_SKILLS_DIR="$RALPH_ROOT" MOCK_ENV="$root/mock.env" \
+    bash -c "unset MSYS_NO_PATHCONV; exec bash \"$RALPH_ROOT/hooks/execute_with_gates.sh\" \"$root/seed.md\" \"$id\"" \
+    > "$root/ewg.out" 2> "$root/ewg.err"
+  local rc=$?; set -e; echo $rc
+}
+
+# =========================== S8 — gate_dc auto-resolved by the Answerer ===========================
+echo "S8 — a gate_dc (no pre_classification match) is resolved inline by the Answerer, run proceeds"
+R="$(mktemp -d)"; build_sandbox "$R" 5 100.0 "$CP_FILTER"   # no gate_policy -> classify defaults to gate_dc
+printf 'MOCK_EXEC_TERMINAL=completed\n' > "$R/mock.env"
+ID="$R/ws/state/iterations/0001"; mkdir -p "$ID"
+printf '{"gate_id":"g-dc-1","question_text":"q","options":[{"id":"A","label":"a"},{"id":"B","label":"b"}]}\n' > "$ID/gate_request_0001_0001.json"
+printf -- '---\niteration_index: 0001\nshape: noop\n---\nplan\n' > "$ID/session_plan_0001.md"
+RC=$(run_ewg "$R" "$ID")
+{ [[ "$RC" == "0" ]] && [[ -f "$ID/gate_response_0001_0001.json" ]] \
+    && ! jq -e '.pending_gate' "$R/ws/state/state_snapshot.json" >/dev/null 2>&1; } \
+  && pass "S8 gate_dc resolved inline (Answerer wrote a valid gate_response; exit0; no operator block)" \
+  || fail "S8 expected exit0+gate_response+no-pending, rc=$RC :: $(tail -2 "$R/ewg.err")"
+rm -rf "$R"
+
+# =========================== S9 — FUP-0791 broker auto_resolve ===========================
+echo "S9 — a pre_classification entry with auto_resolve short-circuits the gate (no Answerer/operator)"
+R="$(mktemp -d)"
+build_sandbox "$R" 5 100.0 "$CP_FILTER
+gate_policy:
+  pre_classification:
+    - { pattern: \"cluster:force-auto\", class: gate_human, auto_resolve: \"A\" }"
+printf 'MOCK_EXEC_TERMINAL=completed\n' > "$R/mock.env"
+ID="$R/ws/state/iterations/0001"; mkdir -p "$ID"
+printf '{"gate_id":"g-auto-1","cluster":"force-auto","question_text":"q","options":[{"id":"A","label":"a"},{"id":"B","label":"b"}]}\n' > "$ID/gate_request_0001_0001.json"
+printf -- '---\niteration_index: 0001\nshape: noop\n---\nplan\n' > "$ID/session_plan_0001.md"
+RC=$(run_ewg "$R" "$ID")
+SEL="$(jq -r '.selected_option // empty' "$ID/gate_response_0001_0001.json" 2>/dev/null)"
+{ [[ "$RC" == "0" ]] && [[ "$SEL" == "A" ]] && grep -q 'auto_resolve' "$R/ewg.err"; } \
+  && pass "S9 FUP-0791 broker auto_resolve wrote gate_response(selected_option=A), no Answerer/operator" \
+  || fail "S9 expected exit0+selected=A+auto_resolve, rc=$RC sel='$SEL' :: $(tail -2 "$R/ewg.err")"
+rm -rf "$R"
+
+# =========================== S10 — read-only boundary violation -> HALT ===========================
+echo "S10 — Executor writes under a read_only_paths[] dir -> execute_with_gates exit2 -> orchestrator HALT"
+R="$(mktemp -d)"; mkdir -p "$R/ro"; build_sandbox "$R" 5 100.0 "$CP_FILTER"
+sed -i "s|read_only_paths: \[\]|read_only_paths: [\"$R/ro\"]|" "$R/seed.md"
+printf 'MOCK_PLANNER=plan\nMOCK_CONSUMER_CLOSE=0\nMOCK_EXEC_WRITE_OUTSIDE=%q\n' "$R/ro/violation.txt" > "$R/mock.env"
+RC=$(run_orch "$R")
+{ [[ "$RC" == "3" ]] && grep -q 'READ_ONLY_BOUNDARY_VIOLATION' "$R/orch.err"; } \
+  && pass "S10 rc3 + READ_ONLY_BOUNDARY_VIOLATION (a write under a read-only root halts the run)" \
+  || fail "S10 expected rc3+READ_ONLY_BOUNDARY_VIOLATION, got rc=$RC :: $(tail -3 "$R/orch.err")"
+rm -rf "$R"
+
+# =========================== S11 — concurrent-instance lock (rc7) ===========================
+echo "S11 — a live orchestrator.lock present -> refuse to start a second instance on the same state dir"
+R="$(mktemp -d)"; build_sandbox "$R" 5 100.0 "$CP_FILTER"
+printf 'MOCK_PLANNER=plan\n' > "$R/mock.env"
+mkdir -p "$R/ws/state"
+sleep 60 & LOCKPID=$!
+echo "$LOCKPID" > "$R/ws/state/orchestrator.lock"
+RC=$(run_orch "$R")
+kill "$LOCKPID" 2>/dev/null || true
+{ [[ "$RC" == "7" ]] && grep -q 'refusing to start a concurrent instance' "$R/orch.err"; } \
+  && pass "S11 rc7 + concurrent-instance refusal (a live lock blocks a racing second orchestrator)" \
+  || fail "S11 expected rc7+refusal, got rc=$RC :: $(tail -2 "$R/orch.err")"
+rm -rf "$R"
+
+# =========================== S12 — artefact_exists predicate gates completion ===========================
+echo "S12 — artefact_exists gates completion on a RESOLVED item's named artefact (direct stop_check)"
+R="$(mktemp -d)"; build_sandbox "$R" 5 100.0 'completion_predicate:
+  - name: artefact_present
+    check_kind: artefact_exists
+    params: { root_field: workspace_root, targets_source: "registry.md" }'
+# artefact_exists checks each **RESOLVED** row's Resolution-cell .md token (needs the 6-col Priority-cell
+# register shape). One RESOLVED item names intro.md; completion must gate on intro.md actually existing.
+printf '# reg\n\n| ID | Name | Gap | Priority | Prereq | Resolution |\n|---|---|---|---|---|---|\n| ITEM-001 | x | y | **RESOLVED** | none | intro.md |\n' > "$R/ws/registry.md"
+mkdir -p "$R/ws/state"
+run_sc() { PATH="$R/bin:$PATH" bash "$RALPH_ROOT/hooks/stop_check.sh" "$R/seed.md" "$R/ws/state" >/dev/null 2>"$R/sc.err"; echo $?; }
+RC_ABSENT=$(run_sc)                              # intro.md absent -> must NOT complete
+printf '# intro\n' > "$R/ws/intro.md"
+RC_PRESENT=$(run_sc)                             # intro.md present -> completes
+{ [[ "$RC_ABSENT" != "0" ]] && [[ "$RC_PRESENT" == "0" ]]; } \
+  && pass "S12 artefact_exists gates completion (missing artefact -> rc$RC_ABSENT not-complete; present -> rc0 complete)" \
+  || fail "S12 expected absent!=0 & present==0, got absent=$RC_ABSENT present=$RC_PRESENT :: $(tail -2 "$R/sc.err")"
 rm -rf "$R"
 
 echo ""
