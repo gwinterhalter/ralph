@@ -69,8 +69,18 @@ for round in 1 2 3 4 5; do
   # FUP-0743: --add-dir "$CLAUDE_SKILLS_DIR" -- required so the slash command resolves from
   # the ralph/ CWD (skills live in a SIBLING tree); env var exported by orchestrator.sh.
   # shellcheck disable=SC2086  # PLAN_REVIEW_MODEL_FLAG is intentionally word-split (flag + value or empty)
+  # (2026-07-01) Capture the reviewer's exit code instead of letting `set -e` abort here: a
+  # `claude -p` reviewer call can exit NON-ZERO while still writing a valid KEEP result envelope
+  # (flaky/transient exit, or a benign budget/tool warning). Un-guarded under `set -e` that aborted
+  # plan_review.sh with rc=1 BEFORE the convergence check, which orchestrator.sh then mis-reported as
+  # plan_review non-convergence -> a spurious gate_human (observed 2026-07-01: S4 reviewer said "KEEP,
+  # 0 BLOCKER ... ready for Executor dispatch" yet the run blocked). run_claude_retry already retries
+  # 3x; here we simply DON'T abort on its final rc — the convergence check below decides on the
+  # ACTUAL review output (converge on a clean KEEP; fall through to --revise on empty/genuine findings).
+  review_rc=0
   run_claude_retry "$FINDINGS" -p $PLAN_REVIEW_MODEL_FLAG --output-format json --max-budget-usd "$BUDGET_CAP" \
-    --add-dir "$CLAUDE_SKILLS_DIR" -- "/cf-session-plan-reviewer $PLAN_PATH"
+    --add-dir "$CLAUDE_SKILLS_DIR" -- "/cf-session-plan-reviewer $PLAN_PATH" || review_rc=$?
+  [[ "$review_rc" -ne 0 ]] && echo "plan_review: reviewer round $round exited rc=$review_rc (output still evaluated for convergence)" >&2
   # Extract .result field for convergence regex (newlines unescaped) — FUP-0720.
   jq -r '.result // empty' "$FINDINGS" > "$RESULT_TEXT"
   # Converged when the reviewer emits its completion block reporting zero BLOCKER
@@ -95,9 +105,29 @@ for round in 1 2 3 4 5; do
   rr_fd="$(printf '%s' "$CLEAN_RESULT" | grep -oE '[0-9]+[[:space:]]+DRIFT' | grep -oE '[0-9]+' | head -1)"
   [[ -z "$rr_fb" ]] && rr_fb=-1
   [[ -z "$rr_fd" ]] && rr_fd=-1
+  # (2026-07-01) Additive convergence route — recognise an explicit reviewer KEEP verdict.
+  # cf-session-plan-reviewer emits "Recommendation/Conclusion: KEEP" (its verdict that the plan is
+  # ready for Executor dispatch) WITHOUT the exact "## Session Plan Review Complete" + "Findings: N
+  # BLOCKER" Delivery-Format line for fr_extraction surface-(c) plans, so the strict path below never
+  # fired and a clean 0-blocker review looped to the 5-round cap into a spurious plan_review
+  # non-convergence gate_human (observed 2026-07-01, CF_Re-Arch_M4G rerun). The reviewer cites
+  # BLOCKER/DRIFT counts in prose too, so count-parsing is unreliable; we key on the KEEP verdict
+  # itself (which per the reviewer's Step-6 contract means zero blocking findings remain), guarded
+  # against a REVISE verdict. This ONLY ADDS a route — the strict marker+counts path is untouched.
+  # Positive KEEP signals (any) — the reviewer varies its verdict lead-in across plans/iterations
+  # (observed: "Recommendation: KEEP", "Conclusion: KEEP", "Result: KEEP — 0 BLOCKER", "review
+  # complete — KEEP", plus the standing "ready for Executor dispatch" readiness statement). We do
+  # NOT count BLOCKER/DRIFT mentions — the reviewer discusses findings it has already FIXED in prose,
+  # so counts are unreliable in both directions. Guarded against an explicit REVISE verdict.
+  rr_keep=0; rr_revise=0
+  printf '%s' "$CLEAN_RESULT" | grep -qiE '(recommendation|conclusion|verdict|result|bottom line)[[:space:]:.-]*keep([^a-zA-Z0-9]|$)' && rr_keep=1
+  printf '%s' "$CLEAN_RESULT" | grep -qiE 'ready for (the )?(executor|dispatch)' && rr_keep=1
+  printf '%s' "$CLEAN_RESULT" | grep -qiE '(recommendation|conclusion|verdict|result)[[:space:]:.-]*revise([^a-zA-Z0-9]|$)' && rr_revise=1
   rr_converged=0
   if printf '%s' "$CLEAN_RESULT" | grep -qF '## Session Plan Review Complete' \
      && [[ "$rr_fb" -eq 0 && "$rr_fd" -eq 0 ]]; then
+    rr_converged=1
+  elif [[ "$rr_keep" -eq 1 && "$rr_revise" -eq 0 ]]; then
     rr_converged=1
   fi
   rr_verdict="revise"; [[ "$rr_converged" -eq 1 ]] && rr_verdict="converged"
@@ -115,8 +145,12 @@ for round in 1 2 3 4 5; do
   # Else invoke planner --revise to produce a revised plan (overwrites $PLAN_PATH).
   # FUP-0743: --add-dir + -- (same rationale as the reviewer call above).
   # shellcheck disable=SC2086  # PLAN_REVIEW_MODEL_FLAG is intentionally word-split (flag + value or empty)
+  # (2026-07-01) Same set -e guard as the reviewer call: don't abort on a non-zero exit from the
+  # --revise call when it still overwrote the plan; the next round's reviewer evaluates the result.
+  revise_rc=0
   run_claude_retry "$ITER_DIR/revise_round_${round}.json" -p $PLAN_REVIEW_MODEL_FLAG --output-format json --max-budget-usd "$BUDGET_CAP" \
-    --add-dir "$CLAUDE_SKILLS_DIR" -- "/rl-initiative-planner --revise $FINDINGS"
+    --add-dir "$CLAUDE_SKILLS_DIR" -- "/rl-initiative-planner --revise $FINDINGS" || revise_rc=$?
+  [[ "$revise_rc" -ne 0 ]] && echo "plan_review: --revise round $round exited rc=$revise_rc (continuing to next review round)" >&2
 done
 
 # Did not converge — write escalation (§13.2 exit 1).

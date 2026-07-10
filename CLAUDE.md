@@ -1,3 +1,10 @@
+> **⚠️ NOTE (2026-07-02): this is the upstream `snarktank/ralph` OSS agent prompt** for the `ralph.sh`
+> PRD-loop (reads `prd.json` / `progress.txt`, picks a user story) — **NOT** the CF outer-loop /
+> Initiative-Orchestrator system that also lives in this folder. For CF Ralph Loop work, follow
+> `Ralph_Loop_User_Guide_v1.0.md` (this folder) and `.claude/rules/ralph-runtime.md`; **do NOT** follow
+> the prd.json story-loop below. This file auto-loads by cwd — kept for the OSS `ralph.sh` usage, but
+> disregard it for CF outer-loop work.
+
 # Ralph Agent Instructions
 
 You are an autonomous coding agent working on a software project.
