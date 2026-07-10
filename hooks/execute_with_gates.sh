@@ -376,7 +376,13 @@ posture_value="${PERMISSION_POSTURE#--permission-mode }"
 # override never engaged). Match either the bullet/bold form OR a bare `shape:` line, take the
 # FIRST hit, and anchor on the literal `shape:` field so decoy lines ("- **shape verification
 # binding:**", "seam-shape probe", "no table re-shape") never match.
-_plan_shape="$(sed -nE 's/^[[:space:]]*(-[[:space:]]+)?\*{0,2}shape:\*{0,2}[[:space:]]*([A-Za-z_]+).*/\2/p' "$PLAN_PATH" 2>/dev/null | head -1)"
+# FUP-0932: guard against a missing session_plan (a gate-only iteration can reach here on the resume
+# path). A bare `sed` on an absent PLAN_PATH exits non-zero; under `set -euo pipefail` that becomes a
+# FATAL exit the orchestrator mislabels as a read-only HALT. Default the shape to empty when absent.
+_plan_shape=""
+if [[ -f "$PLAN_PATH" ]]; then
+  _plan_shape="$(sed -nE 's/^[[:space:]]*(-[[:space:]]+)?\*{0,2}shape:\*{0,2}[[:space:]]*([A-Za-z_]+).*/\2/p' "$PLAN_PATH" 2>/dev/null | head -1 || true)"
+fi
 CKPT_POSTURE="$(read_seed_field "$SEED" .checkpoint_permission_posture 2>/dev/null || echo "")"
 [[ "$CKPT_POSTURE" == "null" ]] && CKPT_POSTURE=""
 if [[ "$_plan_shape" == "integration_checkpoint" && -n "$CKPT_POSTURE" ]]; then
@@ -537,7 +543,14 @@ fi
 # report. `_report_complete` = the file exists AND carries that heading; the recovery prompt
 # already mandates the section, so it covers both the missing-file and missing-section cases.
 case "$_plan_shape" in
-  component_build|integration_checkpoint|skill_build)
+  # FUP-0930: the report-recovery net fires for EVERY shape the Consumer processes — it requires
+  # execution_report_NNNN.md for all of them (rl-iteration-consumer Failure Protocol Row 5 HALTs on
+  # a missing report regardless of shape). Only a noop/empty shape (Consumer skipped, no Executor
+  # ran) is exempt. This replaces the former hardcoded allowlist so new/custom shapes are covered
+  # without a per-shape edit.
+  ""|noop)
+    : ;;
+  *)
     _report_path="$ITER_DIR/execution_report_${ITER}.md"
     _report_complete() { [[ -f "$_report_path" ]] && grep -qiE '^##[[:space:]]+Items[[:space:]]+closed' "$_report_path"; }
     if ! _report_complete; then

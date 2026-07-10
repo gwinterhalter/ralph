@@ -255,6 +255,18 @@ if [[ -f "$STATE_DIR/state_snapshot.json" ]]; then
       # §2.4 controller resume — present matching gate_response → re-invoke broker for the pending iteration.
       response_count=$(find "$pending_iter_dir" -maxdepth 1 -name "gate_response_${pending_iter}_*.json" 2>/dev/null | wc -l)
       if (( response_count > 0 )); then
+        if [[ ! -f "$pending_iter_dir/session_plan_${pending_iter}.md" ]]; then
+          # FUP-0932: the gate_human was raised by the Planner escalating WITHOUT a session_plan (the
+          # canonical pre-plan gate). The operator's answer now lives in the state tree, which the
+          # Planner reads (Inputs Contract: gate responses). Clear pending_gate and fall through to the
+          # main loop — the next Planner pass re-reads the answer and produces a plan. Do NOT re-run
+          # execute_with_gates here: there is no plan/deliverable to process, and doing so crashes at
+          # the _plan_shape extraction under set -euo pipefail (mislabeled as a read-only HALT).
+          log "RESUME: planner-escalated gate answered (no session_plan for $pending_iter) — clearing pending_gate; the next Planner pass re-plans with the inlined answer (FUP-0932)"
+          jq 'del(.pending_gate)' "$STATE_DIR/state_snapshot.json" > "$STATE_DIR/state_snapshot.json.tmp" \
+            && mv "$STATE_DIR/state_snapshot.json.tmp" "$STATE_DIR/state_snapshot.json"
+          # (fall through to the main loop below)
+        else
         log "RESUME: operator gate_response found for iteration $pending_iter — re-running execute_with_gates"
         set +e
         "$SCRIPT_DIR/hooks/execute_with_gates.sh" "$SEED" "$pending_iter_dir"
@@ -299,6 +311,7 @@ if [[ -f "$STATE_DIR/state_snapshot.json" ]]; then
             exit 3
             ;;
         esac
+        fi
       else
         log "RESUME: no operator gate_response for iteration $pending_iter — re-dispatching and blocking"
         dispatch_notification "$SEED" "$STATE_DIR" gate_human "$(jq -nc --arg it "$pending_iter" '{iteration:$it, reason:"awaiting_operator_response"}')"
@@ -311,6 +324,21 @@ else
   log "BOOTSTRAP: no snapshot — initialising state dir"
   mkdir -p "$STATE_DIR/iterations" "$STATE_DIR/gates" "$STATE_DIR/escalations" "$STATE_DIR/logs"
   [[ -f "$STATE_DIR/seed.md" ]] || cp "$SEED" "$STATE_DIR/seed.md"   # seed written once, never modified (§6.1)
+fi
+
+# FUP-0931: bootstrap the initiative_narrative.md that BOTH the Planner and the Consumer require as an
+# input (no role creates it; a fresh initiative HALTs input-load on iteration 0001 without it). Seed a
+# minimal skeleton only when absent (covers both bootstrap and an anomalous resume); the Consumer
+# overwrites it with real per-iteration summaries thereafter.
+if [[ ! -f "$STATE_DIR/initiative_narrative.md" ]]; then
+  {
+    printf '# Initiative Narrative - %s\n\n' "${EVENT_SLUG:-initiative}"
+    printf 'Auto-seeded by orchestrator.sh at BOOTSTRAP (FUP-0931). The Consumer appends one iteration\n'
+    printf 'summary per close; the Planner reads the last K summaries plus the fail_counts tail.\n\n'
+    printf '## Iteration summaries\n\n(none yet - launch state.)\n\n'
+    printf '## fail_counts\n\n[]\n'
+  } > "$STATE_DIR/initiative_narrative.md"
+  log "BOOTSTRAP: seeded initiative_narrative.md skeleton (FUP-0931)"
 fi
 
 # Main role-call loop (§13.1 verbatim body).
