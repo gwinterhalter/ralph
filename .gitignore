@@ -54,3 +54,6 @@ webui/app/.e2e-state/
 # webui build/server logs written when running the GUI locally — runtime, never tracked.
 webui/**/*.log
 webui/**/*.log.err
+
+# Superseded/archived local docs & versions parked under ralph/OLD/ — never tracked.
+/OLD/
