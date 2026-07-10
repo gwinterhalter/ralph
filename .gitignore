@@ -47,3 +47,10 @@ webui/app/.e2e-state/
 # All other .claude/ contents (session state, auth tokens, etc.) remain excluded.
 !.claude/commands/
 !.claude/commands/**
+
+# Local editor/session backups (e.g. plan_review.sh.bak-20260701) — never tracked.
+*.bak
+*.bak-*
+# webui build/server logs written when running the GUI locally — runtime, never tracked.
+webui/**/*.log
+webui/**/*.log.err
