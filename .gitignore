@@ -57,3 +57,14 @@ webui/**/*.log.err
 
 # Superseded/archived local docs & versions parked under ralph/OLD/ — never tracked.
 /OLD/
+
+# Sandbox / scratch working directories (FUP-1245) — never tracked. Test-harness
+# temp roots (tests/test_fup_0815_*.sh, test_fup_0851_0852_*.sh) already live under
+# the OS temp dir via mktemp -d and need no entry here; this covers any future
+# in-repo sandbox/scratch dir under this convention.
+/sandbox/
+/scratch/
+*_sandbox/
+*_scratch/
+.sandbox/
+.scratch/
