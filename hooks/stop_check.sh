@@ -376,6 +376,23 @@ for ((i=0; i<count; i++)); do
       # marker → all_pass=0 (continue; never silent pass). Unknown predicate-name → exit 3 (HALT).
       pred_name="$(read_seed_field "$SEED" ".completion_predicate[$i].name")"
       skill_name="$(read_seed_field "$SEED" ".completion_predicate[$i].params.skill" 2>/dev/null || echo "")"
+      # COST GUARD (2026-07-29): a skill_clean/doc_review_clean probe is the only predicate class
+      # that spends money and minutes — on a cache miss it shells out to `claude -p` for a full
+      # skill run ($1-3, ~12 min measured for cf-corpus-auditor over this corpus). This loop has
+      # NO early exit: every predicate is evaluated on every invocation and the result is folded
+      # into all_pass, which decides a single exit 0/1 at the end. So once all_pass is already 0,
+      # a further probe CANNOT change the outcome — completion is already false — and the spend is
+      # pure waste. Measured impact on factory_backlog: the corpus_auditor_clean cache can never
+      # hit (no Corpus_Audit*factory_backlog*.md exists to match the FUP-0819 slug-scoped lookup),
+      # so a 69-item drain would have paid ~12 min and $1-3 on EVERY iteration — roughly 19h and
+      # $69-207 against a $120 budget cap, tripping the cap before the registry drained.
+      # Skipping is semantics-preserving for the exit code: the only lost side effect is running a
+      # skill whose verdict is already irrelevant. The probe still runs in full on the pass that
+      # matters — the one where every cheap predicate has gone green and completion is live.
+      if [[ "$all_pass" -eq 0 ]]; then
+        echo "stop_check: $kind predicate '$pred_name' SKIPPED — an earlier predicate already failed, so completion is already false and this probe cannot change the verdict (cost guard; avoids a claude -p skill run)" >&2
+        continue
+      fi
       target="$(read_seed_field "$SEED" ".completion_predicate[$i].params.target" 2>/dev/null || echo "")"
       tmp_out="$(mktemp)"
       workspace_root="$(read_seed_field "$SEED" '.workspace_root')"
