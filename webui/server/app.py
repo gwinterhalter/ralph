@@ -21,7 +21,7 @@ from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -74,12 +74,55 @@ class RegistryLike(Protocol):
     ) -> bool: ...
 
 
+# FUP-1351: the provider used to build a fresh Registry -- and open a NEW psycopg connection --
+# on EVERY request, never closing it, exhausting the Supabase connection slots within a session.
+# Fix: cache ONE Registry for the server lifetime and reuse its connection. Because FastAPI runs
+# sync endpoints (and the SSE stream) in a threadpool, a single psycopg connection would be used
+# concurrently -- unsafe -- so hand out a lock-serialized proxy. The connection is rebuilt only if
+# it has dropped (conn.closed). Single-operator localhost GUI: serialization cost is negligible.
+import threading  # noqa: E402,PLC0415
+
+_registry_singleton: RegistryLike | None = None
+_registry_build_lock = threading.Lock()
+_registry_call_lock = threading.Lock()
+
+
+class _LockedRegistry:
+    """Serializes every DB call on the shared connection through one lock (psycopg3
+    Connections are not safe for concurrent use across threads)."""
+
+    def __init__(self, base: object, lock: "threading.Lock") -> None:
+        self._base = base
+        self._lock = lock
+
+    def __getattr__(self, name: str) -> object:
+        attr = getattr(self._base, name)
+        if not callable(attr):
+            return attr
+
+        def _wrapped(*args: object, **kwargs: object) -> object:
+            with self._lock:
+                return attr(*args, **kwargs)
+
+        return _wrapped
+
+
 def _default_registry_provider() -> RegistryLike:
     from supervisor.registry import Registry  # noqa: PLC0415 - lazy: only the live server needs a DB
 
+    global _registry_singleton
     if not os.environ.get("PROD_DB_URL"):
         raise HTTPException(status_code=503, detail="PROD_DB_URL is not set.")
-    return Registry.from_env()
+    with _registry_build_lock:
+        reg = _registry_singleton
+        if reg is not None:
+            raw = getattr(reg._base, "_conn", None)  # type: ignore[attr-defined]
+            if raw is not None and getattr(raw, "closed", False):
+                reg = None  # connection dropped -> rebuild
+        if reg is None:
+            reg = cast("RegistryLike", _LockedRegistry(Registry.from_env(), _registry_call_lock))
+            _registry_singleton = reg
+    return reg
 
 
 def _default_dispatcher(argv: list[str]) -> tuple[int, str]:

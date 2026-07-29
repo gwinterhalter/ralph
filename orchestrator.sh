@@ -17,7 +17,12 @@ set -euo pipefail
 # tree, not an ancestor of ralph/). Env-overridable; portable across drive/path changes (Q1 default).
 # EXPORT (not bare `:=`) so child hooks under `set -euo pipefail` (which makes unset vars an error)
 # inherit the value — without export the variable lives only in orchestrator.sh's shell.
-export CLAUDE_SKILLS_DIR="${CLAUDE_SKILLS_DIR:-K:/Claude Code Factory/V3/Project_Docs}"
+# DEFAULT (2026-07-29): derived from THIS script's own location, not a hardcoded absolute path.
+# ralph/ lives at <Factory_V3>/Python_Executions/ralph, so dirname/../.. IS the Factory_V3 root that
+# contains .claude/skills. Truly portable across machines/drive letters (the prior hardcoded
+# "K:/Claude Code Factory/V3/Project_Docs" was stale and silently broke rl-* slash-command resolution,
+# forcing an `export CLAUDE_SKILLS_DIR=` at every dispatch). Still env-overridable via the `:-`.
+export CLAUDE_SKILLS_DIR="${CLAUDE_SKILLS_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/seed.sh
