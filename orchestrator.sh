@@ -17,7 +17,12 @@ set -euo pipefail
 # tree, not an ancestor of ralph/). Env-overridable; portable across drive/path changes (Q1 default).
 # EXPORT (not bare `:=`) so child hooks under `set -euo pipefail` (which makes unset vars an error)
 # inherit the value — without export the variable lives only in orchestrator.sh's shell.
-export CLAUDE_SKILLS_DIR="${CLAUDE_SKILLS_DIR:-K:/Claude Code Factory/V3/Project_Docs}"
+# DEFAULT (2026-07-29): derived from THIS script's own location, not a hardcoded absolute path.
+# ralph/ lives at <Factory_V3>/Python_Executions/ralph, so dirname/../.. IS the Factory_V3 root that
+# contains .claude/skills. Truly portable across machines/drive letters (the prior hardcoded
+# "K:/Claude Code Factory/V3/Project_Docs" was stale and silently broke rl-* slash-command resolution,
+# forcing an `export CLAUDE_SKILLS_DIR=` at every dispatch). Still env-overridable via the `:-`.
+export CLAUDE_SKILLS_DIR="${CLAUDE_SKILLS_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/seed.sh
@@ -96,6 +101,10 @@ trap 'rm -f "$ORCH_LOCK"' EXIT
 
 log() { mkdir -p "$STATE_DIR/logs"; printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$STATE_DIR/logs/orchestrator.log"; }
 
+# FUP-1347: rc of the most recent run_claude_json `claude -p` invocation, read by
+# require_role_json at the call site. Initialised here so `set -u` cannot trip on it.
+RUN_CLAUDE_LAST_RC=0
+
 # run_claude_json — wraps `claude -p` with --output-format json + --max-budget-usd;
 # captures total_cost_usd into the running spend; HALTs orchestrator if cumulative
 # spend exceeds cap. FUP-0720.
@@ -142,9 +151,29 @@ run_claude_json() {
   # without leaking the path-conversion-disable to jq / mv / etc.
   local llm_t0; llm_t0="$(date +%s%3N 2>/dev/null || echo 0)"
   local llm_err="$out_file.err"
+  # FUP-1347: CAPTURE the claude rc rather than letting `set -e` abort mid-function.
+  # A bare invocation here killed the orchestrator dead the instant `claude` exited
+  # non-zero, and killed it BEFORE any of the recording below could run. That is the
+  # 2026-07-29 iteration-0003 signature exactly: a 0-byte consumer.json AND a 0-byte
+  # consumer.json.err (the .err file only survives on disk because the `rm -f` a few
+  # lines down was never reached), no llm_call, no phase_complete, no iteration_end
+  # and no iteration_failed — the last events.jsonl line is the consumer `role_call`.
+  # A silent death with no recorded cause. Capturing rc lets the post-call recording
+  # and the caller's require_role_json guard both run, so the failure gets WRITTEN
+  # DOWN. The rc is exposed to the caller via RUN_CLAUDE_LAST_RC (set -u safe: it is
+  # initialised above). This function still returns 0 — the planner path deliberately
+  # keeps falling through to its existing deliverable-existence check, which already
+  # records `planner_no_plan`; guarding the DELIVERABLE rather than the envelope is
+  # this file's own established convention.
+  local claude_rc=0
+  set +e
   # shellcheck disable=SC2086
   MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
     claude -p $role_model_flag --permission-mode "$POSTURE_VALUE" --output-format json --max-budget-usd "$remaining_budget" --add-dir "$CLAUDE_SKILLS_DIR" -- "$@" > "$out_file" 2> "$llm_err"
+  claude_rc=$?
+  set -e
+  RUN_CLAUDE_LAST_RC="$claude_rc"
+  [[ "$claude_rc" -ne 0 ]] && log "claude -p exited rc=$claude_rc for $(basename "$out_file") (captured, not fatal here; see the caller's guard)"
   # Rate-limit detection (concurrency 2026-06-09): scan the captured stderr; best-effort, non-fatal.
   if command -v detect_and_emit_rate_limit >/dev/null 2>&1; then
     local rl_role="orchestrator"
@@ -191,7 +220,13 @@ run_claude_json() {
       esac
     fi
   fi
-  call_cost="$(jq -r '.total_cost_usd // 0' "$out_file")"
+  # FUP-1347: on a 0-byte / unparseable envelope bare `jq` prints NOTHING and exits 0,
+  # so call_cost came back empty and `--argjson cc ""` then died with a cryptic jq
+  # "invalid JSON text" and an rc=2 abort — a second silent-death route, mislabelled.
+  # Default it explicitly so the accounting degrades to 0 and the REAL failure is the
+  # one the caller's guard reports.
+  call_cost="$(jq -r '.total_cost_usd // 0' "$out_file" 2>/dev/null || echo 0)"
+  [[ -n "$call_cost" && "$call_cost" != "null" ]] || call_cost=0
   new_total="$(jq -rn --argjson cur "$current_spend" --argjson cc "$call_cost" '$cur + $cc')"
   jq --argjson nt "$new_total" '.total_spend_usd = $nt' "$RUNNING_SPEND_FILE" > "$RUNNING_SPEND_FILE.tmp" \
     && mv "$RUNNING_SPEND_FILE.tmp" "$RUNNING_SPEND_FILE"
@@ -215,6 +250,75 @@ run_claude_json() {
       "$(jq -nc --arg r "$llm_role" --arg m "$llm_model" --argjson i "${llm_in:-0}" --argjson o "${llm_out:-0}" --argjson c "${llm_cache:-0}" --argjson cost "${call_cost:-0}" \
          '{role:$r, model:$m, input_tokens:$i, output_tokens:$o, cache_read_tokens:$c, cost_usd:$cost}')"
   fi
+}
+
+# require_role_json — FUP-1347. Hard-fail an iteration whose role call produced no
+# usable JSON envelope, and RECORD the failure, so silence means exactly one thing.
+#
+# THE DEFECT THIS CLOSES
+#   The Consumer's envelope was WRITE-ONLY: nothing in the tree ever read
+#   consumer.json, so a Consumer that produced nothing was indistinguishable from one
+#   that ran and had nothing to close. On 2026-07-29 iteration 0003 that is precisely
+#   what happened — consumer.json 0 bytes, consumer.json.err 0 bytes, and the last
+#   line of events.jsonl a `consumer role_call` with no terminal event after it. The
+#   iteration fixed its target and satisfied its oracle and closed NOTHING: no
+#   registry row reached RESOLVED, and no surface recorded why. A full drain could
+#   have remediated many items and recorded none of them.
+#
+# ALERT DESIGN — silence must mean exactly one thing
+#   Every path out of a guarded role call now emits a TERMINAL event for that role:
+#     * this guard fires       -> iteration_failed(reason=<role>_output_invalid)
+#     * the envelope is usable -> the caller's phase_complete liveness heartbeat
+#   The guard is therefore placed BEFORE that heartbeat: a phase_complete emitted
+#   after a no-output Consumer is a liveness signal that lies. After this change a
+#   `role_call` with no following terminal event can ONLY mean the process is not
+#   running — it can no longer mean "ran with nothing to say".
+#
+# A GENUINE NO-OP REMAINS AN EXIT-0 SUCCESS
+#   This checks only that the envelope is STRUCTURALLY USABLE — never that the role
+#   did any work. A valid consumer.json that closes zero items PASSES. "Correctly
+#   found nothing" is a success and must not be conflated with failure; conflating
+#   them is how a real signal gets trained into background noise.
+#
+# Usage: require_role_json <out_file> <role> <iter> <rc>
+require_role_json() {
+  local out_file="$1" role="$2" iter="$3" rc="${4:-0}"
+  local base why=""
+  base="$(basename "$out_file")"
+
+  if [[ "$rc" -ne 0 ]]; then
+    why="the ${role} CLI call exited rc=${rc}"
+  elif [[ ! -f "$out_file" ]]; then
+    why="${role} produced no output file at ${base}"
+  elif [[ ! -s "$out_file" ]]; then
+    why="${role} produced a ZERO-BYTE ${base} -- it produced nothing, which is NOT the same as having run with nothing to do"
+  elif ! jq -e 'type == "object"' "$out_file" >/dev/null 2>&1; then
+    # `jq -e`, never bare `jq`: bare jq prints nothing and exits 0 on empty input,
+    # which is exactly how an unparseable envelope reads as a clean result. Same bug
+    # class as FUP-0852, where a malformed artefact silently bypassed a gate.
+    why="${role} produced an unparseable ${base} (not a JSON object)"
+  fi
+
+  [[ -z "$why" ]] && return 0
+
+  log "ITERATION $iter FAILED (${role}_output_invalid): $why"
+  mkdir -p "$STATE_DIR/escalations" 2>/dev/null || true
+  # jq -n, not printf: $why carries punctuation that would break hand-built JSON.
+  jq -nc --arg it "$iter" --arg r "${role}_output_invalid" --arg d "$why" \
+     --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+     '{iteration:$it, classification:"gate_human", reason:$r, detail:$d, ts:$ts}' \
+     > "$STATE_DIR/escalations/iteration_${iter}_failed.json" 2>/dev/null || true
+  dispatch_notification "$SEED" "$STATE_DIR" iteration_failed \
+    "$(jq -nc --arg it "$iter" --arg r "${role}_output_invalid" --arg d "$why" \
+       '{iteration:$it, reason:$r, detail:$d}')" 2>/dev/null || true
+  # FUP-0842 envelope: iteration_failed carries the §6.2 reason. `<role>_output_invalid`
+  # is deliberately distinct from every existing reason so the failure is queryable as
+  # its own class rather than folded into a generic crash.
+  emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$iter" "$role" "iteration_failed" "" "" "" \
+    "$(jq -nc --arg it "$iter" --arg r "${role}_output_invalid" --arg d "$why" \
+       '{iteration:$it, reason:$r, detail:$d}')"
+  echo "HALT: ${role}_output_invalid -- $why" >&2
+  exit 3
 }
 
 # next_iteration_index — canonical algorithm (§13.1 verbatim).
@@ -281,6 +385,10 @@ if [[ -f "$STATE_DIR/state_snapshot.json" ]]; then
             EVENT_CN_T0="$(date +%s%3N 2>/dev/null || echo 0)"
             ROLE_MODEL="$(read_seed_field "$SEED" .consumer_model 2>/dev/null || echo "")" \
               run_claude_json "$pending_iter_dir/consumer.json" "/rl-iteration-consumer $STATE_DIR $pending_iter_dir"
+            # FUP-1347: same guard as the main loop — the §6.3 resume leg runs the
+            # Consumer too, so leaving it unguarded would keep the silent-nothing path
+            # fully open on exactly the resume-after-operator-gate case.
+            require_role_json "$pending_iter_dir/consumer.json" "consumer" "$pending_iter" "$RUN_CLAUDE_LAST_RC"
             emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$pending_iter" "consumer" "phase_complete" \
               "$(( $(date +%s%3N 2>/dev/null || echo 0) - EVENT_CN_T0 ))" "" "" \
               "$(jq -nc --argjson cs "$(jq -r '.total_spend_usd // 0' "$RUNNING_SPEND_FILE" 2>/dev/null || echo 0)" '{cumulative_spend:$cs}')"
@@ -617,6 +725,11 @@ while true; do
   EVENT_CN_T0="$(date +%s%3N 2>/dev/null || echo 0)"
   ROLE_MODEL="$(read_seed_field "$SEED" .consumer_model 2>/dev/null || echo "")" \
     run_claude_json "$ITER_DIR/consumer.json" "/rl-iteration-consumer $STATE_DIR $ITER_DIR"
+  # FUP-1347: the envelope must be structurally usable BEFORE the phase_complete
+  # heartbeat below is emitted — that heartbeat is the §15 liveness signal, and
+  # emitting it after a Consumer that produced nothing makes it lie. Exits 3 with a
+  # recorded iteration_failed(consumer_output_invalid) rather than passing silently.
+  require_role_json "$ITER_DIR/consumer.json" "consumer" "$ITER" "$RUN_CLAUDE_LAST_RC"
   emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "consumer" "phase_complete" \
     "$(( $(date +%s%3N 2>/dev/null || echo 0) - EVENT_CN_T0 ))" "" "" \
     "$(jq -nc --argjson cs "$(jq -r '.total_spend_usd // 0' "$RUNNING_SPEND_FILE" 2>/dev/null || echo 0)" '{cumulative_spend:$cs}')"

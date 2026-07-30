@@ -1,14 +1,15 @@
 # Ralph Loop User Guide
 
-**Version:** 1.0
-**Date:** 2026-07-02
-**Status:** Base copy (curated). Ground-truth this against the source files listed in §11 before relying on any exact field name, exit code, or path — the loop is under active change (FUP-driven) and specifics drift.
+**Version:** 1.1
+**Date:** 2026-07-09
+**Status:** Curated. Ground-truth this against the source files listed in §11 before relying on any exact field name, exit code, or path — the loop is under active change (FUP-driven) and specifics drift.
 
 ## Change history
 
 | Version | Date | Author | Notes |
 |---------|------|--------|-------|
 | 1.0 | 2026-07-02 | Ralph Loop maintainers | First curated base copy. Consolidates `Initiative_Orchestrator_Spec_v1_9`, the `orchestrator.sh` + `hooks/` + `lib/` implementation, the `supervisor/` fleet host, the four `rl-*` skills (planner v1.5.1, consumer v1_5, answerer v1_2, project-intake v1.0), `seed.template_v1_4.md`, and the Sub_Projects `CLAUDE.md` v1.36 In-Run Bug Workflow. |
+| 1.1 | 2026-07-09 | Ralph Loop maintainers | Adds **§7.1** the operator approval-gate policy (the whole Sub_Projects fleet is parked at `pending_approval`; nothing dispatches without an explicit per-project Approve) and **§8.5** operation modes + the new `ops/` on-demand tooling (`supervisor-status.ps1`, `run-supervisor-foreground.ps1`) with NSSM daemonization documented-but-DEFERRED. Sharpens **§6.4** with the FR-034 *admission-time* read-only invariant (a seed omitting `Project_Docs_Current` is REJECTED — FUP-0935) and notes the generalized report-recovery / narrative-bootstrap / gate-resume self-heal (FUP-0930/0931/0932) in §4.3 + §6.2. Skill/spec/template versions **unchanged** since v1.0 (re-verified 2026-07-09). |
 
 > **Terminology note.** The open-source `README.md`/`CLAUDE.md`/`ralph.sh`/`prompt.md` that also live in `Python_Executions/ralph/` are the upstream Geoffrey Huntley / `snarktank/ralph` PRD-loop project. The CF factory's autonomous outer loop — the subject of this guide — is a **different, heavier system** built on top of that fork: `orchestrator.sh` + `hooks/` + `lib/` + `supervisor/` + the `rl-*` skills, driven by the `Initiative_Orchestrator_Spec`. When this guide says "Ralph Loop" it means the CF system, not `ralph.sh`.
 
@@ -191,7 +192,7 @@ Three stages:
    - `auto_resolve` (schema 1.4) → the broker writes the response directly per the matched pre-classification entry, skipping both Answerer and operator (audited to `logs/auto_resolve.log`).
    It also generates `mcp_config.json` from `seed.mcp_servers[]` (+ any per-iteration additions) and validates it against schema.
 2. **Executor.** `claude --print --output-format json --permission-mode <posture> --strict-mcp-config --mcp-config mcp_config.json --max-budget-usd <cap> --max-turns <n> < session_plan_NNNN.md`. Writes `execution_result_NNNN.json` (atomically, to a temp name the agent can't target) and the Executor authors `execution_report_NNNN.md`.
-3. **Post-execution gates.** (a) **Read-only scan** — for each `read_only_paths[]` root, any file modified since iteration start is a **boundary violation → exit 2 → orchestrator HALT** (FR-017). (b) **Permission-denial gate (§10.5)** — each `permission_denials[]` entry is classified: a nested `claude -p`/`--print` spawn (a benign *verification* spawn) vs a `deliverable_blocking` denial. Exit 1 **only** if ≥1 deliverable-blocking denial; all-verification-spawn denials are logged and the run continues so the Consumer can still ingest completed deliverables. (c) If `terminal_reason != "completed"` → exit 1 (`irregular_termination`). A completed build/checkpoint that is missing its `## Items closed` report section triggers one bounded `--resume` follow-up to have the Executor emit the report (no code/git change requested).
+3. **Post-execution gates.** (a) **Read-only scan** — for each `read_only_paths[]` root, any file modified since iteration start is a **boundary violation → exit 2 → orchestrator HALT** (FR-017). (b) **Permission-denial gate (§10.5)** — each `permission_denials[]` entry is classified: a nested `claude -p`/`--print` spawn (a benign *verification* spawn) vs a `deliverable_blocking` denial. Exit 1 **only** if ≥1 deliverable-blocking denial; all-verification-spawn denials are logged and the run continues so the Consumer can still ingest completed deliverables. (c) If `terminal_reason != "completed"` → exit 1 (`irregular_termination`). A completed build/checkpoint that is missing its `## Items closed` report section triggers one bounded `--resume` follow-up to have the Executor emit the report (no code/git change requested — **generalized to all session shapes incl. `doc_stub`, FUP-0930**; it was previously an allow-list that skipped some shapes).
 
 ### 4.4 Consumer (`/rl-iteration-consumer`)
 
@@ -288,7 +289,7 @@ state/
 3. **`pending_gate` non-null** → look in the pending iteration for a matching `gate_response_*.json`. Present → re-run `execute_with_gates.sh` for that iteration (the operator's answer is now inlined), then the Consumer; clear `pending_gate`. Absent → re-dispatch the notification and block again.
 4. Else → continue the main loop from the next iteration.
 
-This is what makes a `gate_human` block **recoverable**: the orchestrator exits cleanly (exit 0), the operator writes a `gate_response`, and the next launch resumes from the snapshot.
+This is what makes a `gate_human` block **recoverable**: the orchestrator exits cleanly (exit 0), the operator writes a `gate_response`, and the next launch resumes from the snapshot. *(Hardened 2026-07: bootstrap seeds a skeletal `initiative_narrative.md` when absent — FUP-0931; and a resume whose `pending_gate` iteration has **no** `session_plan` clears the stale gate and **re-plans** that iteration rather than aborting under `set -euo pipefail` — FUP-0932.)*
 
 ### 6.3 Gate classes
 
@@ -301,9 +302,11 @@ This is what makes a `gate_human` block **recoverable**: the orchestrator exits 
 
 **The `gate_response` JSON (FR-008, 4 fields):** `selected_option` **XOR** `custom_text`; a non-empty `reasoning`; a `confidence` float; and `classification_check`. It must be RFC-8259-valid — paths in string fields use **forward slashes** (a lone Windows `\` is an invalid JSON escape); `execute_with_gates` treats a malformed response as *unresolved* and blocks the gate to the operator.
 
-### 6.4 Read-only boundaries (FR-017)
+### 6.4 Read-only boundaries (FR-017 run-time · FR-034 admission-time)
 
 `seed.read_only_paths[]` (always including the universally-read-only `Project_Docs_Current` corpus snapshot) are scanned after the Executor runs; any write under them is a **terminal HALT (exit 3)**. This is the hard guarantee that a run cannot corrupt the shared corpus.
+
+**FR-034 (admission-time enforcement).** The supervisor's admission safety-floor *also* refuses to admit a Project whose seed `read_only_paths[]` does **not** list `Project_Docs_Current` — the reconcile log shows `ADMISSION REJECTED <slug> — read_only_invariant_violation`. Such a seed sits at `candidate` and **silently never dispatches** (the reason is only in the — often block-buffered — supervisor log). The `rl-project-intake` skeleton now defaults `read_only_paths` to the corpus path so intake output is admittable out of the box (FUP-0935); a hand-written seed **must** include it. (Direct `orchestrator.sh` runs bypass this check — it is admission-only, which is why standalone pilots never hit it.)
 
 ---
 
@@ -316,6 +319,10 @@ pending_approval → candidate → admitted → running → { paused_gate | paus
      (operator Approve)  (gate)   (spawn)      │            (paused_* → running = resume)
                                                └── complete/failed → candidate  (operator re-open)
 ```
+
+### 7.1 The approval gate (operator policy)
+
+> **Standing policy (2026-07-09).** The **only** exit from `pending_approval` is `candidate`, and it is the operator's **Approve** action (control panel, or `set_lifecycle_state <id> candidate`). The supervisor's Schedule step reads **`candidate` only** — it never sees `pending_approval` — so a parked Project cannot dispatch no matter how many ~30s cycles turn. The entire Sub_Projects RL fleet is **deliberately parked at `pending_approval`: nothing runs without an explicit, per-project operator Approve.** New intakes also land at `pending_approval`. This parking is the load-bearing safety prerequisite that makes running (or daemonizing) the supervisor safe — before starting a resident supervisor, confirm zero unexpected `candidate` rows (`ops/supervisor-status.ps1` reports the DISPATCHABLE-NOW count). Note: **Reject** on a `pending_approval` row *deletes* the projects row (throwaway-proposal semantics) — use Approve, or leave it parked.
 
 **Admission** (`admission.py`, the only path `candidate → running`) evaluates preconditions in short-circuit order and produces exactly one outcome (never partial):
 
@@ -420,6 +427,15 @@ python -m supervisor.control_panel learnings|promote|reject|apply <key>   # Run-
 
 **Answering a `gate_human`:** when a run blocks, it emails/notifies with the gate. Write a valid `gate_response_<iter>_<gate>.json` (§6.3) into the pending iteration dir (or `escalations/`), then relaunch the orchestrator (standalone) — or let the supervisor's next cycle detect the cleared gate and resume (`paused_gate → running`).
 
+### 8.5 Operation modes: on-demand vs daemonized
+
+The supervisor is a **hand-started foreground process** by default — there is no resident service yet (NSSM daemonization is documented but **DEFERRED**, below). Two ways to operate, both under the §7.1 approval gate:
+
+- **On-demand (current default).** Run the supervisor in the foreground when you want to drain *approved* work; Ctrl-C when done. Two `ops/` helpers replace what a service would give you:
+  - **`ops/run-supervisor-foreground.ps1`** — sets the full env block (`OL_SUPERVISOR_*` + `PYTHONUNBUFFERED=1`, ceiling 1) and launches `python -m supervisor`. Warns if a supervisor is already running, and prints the fleet gate **pre-flight** (what *will* dispatch) before starting. `-Once` = single cycle; `-Interval N` / `-Ceiling N` to tune. It never approves anything — it only drains what you already approved.
+  - **`ops/supervisor-status.ps1`** (wraps `ops/supervisor_status.py`; read-only via `Registry.from_env()`) — one call reports **OS state** (supervisor process / NSSM service / `KILL_SWITCH` / detached orchestrators) **and fleet state** (per-lifecycle counts, **DISPATCHABLE-NOW** = candidate count where `0` == safely gated, in-flight runs, cumulative spend). Never writes; safe any time.
+- **Daemonized (deferred).** `New/OL_Supervisor_NSSM_Daemonization_Setup` documents running `python -m supervisor` as a resident **NSSM Windows service** (auto-restart + FR-013 re-attach, session-0). It is **hardened and ready but not installed** — with the fleet parked (§7.1) a resident service only idles, so it earns its keep once approved-work throughput makes hand-starting a chore. Session-0 blockers are pre-cleared (`K:` is a local volume; `claude` is on the **Machine** PATH; headless auth proven by a supervisor-driven smoke test). The lone residual is the service wrapper itself, exercised by the first `nssm start`. **Error handling when daemonized:** infra faults self-heal (crash → NSSM restart + re-attach; hang → reconcile-reap); a genuine per-item failure is the model's own within-turn correction (the headless Executor reads the error and rewrites, `--max-turns`), escalating cross-iteration to **stop-on-fail + email** after `fail_count ≥3` rather than blind retry.
+
 ---
 
 ## 9. Failure & recovery
@@ -484,6 +500,8 @@ Every supervisor cycle's Learn step runs the **Run-Auditor** over completed Runs
 | `lib/notify.sh`, `lib/events.sh`, `lib/heartbeat.sh`, `lib/command_dispatch.sh` | Notifications, event log, heartbeats, operator command channel. |
 | `schemas/*.schema.json` | JSON schemas for `mcp_config`, `gate_request`, `execution_result`. |
 | `supervisor/` | The fleet host (`__main__.py`, `cycle.py`, `admission.py`, `scheduler.py`, `reconcile.py`, `spawn.py`, `registry.py`, `control_panel.py`, `preflight.py`, `run_signals.py`, `run_auditor.py`, `transitions.py`, …). |
+| `ops/supervisor_status.py` · `ops/supervisor-status.ps1` · `ops/run-supervisor-foreground.ps1` | On-demand operator tooling (§8.5): read-only fleet status + env-parity foreground launcher. |
+| `New/OL_Supervisor_NSSM_Daemonization_Setup*.md` | The NSSM Windows-service daemonization runbook (DEFERRED; hardened & ready — §8.5). |
 
 **Skills — `…\Factory_V3\.claude\skills\`** (resolved via `CLAUDE_SKILLS_DIR`; scan-newest for the version dir)
 
@@ -507,4 +525,4 @@ Every supervisor cycle's Learn step runs the **Run-Auditor** over completed Runs
 
 ---
 
-*End of Ralph Loop User Guide v1.0.*
+*End of Ralph Loop User Guide v1.1.*

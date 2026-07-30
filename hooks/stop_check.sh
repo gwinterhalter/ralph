@@ -19,6 +19,31 @@ SEED="${1:?usage: stop_check.sh <seed_path> <state_dir>}"
 # shellcheck disable=SC2034  # STATE_DIR required by §13.2 hook signature; predicates use seed-absolute paths
 STATE_DIR="${2:?usage: stop_check.sh <seed_path> <state_dir>}"
 
+# ---------------------------------------------------------------------------
+# PERF (2026-07-29): shared prune set for every workspace-wide `find` below.
+#
+# WHY: this hook runs several recursive finds rooted at $workspace_root. When the
+# corpus lives on a network-mounted, OneDrive-backed share (measured on
+# CODE-FACTORY reaching \\Z2-WINTERHALTER\CF-share: ~21 files/sec vs ~83,000
+# files/sec on local disk — a ~4000x penalty, every file being a Files-On-Demand
+# placeholder over SMB), a single full-tree walk exceeded 300s without finishing
+# and the orchestrator never reached "ITERATION begin" — it would have been
+# killed by its own hang_timeout_seconds first.
+#
+# WHAT: prune directories that cannot contain a CF register or audit artefact but
+# dominate traversal cost (webui/app/node_modules alone is the bulk of the tree).
+# This is SEMANTICS-PRESERVING: no *_v*.md register, no */audit/*.md report and no
+# Resolution-path .md target is ever stored inside these. Deliberately NOT pruned:
+# archive subtrees (Project_Docs_New_archive/** DOES hold audit/ reports, and the
+# cached-audit lookups are already bounded by -mtime -7).
+#
+# USAGE: find "$root" \( "${FIND_PRUNE[@]}" \) -prune -o <expr> -print
+# NOTE the explicit -print/-printf: with `-prune -o`, find's implicit print no
+# longer applies, so the match branch MUST carry its own action or output is empty.
+FIND_PRUNE=( -name node_modules -o -name .git -o -name __pycache__ \
+             -o -name .venv -o -name venv -o -name .pytest_cache \
+             -o -name .mypy_cache -o -name .ruff_cache -o -name .next )
+
 # FUP-0806: scan-newest resolution for bare-name register references (mirrors Planner-side per
 # seed §4.1 / FUP-0788). Args: $1 = workspace_root, $2 = bare register name (e.g.
 # "Auto_Build_Gap_Register.md"). Echoes the resolved absolute path of the highest-versioned
@@ -47,7 +72,7 @@ resolve_register_scan_newest() {
     elif [[ "$(printf '%s\n%s\n' "$best_v" "$v_cmp" | sort -V | tail -1)" == "$v_cmp" ]]; then
       best_v="$v_cmp"; best="$f"
     fi
-  done < <(find "$root" "$SCRIPT_DIR/.." -type f -name "${base}_v*.md" 2>/dev/null)
+  done < <(find "$root" "$SCRIPT_DIR/.." \( "${FIND_PRUNE[@]}" \) -prune -o -type f -name "${base}_v*.md" -print 2>/dev/null)
   echo "$best"
 }
 
@@ -91,7 +116,7 @@ for ((i=0; i<count; i++)); do
       if [[ -f "$targets_source" ]]; then
         register_path="$targets_source"
       else
-        register_path="$(find "$workspace_root" "$SCRIPT_DIR/.." -type f -name "$targets_source" 2>/dev/null | head -1)"
+        register_path="$(find "$workspace_root" "$SCRIPT_DIR/.." \( "${FIND_PRUNE[@]}" \) -prune -o -type f -name "$targets_source" -print 2>/dev/null | head -1)"
         # FUP-0806: scan-newest fallback (parallel to registry_zero_open branch above).
         if [[ -z "$register_path" || ! -f "$register_path" ]]; then
           register_path="$(resolve_register_scan_newest "$workspace_root" "$targets_source")"
@@ -156,7 +181,7 @@ for ((i=0; i<count; i++)); do
           resolution="${cells[6]}"
           while read -r token; do
             [[ -z "$token" ]] && continue
-            found="$(find "$workspace_root" -type f -name "$(basename "$token")" 2>/dev/null | head -1)"
+            found="$(find "$workspace_root" \( "${FIND_PRUNE[@]}" \) -prune -o -type f -name "$(basename "$token")" -print 2>/dev/null | head -1)"
             if [[ -z "$found" ]]; then
               missing_count=$((missing_count+1))
             fi
@@ -182,7 +207,7 @@ for ((i=0; i<count; i++)); do
         register_path="$register_rel"
       else
         workspace_root="$(read_seed_field "$SEED" '.workspace_root')"
-        register_path="$(find "$workspace_root" "$SCRIPT_DIR/.." -type f -name "$register_rel" 2>/dev/null | head -1)"
+        register_path="$(find "$workspace_root" "$SCRIPT_DIR/.." \( "${FIND_PRUNE[@]}" \) -prune -o -type f -name "$register_rel" -print 2>/dev/null | head -1)"
         # FUP-0806: scan-newest fallback — bare-name register references (per FUP-0788 / seed §4.1)
         # like "Auto_Build_Gap_Register.md" don't match versioned files by exact find -name. Try
         # `<base>_v*.md` pattern, extract version from basename, take highest. Mirrors the Planner-
@@ -351,6 +376,23 @@ for ((i=0; i<count; i++)); do
       # marker → all_pass=0 (continue; never silent pass). Unknown predicate-name → exit 3 (HALT).
       pred_name="$(read_seed_field "$SEED" ".completion_predicate[$i].name")"
       skill_name="$(read_seed_field "$SEED" ".completion_predicate[$i].params.skill" 2>/dev/null || echo "")"
+      # COST GUARD (2026-07-29): a skill_clean/doc_review_clean probe is the only predicate class
+      # that spends money and minutes — on a cache miss it shells out to `claude -p` for a full
+      # skill run ($1-3, ~12 min measured for cf-corpus-auditor over this corpus). This loop has
+      # NO early exit: every predicate is evaluated on every invocation and the result is folded
+      # into all_pass, which decides a single exit 0/1 at the end. So once all_pass is already 0,
+      # a further probe CANNOT change the outcome — completion is already false — and the spend is
+      # pure waste. Measured impact on factory_backlog: the corpus_auditor_clean cache can never
+      # hit (no Corpus_Audit*factory_backlog*.md exists to match the FUP-0819 slug-scoped lookup),
+      # so a 69-item drain would have paid ~12 min and $1-3 on EVERY iteration — roughly 19h and
+      # $69-207 against a $120 budget cap, tripping the cap before the registry drained.
+      # Skipping is semantics-preserving for the exit code: the only lost side effect is running a
+      # skill whose verdict is already irrelevant. The probe still runs in full on the pass that
+      # matters — the one where every cheap predicate has gone green and completion is live.
+      if [[ "$all_pass" -eq 0 ]]; then
+        echo "stop_check: $kind predicate '$pred_name' SKIPPED — an earlier predicate already failed, so completion is already false and this probe cannot change the verdict (cost guard; avoids a claude -p skill run)" >&2
+        continue
+      fi
       target="$(read_seed_field "$SEED" ".completion_predicate[$i].params.target" 2>/dev/null || echo "")"
       tmp_out="$(mktemp)"
       workspace_root="$(read_seed_field "$SEED" '.workspace_root')"
@@ -366,7 +408,7 @@ for ((i=0; i<count; i++)); do
           # Convert slug to title-case approximation (auto_build_spec → Auto_Build_Spec) so we
           # match audit files using either lowercase slug or title-case naming.
           initiative_title_pattern="$(echo "$initiative_slug" | awk -F'_' 'BEGIN{OFS="_"} { for(i=1;i<=NF;i++) $i = toupper(substr($i,1,1)) substr($i,2); print }')"
-          cached_audit="$(find "$workspace_root" \( -path "*/audit/Corpus_Audit*${initiative_title_pattern}*.md" -o -path "*/audit/Corpus_Audit*${initiative_slug}*.md" \) -type f -mtime -7 -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)"
+          cached_audit="$(find "$workspace_root" \( "${FIND_PRUNE[@]}" \) -prune -o \( -path "*/audit/Corpus_Audit*${initiative_title_pattern}*.md" -o -path "*/audit/Corpus_Audit*${initiative_slug}*.md" \) -type f -mtime -7 -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)"
           if [[ -n "$cached_audit" && -f "$cached_audit" ]]; then
             # Clean signal per cf-corpus-auditor v1.7 output format: zero attributable
             # Layer-1 / Layer-2 findings ("Layer 1 findings attributable...: 0 🔴 / 0 🟡 / 0 🟢").
@@ -398,7 +440,7 @@ for ((i=0; i<count; i++)); do
           # as corpus_auditor_clean above).
           initiative_slug="$(read_seed_field "$SEED" '.initiative.slug' 2>/dev/null || echo "")"
           initiative_title_pattern="$(echo "$initiative_slug" | awk -F'_' 'BEGIN{OFS="_"} { for(i=1;i<=NF;i++) $i = toupper(substr($i,1,1)) substr($i,2); print }')"
-          cached_audit="$(find "$workspace_root" \( -path "*/audit/Cross_Reference_Audit*${initiative_title_pattern}*.md" -o -path "*/audit/Cross_Reference_Audit*${initiative_slug}*.md" \) -type f -mtime -7 -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)"
+          cached_audit="$(find "$workspace_root" \( "${FIND_PRUNE[@]}" \) -prune -o \( -path "*/audit/Cross_Reference_Audit*${initiative_title_pattern}*.md" -o -path "*/audit/Cross_Reference_Audit*${initiative_slug}*.md" \) -type f -mtime -7 -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)"
           if [[ -n "$cached_audit" && -f "$cached_audit" ]]; then
             # Clean signal per cf-cross-reference-audit v1.7 output format: presence of
             # "🟢 clean" markers (per-row severity) or "0 severe attributable" summary.
@@ -419,7 +461,7 @@ for ((i=0; i<count; i++)); do
             issues_file="$(grep -oE '^Issues path: .+$' "$tmp_out" | sed 's/^Issues path: //' | tail -1)"
             if [[ -z "$issues_file" || ! -f "$issues_file" ]]; then
               if [[ -n "$workspace_root" && -d "$workspace_root" ]]; then
-                issues_file="$(find "$workspace_root" -path '*/audit/*_Issues_*.md' -type f -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)"
+                issues_file="$(find "$workspace_root" \( "${FIND_PRUNE[@]}" \) -prune -o -path '*/audit/*_Issues_*.md' -type f -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)"
               fi
             fi
             if [[ -z "$issues_file" || ! -f "$issues_file" ]]; then
@@ -464,7 +506,7 @@ for ((i=0; i<count; i++)); do
           [[ "$doc_field" == "null" ]] && doc_field=""
           effective_target="${target:-$doc_field}"
           target_stem="$(basename "$effective_target" .md)"
-          cached_audit="$(find "$workspace_root" -path "*/audit/*${target_stem}*fix2*.md" -type f -mtime -7 -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)"
+          cached_audit="$(find "$workspace_root" \( "${FIND_PRUNE[@]}" \) -prune -o -path "*/audit/*${target_stem}*fix2*.md" -type f -mtime -7 -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)"
           if [[ -n "$cached_audit" && -f "$cached_audit" ]]; then
             # Clean signal per cf-doc-reviewer fix2 output convention: "All findings resolved: YES"
             # (possibly with markdown bold wrapping, e.g. "All findings resolved: **YES**").
