@@ -211,7 +211,13 @@ for req in "$ITER_DIR"/gate_request_"${ITER}"_*.json; do
   emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "answerer" "role_call" "" "$gate_id" "gate"
   EVENT_ANS_T0="$(date +%s%3N 2>/dev/null || echo 0)"
   # shellcheck disable=SC2086
-  claude -p $ANSWERER_MODEL_FLAG --add-dir "$CLAUDE_SKILLS_DIR" -- "/rl-operator-answerer $req" > "$answerer_stdout_file"
+  # --strict-mcp-config with no --mcp-config => zero MCP servers (2026-08-02). Without it this
+  # call inherits the USER'S GLOBAL MCP config and blocks starting github/postgres/supabase/
+  # filesystem via `npx -y` -- observed hanging at ~0 CPU with two orphan cmd.exe children.
+  # The Answerer classifies a gate against seed policy; it needs no MCP, exactly like the
+  # Planner. Keeping its MCP surface empty also keeps the global postgres entry's inline
+  # connection string (and its password) out of this process's command line.
+  claude -p $ANSWERER_MODEL_FLAG --strict-mcp-config --add-dir "$CLAUDE_SKILLS_DIR" -- "/rl-operator-answerer $req" > "$answerer_stdout_file" < /dev/null
   emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "answerer" "role_complete" \
     "$(( $(date +%s%3N 2>/dev/null || echo 0) - EVENT_ANS_T0 ))" "$gate_id" "gate" \
     "$(jq -nc --arg gid "$gate_id" '{gate_id:$gid}')"

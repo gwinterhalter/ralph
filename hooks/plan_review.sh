@@ -55,7 +55,14 @@ run_claude_retry() {
   local _attempt _rc=0
   for _attempt in 1 2 3; do
     _rc=0
-    claude "$@" > "$_out" || _rc=$?
+    # stdin closed + empty MCP surface (2026-08-02), applied centrally so BOTH callers of this
+    # wrapper inherit it: the plan reviewer and the planner's --revise callback. Neither needs
+    # MCP. Without --strict-mcp-config the call falls back to the user's GLOBAL config and
+    # blocks starting github/postgres/supabase/filesystem via `npx -y`; without `< /dev/null`
+    # it inherits a never-closing stdin under a backgrounded launch and its tool subprocesses
+    # wedge on it. Both failure modes are silent hangs, and a hang inside a RETRY loop is worse
+    # than one outside it: the wrapper would sit through three attempts before propagating.
+    claude --strict-mcp-config "$@" > "$_out" < /dev/null || _rc=$?
     [[ "$_rc" -eq 0 ]] && return 0
     if [[ "$_attempt" -lt 3 ]]; then sleep $(( _attempt * 15 )); fi
   done
@@ -123,12 +130,39 @@ for round in 1 2 3 4 5; do
   printf '%s' "$CLEAN_RESULT" | grep -qiE '(recommendation|conclusion|verdict|result|bottom line)[[:space:]:.-]*keep([^a-zA-Z0-9]|$)' && rr_keep=1
   printf '%s' "$CLEAN_RESULT" | grep -qiE 'ready for (the )?(executor|dispatch)' && rr_keep=1
   printf '%s' "$CLEAN_RESULT" | grep -qiE '(recommendation|conclusion|verdict|result)[[:space:]:.-]*revise([^a-zA-Z0-9]|$)' && rr_revise=1
+  # (2026-08-02) THIRD additive route — the reviewer FIXED what it found in the same pass.
+  # cf-session-plan-reviewer's Delivery Format reports the count it DISCOVERED ("Findings: 1
+  # DRIFT") and, separately, whether it repaired them ("All DRIFTs resolved: YES") — it is a
+  # producer-fix reviewer, not a read-only one. The strict route above parses the DISCOVERED
+  # count, so a review that found one DRIFT and fixed it scores rr_fd=1 and cannot converge;
+  # the KEEP route does not fire either because this reviewer states resolution rather than a
+  # KEEP verdict. Observed 2026-08-03 on factory_dryrun_canary6 iteration 0001: a review whose
+  # own text said "Findings: 0 ... All DRIFTs resolved: YES" was escalated as
+  # plan_review_nonconvergence, blocking a clean 38 KB plan from ever reaching the Executor.
+  # SAFETY: resolution of DRIFTs says nothing about BLOCKERs, so this route additionally
+  # requires that NO non-zero BLOCKER count appears anywhere in the text, and is guarded by the
+  # same explicit-REVISE veto as the KEEP route. It only ADDS a route; both paths above are
+  # untouched.
+  # The affirmative is REQUIRED, not optional. A first cut made "(yes|true)" optional, which made
+  # "All DRIFTs resolved: NO" match as RESOLVED — the negative statement scoring as the positive.
+  # It slipped through testing because the control that caught it was ALSO carrying an explicit
+  # REVISE verdict, so it blocked for the wrong reason and the flaw stayed invisible. Demand the
+  # explicit affirmative, then veto on an explicit negative regardless.
+  rr_resolved=0
+  printf '%s' "$CLEAN_RESULT" | grep -qiE 'all[[:space:]]+(drifts?|findings?)[[:space:]]+(are[[:space:]]+)?resolved[[:space:]:.-]*(yes|true)([^a-zA-Z0-9]|$)' && rr_resolved=1
+  printf '%s' "$CLEAN_RESULT" | grep -qiE 'all[[:space:]]+(drifts?|findings?)[[:space:]]+(are[[:space:]]+)?(not[[:space:]]+)?resolved[[:space:]:.-]*(no|false)([^a-zA-Z0-9]|$)' && rr_resolved=0
+  rr_blockers_present=0
+  printf '%s' "$CLEAN_RESULT" | grep -qE '[1-9][0-9]*[[:space:]]+BLOCKER' && rr_blockers_present=1
+
   rr_converged=0
   if printf '%s' "$CLEAN_RESULT" | grep -qF '## Session Plan Review Complete' \
      && [[ "$rr_fb" -eq 0 && "$rr_fd" -eq 0 ]]; then
     rr_converged=1
   elif [[ "$rr_keep" -eq 1 && "$rr_revise" -eq 0 ]]; then
     rr_converged=1
+  elif [[ "$rr_resolved" -eq 1 && "$rr_blockers_present" -eq 0 && "$rr_revise" -eq 0 ]]; then
+    rr_converged=1
+    echo "plan_review: converged via resolved-in-pass route (reviewer reported all DRIFTs resolved, no BLOCKER count present)" >&2
   fi
   rr_verdict="revise"; [[ "$rr_converged" -eq 1 ]] && rr_verdict="converged"
   # Item-2 FR-052: stamp the session-plan shape on the revise_round event so the Run-Auditor's

@@ -22,7 +22,18 @@ set -euo pipefail
 # contains .claude/skills. Truly portable across machines/drive letters (the prior hardcoded
 # "K:/Claude Code Factory/V3/Project_Docs" was stale and silently broke rl-* slash-command resolution,
 # forcing an `export CLAUDE_SKILLS_DIR=` at every dispatch). Still env-overridable via the `:-`.
-export CLAUDE_SKILLS_DIR="${CLAUDE_SKILLS_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+# WINDOWS PATH FORM IS LOAD-BEARING (2026-08-02, FUP pending). `pwd` under Git Bash returns the
+# MSYS form `/k/OneDrive .../Factory_V3`. Every `claude -p` call below runs under
+# MSYS_NO_PATHCONV=1 / MSYS2_ARG_CONV_EXCL='*' — set so Git Bash does not mangle the leading `/`
+# of the `/rl-*` slash commands into `C:/Program Files/Git/rl-...`. But that same suppression stops
+# Git Bash converting THIS path too, and native claude.exe cannot resolve `/k/...`. The result is
+# that `--add-dir` silently fails, NO skills load, and every rl-* role call returns
+# "Unknown command: /rl-initiative-planner" with 0 turns and $0 cost — i.e. the loop burns its whole
+# iteration budget doing nothing, and the failure looks like a planner fault rather than a path fault.
+# Proven by controls on 2026-08-02: identical call, --add-dir "/k/..." => Unknown command (0 turns);
+# --add-dir "K:/..." => resolves (1 turn). `pwd -W` emits the Windows form; the `|| pwd` fallback
+# keeps this correct on Linux/macOS where `-W` does not exist and the POSIX form is already right.
+export CLAUDE_SKILLS_DIR="${CLAUDE_SKILLS_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && { pwd -W 2>/dev/null || pwd; })}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/seed.sh
@@ -168,8 +179,26 @@ run_claude_json() {
   local claude_rc=0
   set +e
   # shellcheck disable=SC2086
+  # STDIN MUST BE CLOSED (2026-08-02). stdout and stderr were redirected here from the start;
+  # stdin never was, so `claude -p` inherited whatever the dispatching shell had. Under a
+  # backgrounded / non-tty launch that handle never delivers and never closes: claude logs
+  # "Warning: no stdin data received in 3s, proceeding without it" and carries on, but every
+  # tool subprocess it spawns INHERITS the same dead handle and blocks on it forever.
+  # Observed signature: 0-byte planner.json, ~4.6s CPU across 9 minutes, and two orphan cmd.exe
+  # children at 0 CPU. The loop neither progresses nor reports -- the worst failure shape here,
+  # because nothing times out and nothing escalates. claude's own warning names the fix.
+  # NO MCP FOR THE PLANNER/CONSUMER ROLES (2026-08-02). This call passed no MCP flag at all, so
+  # claude fell back to the USER'S GLOBAL config and launched every server declared there --
+  # observed: github, postgres, supabase and filesystem, each via `npx -y`, each spawning
+  # cmd.exe -> npx-cli -> node and sitting at ~1s CPU without ever becoming ready. The role call
+  # then blocked behind servers it has no use for: the Planner and Consumer are documented as
+  # having no DB access (only the Executor gets --mcp-config), so their correct MCP surface is
+  # EMPTY. --strict-mcp-config restricts the process to servers from --mcp-config, and none is
+  # passed here, so nothing is started. This also shrinks the secret blast radius: the global
+  # postgres entry carries an inline connection string, and every launch put that credential
+  # into the process table.
   MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
-    claude -p $role_model_flag --permission-mode "$POSTURE_VALUE" --output-format json --max-budget-usd "$remaining_budget" --add-dir "$CLAUDE_SKILLS_DIR" -- "$@" > "$out_file" 2> "$llm_err"
+    claude -p $role_model_flag --permission-mode "$POSTURE_VALUE" --output-format json --max-budget-usd "$remaining_budget" --strict-mcp-config --add-dir "$CLAUDE_SKILLS_DIR" -- "$@" > "$out_file" 2> "$llm_err" < /dev/null
   claude_rc=$?
   set -e
   RUN_CLAUDE_LAST_RC="$claude_rc"
@@ -524,7 +553,20 @@ while true; do
   emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "planner" "role_call"
   EVENT_PL_T0="$(date +%s%3N 2>/dev/null || echo 0)"
   ROLE_MODEL="$(read_seed_field "$SEED" .planner_model 2>/dev/null || echo "")" \
-    run_claude_json "$ITER_DIR/planner.json" "/rl-initiative-planner $STATE_DIR $ITER_DIR" \
+    # SELF-PARENT DISCLOSURE (2026-08-02). Without this, the Planner explores the filesystem,
+    # finds a live `claude -p` writing into its own iteration directory, concludes a competing
+    # automated run is racing it, and blocks. That competing process IS the orchestrator that
+    # invoked it — it was detecting its own parent. Observed in canary iter 0003, which cost 20
+    # turns / $1.09 to produce an unanswerable question. Stating the invocation topology removes
+    # the false premise at source, which is cheaper and more reliable than forbidding the wrong
+    # conclusion after the fact.
+    # MUST STAY ON ONE LINE. A first attempt at this disclosure embedded a real newline in the
+    # prompt string; because this file is CRLF that newline became \r\n, the carriage return
+    # rode into the slash-command argument, and claude -p HUNG — 11 minutes, 0-byte planner.json,
+    # 13s CPU, no error. A hang is the worst failure shape here: the loop neither progresses nor
+    # reports. Keep it single-line, and keep the wording free of characters bash would re-parse.
+    run_claude_json "$ITER_DIR/planner.json" \
+      "/rl-initiative-planner $STATE_DIR $ITER_DIR -- CONTEXT: you are invoked BY the bash orchestrator as its Planner role call. The orchestrator process holding the lock on this state dir and writing into this iteration directory is YOUR OWN PARENT, not a competing run: never treat it as a race, and never propose waiting for it or killing it. This is the headless claude -p surface with no operator attached, so a question cannot be answered. Emit a session_plan, or a gate_request JSON, or HALT with a structured code, per Core Principle 3." \
       2> "$ITER_DIR/planner.stderr"
   # Extract markdown result for any downstream consumer expecting the textual emission:
   jq -r '.result // empty' "$ITER_DIR/planner.json" > "$ITER_DIR/planner.stdout"
@@ -615,11 +657,48 @@ while true; do
       exit 0
     fi
   else
-    log "ITERATION $ITER Planner escalated without plan — skipping plan_review; routing gate_request(s) via execute_with_gates"
-    # FUP-0842: iteration_failed — the Planner produced no session_plan (escalated-without-plan path);
-    # the iteration did not reach a clean close. reason per the spec §6.2 enum.
-    emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "orchestrator" "iteration_failed" "" "" "" \
-      "$(jq -nc --arg it "$ITER" '{reason:"planner_no_plan", iteration:$it}')"
+    # 2026-08-02 — CONTRACT-VIOLATION DISCRIMINATION (enforced rung).
+    # Two very different things previously both recorded `planner_no_plan`:
+    #   (a) a LEGITIMATE escalation — no plan, but one or more gate_request_*.json enumerating
+    #       the blocking ambiguity. This is Path A working as designed (§10.3).
+    #   (b) a CONTRACT VIOLATION — no plan AND no gate_request. The Planner's own SKILL.md Core
+    #       Principle 3 is categorical: on the headless `claude -p` surface it must route every
+    #       would-be question to a gate_request or a structured HALT, and "NEVER emits an
+    #       interactive question ... attempting it is a hard contract violation
+    #       (HEADLESS_ASKUSERQUESTION_FORBIDDEN)". Observed 2026-08-02 (canary iter 0003): the
+    #       Planner burned 20 turns / $1.09 and returned an interactive either/or question
+    #       ("Do you want me to (a) wait ... or (b) kill that claude -p process now?") — an
+    #       unanswerable prompt on a surface with no operator attached.
+    # That rule lived ONLY as prose in the skill, so nothing detected the breach: it was
+    # absorbed as an ordinary no-plan iteration and the real defect stayed invisible. The
+    # discrimination below is the enforcement — it does not prevent the violation, but it
+    # names it, so a recurrence is a finding rather than a silence.
+    if compgen -G "$ITER_DIR/gate_request_${ITER}_*.json" > /dev/null 2>&1 \
+       || compgen -G "$STATE_DIR/escalations/gate_request_${ITER}_*.json" > /dev/null 2>&1; then
+      log "ITERATION $ITER Planner escalated without plan — skipping plan_review; routing gate_request(s) via execute_with_gates"
+      # FUP-0842: iteration_failed — the Planner produced no session_plan (escalated-without-plan path);
+      # the iteration did not reach a clean close. reason per the spec §6.2 enum.
+      emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "orchestrator" "iteration_failed" "" "" "" \
+        "$(jq -nc --arg it "$ITER" '{reason:"planner_no_plan", iteration:$it}')"
+    else
+      log "ITERATION $ITER CONTRACT VIOLATION: Planner returned neither a session_plan nor a gate_request (HEADLESS_ASKUSERQUESTION_FORBIDDEN) — see planner.stdout"
+      mkdir -p "$STATE_DIR/escalations" 2>/dev/null || true
+      # Persist a real gate_request so the Supervisor's has_pending_gate() probe classifies this
+      # as an operator-answerable pause rather than an unexplained failure (same rationale as
+      # FUP-0862 above), and carry the offending emission so the breach is diagnosable later.
+      jq -nc --arg it "$ITER" \
+             --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+             --rawfile out "$ITER_DIR/planner.stdout" \
+        '{iteration:$it, gate:"0001", kind:"gate_human",
+          reason:"headless_askuserquestion_forbidden",
+          detail:"Planner returned neither session_plan nor gate_request. SKILL.md Core Principle 3 forbids an interactive question on the headless surface.",
+          planner_emission:($out[0:2000]), ts:$ts}' \
+        > "$STATE_DIR/escalations/gate_request_${ITER}_0001.json" 2>/dev/null || true
+      dispatch_notification "$SEED" "$STATE_DIR" gate_human \
+        "$(jq -nc --arg it "$ITER" '{iteration:$it, reason:"headless_askuserquestion_forbidden"}')"
+      emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "orchestrator" "iteration_failed" "" "" "" \
+        "$(jq -nc --arg it "$ITER" '{reason:"headless_askuserquestion_forbidden", iteration:$it}')"
+    fi
   fi
 
   # Phase 4b P4-03(b): capture execute_with_gates.sh exit code (0/1/2) and branch.
