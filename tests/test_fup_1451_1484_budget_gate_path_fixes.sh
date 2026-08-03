@@ -332,6 +332,18 @@ check "  ...and the plan body is still fully present (brief not truncated)" "tru
 check "  ...the contract precedes the plan (order preserved)" "true" \
   "$(awk '/EXECUTION CONTRACT/{c=NR} /UNIQUE_PLAN_BODY_MARKER/{p=NR} END{exit !(c>0 && p>c)}' "$CAP" && echo true || echo false)"
 
+# NEGATIVE DIRECTION for the stdin composition: a MISSING plan must refuse to dispatch rather
+# than send the Executor a contract with no work in it.
+idir_np="$WS/state/iterations/0003"; mkdir -p "$idir_np"
+np_out="$(RL_TEST_STDIN_CAPTURE="$idir_np/.stdin_capture" PATH="$TMPBIN:$PATH" \
+  CLAUDE_SKILLS_DIR="$WORK/none" RALPH_DISABLE_DESKTOP_TOAST=1 \
+  timeout 60 bash "$RALPH_ROOT/hooks/execute_with_gates.sh" "$SEED" "$idir_np" 2>&1)"; np_rc=$?
+check "FUP-1475: a MISSING session plan refuses to dispatch" "1" "$np_rc"
+check "  ...with a message naming the absent plan" "true" \
+  "$(printf '%s' "$np_out" | grep -q 'session plan absent' && echo true || echo false)"
+check "  ...and no contract-only stdin was ever built" "true" \
+  "$([[ ! -f "$idir_np/.executor_stdin_0003.md" ]] && echo true || echo false)"
+
 echo ""
 echo "----- FUP-1484: the log must print the cap the guard COMPARED -----"
 # A separate workspace: the hook section's artifacts above are evidence and stay put.

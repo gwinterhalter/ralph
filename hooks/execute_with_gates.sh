@@ -431,6 +431,17 @@ EVENT_EX_T0="$(date +%s%3N 2>/dev/null || echo 0)"
 # of waiting for each producer to be bumped. Writing it to a file (rather than piping a heredoc)
 # keeps the exact bytes the Executor saw as an inspectable per-iteration artifact.
 EXEC_STDIN="$ITER_DIR/.executor_stdin_${ITER}.md"
+# Guard the plan's existence EXPLICITLY. Before this change the Executor read the plan via
+# `< "$PLAN_PATH"`, so a missing plan failed the redirect with a clear "No such file" naming
+# the script line. Composing stdin moves that failure into a `cat`, which under `set -e` still
+# aborts (verified: same exit code, same failing check) but reports as a bare `cat:` error. An
+# explicit test says which file and why, and forecloses the worse shape entirely — a partially
+# built EXEC_STDIN containing the contract but NO PLAN, which would dispatch an Executor with
+# instructions and no work.
+if [[ ! -f "$PLAN_PATH" ]]; then
+  echo "execute_with_gates: session plan absent at $PLAN_PATH — refusing to dispatch the Executor with an execution contract but no plan" >&2
+  exit 1
+fi
 {
   cat <<'RL_EXEC_CONTRACT'
 <!-- Injected by hooks/execute_with_gates.sh (FUP-1475). Standing execution contract. -->
