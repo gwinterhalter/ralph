@@ -108,8 +108,20 @@ for round in 1 2 3 4 5; do
   # line-format regex. Previously a clean 0/0 review whose Findings line varied in
   # spacing/bold/leading-char failed the strict regex and looped to the 5-round cap
   # despite zero blocking findings. COSMETIC never blocks (reviewer Step 6 model).
-  rr_fb="$(printf '%s' "$CLEAN_RESULT" | grep -oE 'Findings:[[:space:]]*[0-9]+[[:space:]]+BLOCKER' | grep -oE '[0-9]+' | head -1)"
-  rr_fd="$(printf '%s' "$CLEAN_RESULT" | grep -oE '[0-9]+[[:space:]]+DRIFT' | grep -oE '[0-9]+' | head -1)"
+  # (2026-08-02) TWO defects fixed here, both proven by controls against the live round-2 output.
+  # (1) FATAL: under `set -euo pipefail` a non-matching grep makes the whole command substitution
+  #     fail, and a simple assignment inherits that status -- so the script ABORTED here, before
+  #     the `-1` fallback two lines below could ever run. That fallback was DEAD CODE. The abort
+  #     surfaced to orchestrator.sh as rc=1 -> a spurious plan_review_nonconvergence gate_human.
+  #     It fired ONLY when the plan was CLEAN: round 1 ('Findings: 1 BLOCKER, 5 DRIFT') parsed
+  #     fine; round 2 ('Findings: 1 DRIFT (...), 0 BLOCKER, 0 COSMETIC') aborted -- so a review
+  #     that found nothing blocking could never converge. '|| true' restores the author's intent:
+  #     unparseable => -1 => fall through to the KEEP / resolved-in-pass routes below.
+  # (2) ORDER ASSUMPTION: the BLOCKER parse required BLOCKER to follow 'Findings:' IMMEDIATELY,
+  #     so a reviewer reporting DRIFT first scored rr_fb=-1 even while printing '0 BLOCKER'.
+  #     Made symmetric with the DRIFT parse (order-independent). Counts stay advisory.
+  rr_fb="$(printf '%s' "$CLEAN_RESULT" | grep -oE '[0-9]+[[:space:]]+BLOCKER' | grep -oE '[0-9]+' | head -1 || true)"
+  rr_fd="$(printf '%s' "$CLEAN_RESULT" | grep -oE '[0-9]+[[:space:]]+DRIFT' | grep -oE '[0-9]+' | head -1 || true)"
   [[ -z "$rr_fb" ]] && rr_fb=-1
   [[ -z "$rr_fd" ]] && rr_fd=-1
   # (2026-07-01) Additive convergence route — recognise an explicit reviewer KEEP verdict.
