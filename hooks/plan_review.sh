@@ -28,6 +28,11 @@ if [[ -z "$EVENT_PROJECT_ID" || "$EVENT_PROJECT_ID" == "null" ]]; then
   [[ -z "$EVENT_PROJECT_ID" || "$EVENT_PROJECT_ID" == "null" ]] && EVENT_PROJECT_ID="$EVENT_SLUG"
 fi
 
+# shellcheck source=../lib/cost_ledger.sh
+# FUP-1451: this hook is a separate PROCESS from the orchestrator, so it must source the ledger
+# itself; the shared state is the ledger file under $STATE_DIR, guarded by an mkdir lock.
+source "$SCRIPT_DIR/../lib/cost_ledger.sh"
+
 # FUP-0720 cost instrumentation: read budget cap from seed; default to 20 USD on failure.
 SEED_PATH="$STATE_DIR/seed.md"
 BUDGET_CAP=$(read_seed_field "$SEED_PATH" .budget.tokens_usd 2>/dev/null || echo 20)
@@ -50,6 +55,11 @@ PLAN_REVIEW_MODEL_FLAG=""
 # transient abort does NOT, so the two were indistinguishable to the orchestrator). Retry the call
 # up to 3 attempts with linear backoff; only a persistent failure propagates. Usage:
 #   run_claude_retry <out_file> <claude args...>
+# FUP-1451: cost recording lives INSIDE this wrapper, not at its call sites. plan_review spent
+# $27.54 on the factory_dryrun run and recorded none of it, because recording was something each
+# call site had to remember to add and neither of these two did. Worse, the loop below retries up
+# to 3x, so a flaky round billed up to three unrecorded calls. Putting ledger_record here makes
+# every present and future caller of this wrapper correct by construction.
 run_claude_retry() {
   local _out="$1"; shift
   local _attempt _rc=0
@@ -63,6 +73,13 @@ run_claude_retry() {
     # wedge on it. Both failure modes are silent hangs, and a hang inside a RETRY loop is worse
     # than one outside it: the wrapper would sit through three attempts before propagating.
     claude --strict-mcp-config "$@" > "$_out" < /dev/null || _rc=$?
+    # Record BEFORE the rc test: a call that exits non-zero still cost money, and a retried
+    # round costs money per attempt. Recording only successful calls would rebuild the same
+    # under-count this fix exists to remove. The attempt number is in the dedup key so three
+    # attempts against one output file record as three distinct calls, not one.
+    ledger_record_cost "$STATE_DIR" "plan_review" \
+      "$(jq -r '.total_cost_usd // 0' "$_out" 2>/dev/null || echo 0)" \
+      "plan_review:$(basename "$_out"):attempt${_attempt}"
     [[ "$_rc" -eq 0 ]] && return 0
     if [[ "$_attempt" -lt 3 ]]; then sleep $(( _attempt * 15 )); fi
   done
