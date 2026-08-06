@@ -529,9 +529,25 @@ RL_EXEC_CONTRACT
   cat "$PLAN_PATH"
 } > "$EXEC_STDIN"
 # shellcheck disable=SC2086
+# --add-dir "$CLAUDE_SKILLS_DIR" (added 2026-08-06). THE EXECUTOR WAS THE ONLY SPAWN SITE WITHOUT IT.
+# The Planner, Answerer and plan-review spawns all pass it (orchestrator.sh:231, this file:236,
+# plan_review.sh:106/215); this call did not, and skills do NOT auto-discover from a sub-project
+# launch dir. Measured cost on factory_dryrun run 1: the seed's ONLY verification_bindings entry is
+# stage_emulate -> cf-cc-result-reviewer, and the work registry records 5 times that no reviewer
+# output was captured because the "cf-* skill set [was] not loaded in its own session" -- so on 5 of
+# 15 iterations the independent audit silently degraded to the Executor auditing its own work, which
+# is precisely the circularity the binding exists to prevent. A missing skill does not fail loudly:
+# the Executor substitutes an inline self-audit and the iteration still reports PASS.
+# $CLAUDE_SKILLS_DIR is exported by orchestrator.sh:36, derived from its own location
+# (ralph/../.. = the Factory_V3 root that contains .claude/skills) via `pwd -W`, so it is portable
+# across machines/drive letters AND carries the Windows path form that --add-dir requires -- an
+# MSYS `/k/...` form silently resolves nothing. Used rather than a literal path for exactly that
+# reason: hard-coding one here would re-create the stale absolute path that FUP-0743 removed.
+# shellcheck disable=SC2086
 claude --print --output-format json \
        --permission-mode "$posture_value" \
        $EXECUTOR_MODEL_FLAG \
+       --add-dir "$CLAUDE_SKILLS_DIR" \
        "${EXEC_ALLOW[@]}" \
        $STRICT_MCP_FLAG --mcp-config "$MCP_CONFIG" \
        --max-budget-usd "$PER_CALL_CAP" --max-turns "$MAX_TURNS" \
@@ -746,9 +762,13 @@ case "$_plan_shape" in
         echo "execute_with_gates: FUP-0854/T1#2 — terminal_reason=completed but $_report_path is absent or lacks a '## Items closed' section; one bounded --resume follow-up to have the Executor emit/complete its report (no code/git change requested)" >&2
         _recovery_prompt="The build and all git steps for iteration ${ITER} are ALREADY complete, committed, tagged, and pushed — do NOT modify, rebuild, re-commit, re-tag, or push anything, and do NOT run any verification again. The only thing missing is the session plan's terminal deliverable: a COMPLETE report file at the absolute path ${_report_path}. Write (or complete) that file NOW from the work you just finished in this same session, using the Write tool. It MUST contain a top-level '## Items closed' section listing each registry work-item you closed this iteration as a bullet in the form '- OLB-NN — <title>' with its closing evidence (commit SHA, tag, cf-code-review BLOCKER/DRIFT counts, cf-pytest passed/skipped counts). If you closed no item this iteration, write the '## Items closed' heading followed by the single word 'none'. Then output only a one-line confirmation. Make no other changes."
         # shellcheck disable=SC2086
+        # --add-dir kept IDENTICAL to the primary spawn above: --resume restores the conversation,
+        # not the CLI surface, so omitting it here would silently drop the skills on the recovery
+        # call -- the same defect one code path over.
         claude --print --output-format json --resume "$_ex_session" \
                --permission-mode "$posture_value" \
                $EXECUTOR_MODEL_FLAG \
+               --add-dir "$CLAUDE_SKILLS_DIR" \
                "${EXEC_ALLOW[@]}" \
                $STRICT_MCP_FLAG --mcp-config "$MCP_CONFIG" \
                --max-budget-usd "$PER_CALL_CAP" --max-turns 12 \
