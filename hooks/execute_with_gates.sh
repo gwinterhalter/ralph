@@ -18,6 +18,14 @@ source "$SCRIPT_DIR/../lib/events.sh"
 # the system (executor $72.35, report-recovery $22.91, answerer) — none of which recorded a cent
 # before this. Sourcing the shared ledger is what puts them on the same basis as everything else.
 source "$SCRIPT_DIR/../lib/cost_ledger.sh"
+# shellcheck source=../lib/redact.sh
+# FUP-1635: this hook copies `.permission_denials` VERBATIM out of the executor's result envelope
+# into `escalations/auto_mode_denial_*.json`, and each denial carries the full text of the script
+# the executor tried to run. The executor is an LLM authoring shell ad hoc, so nothing structurally
+# prevents a resolved credential landing in that text and becoming append-only record. Measured on
+# the 2026-08-02 factory_dryrun run: 10 denials across 3 escalation files, every one carrying an env
+# var NAME and none a value — latent, not realised, and unguarded. redact_artefact closes it.
+source "$SCRIPT_DIR/../lib/redact.sh"
 
 SEED="${1:?usage: execute_with_gates.sh <seed_path> <iter_dir>}"
 ITER_DIR="${2:?usage: execute_with_gates.sh <seed_path> <iter_dir>}"
@@ -442,8 +450,23 @@ if [[ ! -f "$PLAN_PATH" ]]; then
   echo "execute_with_gates: session plan absent at $PLAN_PATH — refusing to dispatch the Executor with an execution contract but no plan" >&2
   exit 1
 fi
+# FUP-1635: resolve the DB-helper directory for contract rule 4. The heredoc below is QUOTED
+# (<<'RL_EXEC_CONTRACT') and must stay quoted — rule 4 quotes the very shapes it bans, including
+# `$env:PGPASSWORD` and `PGPASSWORD="$SOMETHING"`, which an unquoted heredoc would expand away
+# (turning the prohibition into a blank). So the path is substituted afterwards via a token.
+# `|` is the sed delimiter because the path contains spaces, hyphens and backslashes but no pipe.
+#
+# The path is emitted in MIXED form (`K:/OneDrive - …`, cygpath -m), NOT the MSYS form `pwd`
+# returns (`/k/OneDrive - …`). The executor hands this path to native python.exe, and under
+# MSYS_NO_PATHCONV=1 (set by orchestrator.sh) nothing converts it — `/k/…` would resolve as a
+# drive-relative `K:\k\…` and fail. Mixed form is the one shape both MSYS bash and PowerShell
+# pass through intact, so the same contract line works whichever tool the executor picks.
+SUPPORT_FUNCTIONS_DIR="$(cd "$SCRIPT_DIR/../../support_functions" 2>/dev/null && pwd || echo "$SCRIPT_DIR/../../support_functions")"
+if command -v cygpath >/dev/null 2>&1; then
+  SUPPORT_FUNCTIONS_DIR="$(cygpath -m "$SUPPORT_FUNCTIONS_DIR" 2>/dev/null || echo "$SUPPORT_FUNCTIONS_DIR")"
+fi
 {
-  cat <<'RL_EXEC_CONTRACT'
+  cat <<'RL_EXEC_CONTRACT' | sed "s|@@SUPPORT_FUNCTIONS@@|$SUPPORT_FUNCTIONS_DIR|g"
 <!-- Injected by hooks/execute_with_gates.sh (FUP-1475). Standing execution contract. -->
 # EXECUTION CONTRACT — read before running any command
 
@@ -467,6 +490,33 @@ commands within it. Three rules follow from that:
    — one command, one fully-literal path, nothing else in the script — so that it can be
    allowlisted narrowly and so that its denial costs only that step. State in your report why
    no idempotent alternative existed.
+
+4. **Never hand-write a database command. Call the helper module.** Do NOT construct
+   `psql` / `pg_dump` invocations, and above all do NOT prefix a script with a credential
+   assignment — `$env:PGPASSWORD = $env:SOMETHING`, `PGPASSWORD="$SOMETHING" psql …`, or a
+   `postgresql://user:pass@host` connection string. That shape bundles a secret assignment, an
+   absolute-path executable and a DB mutation into one script, and the classifier judges the
+   whole script: it is the single most reliably denied pattern in this system. It measurably
+   cost a Stage 5 mid-flight (FUP-1635). It is also how a live password reaches durable record.
+
+   Use these instead — each reads its credential from the environment INSIDE the process, so the
+   shell never sees a secret and there is nothing for the classifier to object to:
+
+   - `codefactory_build` (local, role `factory_app`):
+     `python "@@SUPPORT_FUNCTIONS@@/dryrun_build_db.py" --sql "SELECT 1;"`
+     (also `--json --sql …`, `--file <path.sql>`, `--whoami`)
+   - Supabase design corpus: `python "@@SUPPORT_FUNCTIONS@@/supabase_sql.py" …`
+
+   Invoke by ABSOLUTE path with no `cd` prefix and nothing else in the script — these helpers
+   need no working directory, and a `cd … && python …` compound is a second, avoidable reason to
+   be denied. If a database you need has no helper, say so in your report and continue with the
+   rest of the plan; do not improvise a psql call to work around a missing one.
+
+   Credential env var names (values are read by the helpers, never by you — never echo, print, or
+   `Write-Output` one, not even to check whether it is set): `CF_FACTORY_APP_PASSWORD` is
+   `factory_app` on the local execution DBs (DML only); `CF_DB_PASSWORD` is the local postgres
+   superuser; `SUPABASE_DB_PASSWORD` is the corpus. The latter two are the same value, so
+   exposing either has double the blast radius.
 
 Write only inside the iteration directory, the declared state directory, and the scratch
 workspace. Use paths you have READ back from the environment or a manifest; never hand-type a
@@ -493,6 +543,13 @@ fi
 [[ -s "$RESULT_JSON_TMP.err" ]] && cat "$RESULT_JSON_TMP.err" >&2   # preserve prior stderr visibility
 rm -f "$RESULT_JSON_TMP.err" 2>/dev/null || true
 mv -f "$RESULT_JSON_TMP" "$RESULT_JSON"
+# FUP-1635: redact at the SOURCE, not only at the escalation copy. execution_result_NNNN.json is
+# where the executor's verbatim command text first lands, it is durable, and it is what every
+# downstream reader (ledger, §10.5 gate, the escalation writer, the Consumer, any later grep)
+# copies from. Redacting only the escalation would leave the original intact one directory away.
+# Runs before schema validation deliberately — redaction rewrites string CONTENT and never the
+# document shape, so the validator still sees the structure the executor produced.
+redact_artefact "$RESULT_JSON"
 # FUP-1451: the executor was the single largest unrecorded population ($72.35 of the $189.93 run).
 # Its cost was already being READ two lines below to decorate an llm_call event, and then thrown
 # away — the number was in hand the whole time and simply never reached the ledger.
@@ -617,6 +674,7 @@ if [[ "$DENIALS_COUNT" -ne 0 ]]; then
     esc_file="$STATE_DIR/escalations/auto_mode_denial_${ITER}_$(date -u +%s).json"
     jq --arg iter "$ITER" --arg vsc "$VERIFICATION_SPAWN_COUNT" --arg dbc "$DELIVERABLE_BLOCKING_COUNT" --arg rp "$_deliv_report" --arg rs "$_deliv_size" \
        '{iteration: $iter, classification: "auto_mode_denial_delivered", denials_count: (.permission_denials | length), verification_spawn_count: ($vsc | tonumber), deliverable_blocking_count: ($dbc | tonumber), deliverable_present: true, deliverable_path: $rp, deliverable_bytes: ($rs | tonumber), permission_denials: .permission_denials, terminal_reason: .terminal_reason}' "$RESULT_JSON" > "$esc_file"
+    redact_artefact "$esc_file"   # FUP-1635 — before this file becomes durable record
     echo "execute_with_gates: auto_mode_denial with DELIVERABLE PRESENT — $DENIALS_COUNT denial(s) recorded to $esc_file, but $_deliv_report exists (${_deliv_size}B) and terminal_reason=completed, so the iteration is NOT failed (FUP-1452). The Consumer verifies the substrate." >&2
   elif [[ "$DELIVERABLE_BLOCKING_COUNT" -gt 0 ]]; then
     # At least one deliverable_blocking denial AND no deliverable — existing exit-1 path preserved.
@@ -624,6 +682,7 @@ if [[ "$DENIALS_COUNT" -ne 0 ]]; then
     esc_file="$STATE_DIR/escalations/auto_mode_denial_${ITER}_$(date -u +%s).json"
     jq --arg iter "$ITER" --arg vsc "$VERIFICATION_SPAWN_COUNT" --arg dbc "$DELIVERABLE_BLOCKING_COUNT" \
        '{iteration: $iter, classification: "auto_mode_denial", denials_count: (.permission_denials | length), verification_spawn_count: ($vsc | tonumber), deliverable_blocking_count: ($dbc | tonumber), permission_denials: .permission_denials, terminal_reason: .terminal_reason}' "$RESULT_JSON" > "$esc_file"
+    redact_artefact "$esc_file"   # FUP-1635 — before this file becomes durable record
     echo "execute_with_gates: auto_mode_denial classification — escalation $esc_file (denials=$DENIALS_COUNT, verification_spawn=$VERIFICATION_SPAWN_COUNT, deliverable_blocking=$DELIVERABLE_BLOCKING_COUNT)" >&2
     NOTIFY="$(read_seed_field "$SEED" '.notification_channel' 2>/dev/null || echo "")"
     if [[ -n "$NOTIFY" && "$NOTIFY" != "null" ]]; then
