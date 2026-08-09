@@ -22,7 +22,15 @@ set -euo pipefail
 # contains .claude/skills. Truly portable across machines/drive letters (the prior hardcoded
 # "K:/Claude Code Factory/V3/Project_Docs" was stale and silently broke rl-* slash-command resolution,
 # forcing an `export CLAUDE_SKILLS_DIR=` at every dispatch). Still env-overridable via the `:-`.
-export CLAUDE_SKILLS_DIR="${CLAUDE_SKILLS_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+# FUP-1811 (2026-08-09): the 2026-07-29 derivation used a bare `pwd`, which under Git Bash/MSYS
+# returns a POSIX path (`/k/OneDrive - .../Factory_V3`). `claude` is a WINDOWS-NATIVE binary and the
+# invocation below is deliberately env-prefixed MSYS_NO_PATHCONV=1 (FUP-0823), so that POSIX form is
+# handed through untranslated, `--add-dir` resolves to nothing, the .claude/skills tree never loads,
+# and EVERY role call dies in ~25 ms with `Unknown command: /rl-initiative-planner` → planner_no_plan
+# → the loop burns its whole iteration budget having done zero work. Proven both directions
+# 2026-08-09: `--add-dir K:/...` → num_turns 1 (skill runs); `--add-dir /k/...` → Unknown command.
+# `pwd -W` emits the Windows form under Git Bash; fall back to `pwd` off MSYS where it is unsupported.
+export CLAUDE_SKILLS_DIR="${CLAUDE_SKILLS_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && { pwd -W 2>/dev/null || pwd; })}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/seed.sh
