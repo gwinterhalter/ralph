@@ -76,6 +76,173 @@ resolve_register_scan_newest() {
   echo "$best"
 }
 
+# ---------------------------------------------------------------------------
+# CLOSURE CONTRACT GUARD (FUP-1772 `enforced`-rung conversion, 2026-08-08)
+#
+# WHY: rl-iteration-consumer v1_6 made `verification_strength` + `oracle_observed_value`
+# REQUIRED on every registry closure, because the Consumer had been closing items on the
+# Executor's own transcript instead of re-running the item's deterministic oracle. That
+# fix lives entirely in a SKILL.md — `instructed` rung. Nothing outside the Consumer
+# agent's own compliance forced it, and the closure itself (a `**RESOLVED**` Priority
+# cell) was unguarded. This function is the orchestrator-side check the v1_6 skill names
+# as its own residual: "the `enforced`-rung conversion would be an orchestrator-side check
+# that refuses a closure whose registry row lacks `oracle_observed_value`".
+#
+# WHERE IT FIRES: unconditionally, at the top of every stop_check turn — i.e. once per
+# orchestrator loop turn, immediately after the Consumer wrote its closures. It is NOT a
+# completion_predicate and is NOT declared in the seed, deliberately: a quality gate is
+# not a feature and must not be something a seed can forget to declare or opt out of (the
+# sibling `every_closure_cites_iteration` arm is both opt-in AND disable-able via
+# params.skip_citation_check, which is exactly how it stayed vacuous).
+#
+# SCOPE — loop-written closures only. A `**RESOLVED**` row is GOVERNED only when its
+# Resolution-path cell cites `iteration NNNN` / `iter:NNNN` AND `$STATE_DIR/iterations/NNNN`
+# exists, i.e. this run's Consumer wrote it. Historical closures (pre-orchestrator §-ref /
+# IMP-NNNN citations, per FUP-0821) and closures from a prior run under a pre-v1_6 Consumer
+# are reported but never fail the guard. Without this bound the guard would HALT every
+# existing initiative on its first turn and would be disabled within a day — a removed
+# guard is worse than none because everyone still believes it is there.
+#
+# VERDICT: a violation exits 3 (HALT + gate_human via the orchestrator's stop_check rc>=3
+# branch), not 1. Exit 1 means "not complete, keep going", which would bank the malformed
+# closure and burn iterations around it. v1_6 Phase 5 says a closure written without both
+# fields is malformed and HALTs; this makes that HALT happen whether or not the agent
+# obeys.
+#
+# REACHABILITY: the guard ALWAYS prints its denominator (governed / ungoverned / total
+# RESOLVED). A guard that examines zero rows is indistinguishable in a log from one that
+# passed, and that indistinguishability is the defect being fixed one level up — the
+# sibling arm has never once been exercised (0 RESOLVED rows in factory_backlog_registry.md
+# at the time of writing, positive control 9 `**P1**` rows through the same parse).
+#
+# RESIDUAL, named: the `verification_exception` run cap of 2 (v1_6 Phase 4) is NOT enforced
+# here. The registry is cumulative across runs and carries no run boundary, so a per-run
+# count is not derivable from it; the cap stays `instructed` inside the Consumer.
+CLOSURE_STRENGTHS_VALID="deterministic llm_rerun none"
+check_closure_contract() {
+  local registry_rel registry_path workspace_root policy
+  registry_rel="$(read_seed_field "$SEED" '.work_registry' 2>/dev/null || echo "")"
+  if [[ -z "$registry_rel" || "$registry_rel" == "null" ]]; then
+    echo "stop_check: closure_contract N/A — seed declares no .work_registry" >&2
+    return 0
+  fi
+  workspace_root="$(read_seed_field "$SEED" '.workspace_root' 2>/dev/null || echo "")"
+  if [[ -f "$registry_rel" ]]; then
+    registry_path="$registry_rel"
+  else
+    # PERF: prefer a sibling completion_predicate's already-absolute params.path over a
+    # workspace-wide find. `work_registry` is conventionally a BARE name while the
+    # registry_zero_open predicates carry the absolute path precisely so their `[[ -f ]]`
+    # test short-circuits the find (factory_backlog_seed_v1.0.md says so in a comment).
+    # Re-running that find here, once per loop turn, would reintroduce the ~4000x
+    # OneDrive/SMB traversal penalty the FIND_PRUNE block above documents.
+    registry_path=""
+    local _pc _k _p
+    _pc="$(read_seed_field "$SEED" '.completion_predicate | length' 2>/dev/null || echo 0)"
+    [[ "$_pc" =~ ^[0-9]+$ ]] || _pc=0
+    for ((_k=0; _k<_pc; _k++)); do
+      _p="$(read_seed_field "$SEED" ".completion_predicate[$_k].params.path" 2>/dev/null || echo "")"
+      if [[ -n "$_p" && "$_p" != "null" && -f "$_p" && "${_p##*/}" == "$registry_rel" ]]; then
+        registry_path="$_p"; break
+      fi
+    done
+    if [[ -z "$registry_path" ]]; then
+      registry_path="$(find "$workspace_root" "$SCRIPT_DIR/.." \( "${FIND_PRUNE[@]}" \) -prune -o -type f -name "$registry_rel" -print 2>/dev/null | head -1)"
+    fi
+    if [[ -z "$registry_path" || ! -f "$registry_path" ]]; then
+      registry_path="$(resolve_register_scan_newest "$workspace_root" "$registry_rel")"
+    fi
+  fi
+  if [[ -z "$registry_path" || ! -f "$registry_path" ]]; then
+    # A declared-but-unresolvable work registry is a HALT, not a silent pass: an
+    # unreadable registry means closures cannot be checked at all, and "cannot check"
+    # must never render as "checked and clean".
+    echo "stop_check: closure_contract work_registry '$registry_rel' not found — closures UNVERIFIABLE" >&2
+    return 3
+  fi
+  policy="$(read_seed_field "$SEED" '.verification_policy' 2>/dev/null || echo "")"
+
+  local total=0 governed=0 ungoverned=0 bad=0
+  local line priority resolution iter_tok nnnn strength observed
+  while IFS= read -r line; do
+    line="${line%$'\r'}"
+    [[ "$line" == \|* ]] || continue
+    IFS='|' read -ra cells <<< "$line"
+    [[ ${#cells[@]} -ge 7 ]] || continue
+    priority="${cells[4]}"
+    priority="${priority#"${priority%%[![:space:]]*}"}"
+    priority="${priority%"${priority##*[![:space:]]}"}"
+    [[ "$priority" == "**RESOLVED**"* ]] || continue
+    total=$((total+1))
+    resolution="${cells[6]}"
+    local item_id="${cells[1]}"
+    item_id="${item_id#"${item_id%%[![:space:]]*}"}"
+    item_id="${item_id%"${item_id##*[![:space:]]}"}"
+
+    # GOVERNED iff this run's Consumer wrote it (cited iteration exists under $STATE_DIR).
+    iter_tok="$(echo "$resolution" | grep -oE 'iteration [0-9]{4}|iter:[0-9]{4}' | head -1 || true)"
+    nnnn="${iter_tok##*[ :]}"
+    if [[ -z "$nnnn" || ! -d "$STATE_DIR/iterations/$nnnn" ]]; then
+      ungoverned=$((ungoverned+1))
+      continue
+    fi
+    governed=$((governed+1))
+
+    # (1) oracle_observed_value present and non-empty.
+    observed="$(printf '%s' "$resolution" | sed -nE 's/.*oracle_observed_value:[[:space:]]*([^;]*).*/\1/p' | head -1)"
+    observed="${observed#"${observed%%[![:space:]]*}"}"
+    observed="${observed%"${observed##*[![:space:]]}"}"
+    if ! printf '%s' "$resolution" | grep -q 'oracle_observed_value:'; then
+      echo "stop_check: closure_contract VIOLATION $item_id (iteration $nnnn): closure carries no oracle_observed_value" >&2
+      bad=$((bad+1)); continue
+    fi
+    if [[ -z "$observed" ]]; then
+      echo "stop_check: closure_contract VIOLATION $item_id (iteration $nnnn): oracle_observed_value is empty" >&2
+      bad=$((bad+1)); continue
+    fi
+
+    # (2) verification_strength present and in the v1_6 vocabulary.
+    if ! printf '%s' "$resolution" | grep -q 'verification_strength:'; then
+      echo "stop_check: closure_contract VIOLATION $item_id (iteration $nnnn): closure carries no verification_strength" >&2
+      bad=$((bad+1)); continue
+    fi
+    strength="$(printf '%s' "$resolution" | sed -nE 's/.*verification_strength:[[:space:]]*([A-Za-z_]+).*/\1/p' | head -1)"
+    if [[ -z "$strength" ]] || [[ " $CLOSURE_STRENGTHS_VALID " != *" $strength "* ]]; then
+      echo "stop_check: closure_contract VIOLATION $item_id (iteration $nnnn): verification_strength '$strength' not in {${CLOSURE_STRENGTHS_VALID// /, }}" >&2
+      bad=$((bad+1)); continue
+    fi
+
+    # (3) Policy governs which tier may ACCEPT. v1_6 Core Principle 3/4: under
+    #     verification_policy: inline_per_session_plan, Tier D is mandatory and Tier L
+    #     (llm_rerun) may reject but MAY NOT ACCEPT. A closure stamped llm_rerun under
+    #     that policy is the DERIVED-oracle-accepted defect wearing the right label.
+    if [[ "$strength" == "llm_rerun" && "$policy" == "inline_per_session_plan" ]]; then
+      echo "stop_check: closure_contract VIOLATION $item_id (iteration $nnnn): verification_strength llm_rerun is accept-INCAPABLE under verification_policy: inline_per_session_plan (Tier D mandatory)" >&2
+      bad=$((bad+1)); continue
+    fi
+
+    # (4) strength `none` is only legal as a v1_6 verification_exception, which requires
+    #     an authority string. Without one it is an unverified item wearing a closure.
+    if [[ "$strength" == "none" ]] && ! printf '%s' "$resolution" | grep -q 'authority:'; then
+      echo "stop_check: closure_contract VIOLATION $item_id (iteration $nnnn): verification_strength none requires a verification_exception authority:" >&2
+      bad=$((bad+1)); continue
+    fi
+  done < "$registry_path"
+
+  echo "stop_check: closure_contract examined $governed loop-written closure(s) of $total RESOLVED row(s) ($ungoverned not written by this run — not governed) in '$registry_path' [policy: ${policy:-<absent>}]" >&2
+  if [[ "$bad" -gt 0 ]]; then
+    echo "stop_check: closure_contract FAILED — $bad malformed closure(s); rl-iteration-consumer v1_6 Phase 5 requires verification_strength + oracle_observed_value on every closure (FUP-1772)" >&2
+    return 3
+  fi
+  return 0
+}
+
+set +e
+check_closure_contract
+_closure_rc=$?
+set -e
+[[ "$_closure_rc" -eq 0 ]] || exit "$_closure_rc"
+
 count="$(read_seed_field "$SEED" '.completion_predicate | length')"
 if ! [[ "$count" =~ ^[0-9]+$ ]]; then
   echo "stop_check: completion_predicate not an array" >&2; exit 3
