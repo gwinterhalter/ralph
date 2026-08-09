@@ -7,7 +7,7 @@ usage reaches a window budget, and reports when the window frees (running Runs u
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -20,7 +20,7 @@ from supervisor.usage_window import (
 
 pytestmark = pytest.mark.unit
 
-NOW = datetime(2026, 6, 9, 12, 0, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 6, 9, 12, 0, 0, tzinfo=UTC)
 
 
 def _evt(hours_ago: float, cost: str) -> UsageEvent:
@@ -28,38 +28,38 @@ def _evt(hours_ago: float, cost: str) -> UsageEvent:
 
 
 def test_under_budget_allows_dispatch() -> None:
-    windows = [UsageWindow("5h", timedelta(hours=5), Decimal("10"))]
+    windows = [UsageWindow("5h", timedelta(hours=5), Decimal(10))]
     events = [_evt(1, "3"), _evt(2, "4")]  # 7 < 10
     decision = evaluate_usage_windows(events, windows, now=NOW)
     assert decision.dispatch_allowed is True
     assert decision.breaches == ()
-    assert decision.used_by_window == (("5h", Decimal("7")),)
+    assert decision.used_by_window == (("5h", Decimal(7)),)
 
 
 def test_at_budget_pauses_dispatch() -> None:
-    windows = [UsageWindow("5h", timedelta(hours=5), Decimal("10"))]
+    windows = [UsageWindow("5h", timedelta(hours=5), Decimal(10))]
     events = [_evt(1, "6"), _evt(2, "4")]  # 10 >= 10 → breached
     decision = evaluate_usage_windows(events, windows, now=NOW)
     assert decision.dispatch_allowed is False
     assert len(decision.breaches) == 1
     assert decision.breaches[0].name == "5h"
-    assert decision.breaches[0].used_usd == Decimal("10")
+    assert decision.breaches[0].used_usd == Decimal(10)
 
 
 def test_events_outside_the_window_do_not_count() -> None:
-    windows = [UsageWindow("5h", timedelta(hours=5), Decimal("10"))]
+    windows = [UsageWindow("5h", timedelta(hours=5), Decimal(10))]
     # 8 is just outside the 5h window; only the 6 (1h ago) counts → 6 < 10, allowed.
     events = [_evt(8, "100"), _evt(1, "6")]
     decision = evaluate_usage_windows(events, windows, now=NOW)
     assert decision.dispatch_allowed is True
-    assert decision.used_by_window == (("5h", Decimal("6")),)
+    assert decision.used_by_window == (("5h", Decimal(6)),)
 
 
 def test_reset_time_is_when_enough_oldest_usage_ages_out() -> None:
     # budget 10; three 5-cost events at 4h, 3h, 1h ago → used 15. To fall below 10 we must
     # expire the two oldest (4h: 15->10 still not <10; 3h: ->5 <10). The 3h-ago event leaves
     # the 5h window at (NOW-3h)+5h = NOW+2h → that is resets_at.
-    windows = [UsageWindow("5h", timedelta(hours=5), Decimal("10"))]
+    windows = [UsageWindow("5h", timedelta(hours=5), Decimal(10))]
     events = [_evt(4, "5"), _evt(3, "5"), _evt(1, "5")]
     decision = evaluate_usage_windows(events, windows, now=NOW)
     assert decision.dispatch_allowed is False
@@ -69,8 +69,8 @@ def test_reset_time_is_when_enough_oldest_usage_ages_out() -> None:
 def test_windows_are_independent() -> None:
     # 5h budget high (not breached), weekly budget low (breached by the same events).
     windows = [
-        UsageWindow("5h", timedelta(hours=5), Decimal("100")),
-        UsageWindow("weekly", timedelta(days=7), Decimal("5")),
+        UsageWindow("5h", timedelta(hours=5), Decimal(100)),
+        UsageWindow("weekly", timedelta(days=7), Decimal(5)),
     ]
     events = [_evt(1, "4"), _evt(48, "4")]  # 8 total in the week; 4 in 5h
     decision = evaluate_usage_windows(events, windows, now=NOW)
@@ -85,6 +85,6 @@ def test_no_windows_is_a_clean_allow() -> None:
 
 
 def test_no_events_is_a_clean_allow() -> None:
-    windows = [UsageWindow("weekly", timedelta(days=7), Decimal("5"))]
+    windows = [UsageWindow("weekly", timedelta(days=7), Decimal(5))]
     decision = evaluate_usage_windows([], windows, now=NOW)
     assert decision.dispatch_allowed is True

@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -83,7 +83,7 @@ class EventMetrics:
 
     total: int
     by_type: dict[str, int] = field(default_factory=dict)
-    total_cost_usd: Decimal = Decimal("0")
+    total_cost_usd: Decimal = Decimal(0)
     failures: int = 0
 
 
@@ -106,17 +106,17 @@ def _event_cost(event: dict[str, object]) -> Decimal:
                 raw = nested.get("cost_usd")
                 break
     if raw is None:
-        return Decimal("0")
+        return Decimal(0)
     try:
         return Decimal(str(raw))
     except (InvalidOperation, ValueError):
-        return Decimal("0")
+        return Decimal(0)
 
 
 def summarize_events(events: list[dict[str, object]]) -> EventMetrics:
     """Fold the event log into counts-by-type, total cost, and a failure count (pure)."""
     by_type: dict[str, int] = {}
-    total_cost = Decimal("0")
+    total_cost = Decimal(0)
     failures = 0
     for event in events:
         etype = _event_type(event)
@@ -151,8 +151,10 @@ def read_events(events_path: str | Path) -> list[dict[str, object]]:
 def render_metrics(metrics: EventMetrics) -> str:
     """Render the metrics pane (pure)."""
     lines = [
-        f"events: {metrics.total}  |  failures/halts: {metrics.failures}  "
-        f"|  cumulative cost: ${metrics.total_cost_usd}",
+        (
+            f"events: {metrics.total}  |  failures/halts: {metrics.failures}  "
+            f"|  cumulative cost: ${metrics.total_cost_usd}"
+        ),
         "by type:",
     ]
     for etype in sorted(metrics.by_type):
@@ -390,7 +392,7 @@ def run_status_panel(
     import time as _time
 
     _sleep = sleep if sleep is not None else _time.sleep
-    _now = now if now is not None else (lambda: datetime.now(timezone.utc))
+    _now = now if now is not None else (lambda: datetime.now(UTC))
     scheduler = RefreshScheduler(interval=timedelta(seconds=interval_seconds))
     run_status_loop(
         fetch_snapshot,
@@ -520,7 +522,7 @@ def _main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI entry
         print(render_learning_banner(registry.read_audit_findings(), registry.read_audit_effects()))
 
         def _fetch() -> FullFleetSnapshot:
-            return build_full_fleet_snapshot(registry, now=datetime.now(timezone.utc))
+            return build_full_fleet_snapshot(registry, now=datetime.now(UTC))
 
         return run_status_panel(_fetch, interval_seconds=args.interval, once=args.once)
 
@@ -577,7 +579,7 @@ def _main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI entry
         from supervisor.registry import Registry
 
         registry = Registry.from_env()
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=args.days)).isoformat()
+        cutoff = (datetime.now(UTC) - timedelta(days=args.days)).isoformat()
         deleted = registry.prune_events(before_iso=cutoff)
         print(f"events-prune: deleted {deleted} event(s) older than {args.days} day(s) (before {cutoff}).")
         return 0
@@ -653,10 +655,10 @@ def _main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI entry
         skills_dir = os.environ.get("CLAUDE_SKILLS_DIR", "")
         argv_cmd = build_dispatch_command(finding, skills_dir=skills_dir)
         print("dispatching to authoring skill:\n  " + " ".join(argv_cmd))
-        import subprocess  # noqa: PLC0415 - lazy; only the live apply path needs it
+        import subprocess
 
         try:
-            completed = subprocess.run(  # noqa: S603 - argv is built, not shell
+            completed = subprocess.run(
                 argv_cmd, check=False, capture_output=True, text=True
             )
         except FileNotFoundError:
@@ -676,7 +678,7 @@ def _main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI entry
         )
         return 1
 
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     cid = f"{args.cmd}_{uuid.uuid4().hex[:12]}"
     ctype = {"pause": "pause", "query": "query_register_state", "bump": "bump_budget"}[args.cmd]
     cap = getattr(args, "new_cap_usd", None)
@@ -701,17 +703,17 @@ if __name__ == "__main__":  # pragma: no cover
 __all__ = [
     "COMMAND_TYPES",
     "EventMetrics",
-    "write_command",
-    "run_status_panel",
-    "summarize_events",
-    "read_events",
-    "render_metrics",
-    "render_learnings",
-    "render_correction_summary",
-    "render_events",
-    "render_effects",
-    "render_learning_banner",
-    "summarize_finding_statuses",
-    "summarize_effect_outcomes",
     "build_dispatch_command",
+    "read_events",
+    "render_correction_summary",
+    "render_effects",
+    "render_events",
+    "render_learning_banner",
+    "render_learnings",
+    "render_metrics",
+    "run_status_panel",
+    "summarize_effect_outcomes",
+    "summarize_events",
+    "summarize_finding_statuses",
+    "write_command",
 ]

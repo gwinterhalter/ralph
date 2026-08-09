@@ -80,7 +80,7 @@ _ITERATION_END = "iteration_end"
 
 
 def count_iterations(
-    events: "list[dict[str, object]] | tuple[dict[str, object], ...]",
+    events: list[dict[str, object]] | tuple[dict[str, object], ...],
 ) -> int:
     """Count ``iteration_end`` events in a Run's stream — the proxy for items closed (D1)."""
     return sum(1 for e in events if e.get("event_type") == _ITERATION_END)
@@ -134,7 +134,7 @@ def _parse_ts(value: object) -> datetime | None:
 
 
 def build_gate_events(
-    events: "list[dict[str, object]] | tuple[dict[str, object], ...]",
+    events: list[dict[str, object]] | tuple[dict[str, object], ...],
 ) -> tuple[GateEvent, ...]:
     """Fold a Run's gate events into per-gate :class:`GateEvent` facts (pure; FR-050).
 
@@ -163,9 +163,7 @@ def build_gate_events(
             escalated[raw_gate] = False
             option[raw_gate] = None
             order.append(raw_gate)
-        if event_type == _GATE_ESCALATE:
-            escalated[raw_gate] = True
-        elif event_type == _GATE_FIRE and payload.get("cls") == "gate_human":
+        if event_type == _GATE_ESCALATE or event_type == _GATE_FIRE and payload.get("cls") == "gate_human":
             escalated[raw_gate] = True
         elif event_type == _GATE_RESOLVE:
             chosen = payload.get("option")
@@ -182,7 +180,7 @@ def build_gate_events(
 
 
 def build_binding_outcomes(
-    events: "list[dict[str, object]] | tuple[dict[str, object], ...]",
+    events: list[dict[str, object]] | tuple[dict[str, object], ...],
 ) -> tuple[BindingOutcome, ...]:
     """Fold a Run's ``verification`` events into per-binding :class:`BindingOutcome` facts (FR-051).
 
@@ -213,7 +211,7 @@ def build_binding_outcomes(
 
 
 def build_shape_usages(
-    events: "list[dict[str, object]] | tuple[dict[str, object], ...]",
+    events: list[dict[str, object]] | tuple[dict[str, object], ...],
 ) -> tuple[ShapeUsage, ...]:
     """Fold a Run's ``revise_round`` events into per-iteration :class:`ShapeUsage` facts (FR-052).
 
@@ -256,7 +254,7 @@ def build_shape_usages(
 
 
 def build_correction_attempts(
-    events: "list[dict[str, object]] | tuple[dict[str, object], ...]",
+    events: list[dict[str, object]] | tuple[dict[str, object], ...],
 ) -> list[CorrectionAttempt]:
     """Fold ``correction_attempt`` events into :class:`CorrectionAttempt` rows (for DB capture).
 
@@ -288,7 +286,7 @@ def build_correction_attempts(
 
 
 def assemble_run_facts(
-    events: "list[dict[str, object]] | tuple[dict[str, object], ...]",
+    events: list[dict[str, object]] | tuple[dict[str, object], ...],
 ) -> RunFacts:
     """Assemble all three Run-Auditor fact kinds from one Run's events (FR-050/051/052)."""
     return RunFacts(
@@ -370,7 +368,7 @@ def run_facts_from_run(row: RegistryRow) -> RunFacts:
 
 
 def completed_run_records(
-    rows: "list[RegistryRow] | tuple[RegistryRow, ...]",
+    rows: list[RegistryRow] | tuple[RegistryRow, ...],
     *,
     facts_for: Callable[[RegistryRow], RunFacts] | None = None,
 ) -> list[RunRecord]:
@@ -440,9 +438,9 @@ def _duration_seconds(spawned_at: object, terminated_at: object) -> float | None
 
 
 def learning_records(
-    rows: "list[RegistryRow] | tuple[RegistryRow, ...]",
+    rows: list[RegistryRow] | tuple[RegistryRow, ...],
     *,
-    items_closed_for: "Callable[[RegistryRow], int | None] | None" = None,
+    items_closed_for: Callable[[RegistryRow], int | None] | None = None,
 ) -> list[LearningRecord]:
     """Derive the per-completed-Run cost/duration/status learning facts from ``ralph_runs`` rows.
 
@@ -469,7 +467,7 @@ def learning_records(
     return records
 
 
-def render_learning_corpus(records: "list[LearningRecord] | tuple[LearningRecord, ...]") -> str:
+def render_learning_corpus(records: list[LearningRecord] | tuple[LearningRecord, ...]) -> str:
     """Render the learning corpus as deterministic JSONL (one object per Run, sorted by run_id).
 
     A current snapshot — re-rendering the same completed-Run set yields the identical text, so the
@@ -495,7 +493,7 @@ def render_learning_corpus(records: "list[LearningRecord] | tuple[LearningRecord
 
 
 def findings_to_escalations(
-    findings: "list[AuditFinding] | tuple[AuditFinding, ...]",
+    findings: list[AuditFinding] | tuple[AuditFinding, ...],
     *,
     new_keys: set[str],
     now: datetime,
@@ -537,17 +535,17 @@ __all__ = [
     "LearningRecord",
     "RunFacts",
     "assemble_run_facts",
-    "build_correction_attempts",
-    "count_iterations",
-    "findings_to_escalations",
-    "scoped_events_for_run",
     "build_binding_outcomes",
+    "build_correction_attempts",
     "build_gate_events",
     "build_shape_usages",
     "completed_run_records",
+    "count_iterations",
+    "findings_to_escalations",
     "gate_events_from_run",
     "learning_records",
     "read_events_jsonl",
     "render_learning_corpus",
     "run_facts_from_run",
+    "scoped_events_for_run",
 ]

@@ -1,7 +1,7 @@
 """Operator Action-Inbox aggregation (supervisor.inbox) — real-seam: substrate rows → cards."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
@@ -35,9 +35,9 @@ def _row(pid: str, *, lifecycle: str, heartbeat: str = HEARTBEAT_NA) -> ProjectF
         active_run_status="running" if heartbeat != HEARTBEAT_NA else "—",
         attention_debt=0,
         open_work_count=1,
-        cumulative_cost_usd=Decimal("0"),
+        cumulative_cost_usd=Decimal(0),
         heartbeat_state=heartbeat,
-        heartbeat_as_of=datetime(2026, 6, 8, tzinfo=timezone.utc),
+        heartbeat_as_of=datetime(2026, 6, 8, tzinfo=UTC),
     )
 
 

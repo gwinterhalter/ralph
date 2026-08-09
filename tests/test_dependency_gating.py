@@ -43,7 +43,6 @@ def _setup(
 
     def _fake_admit(candidate, **_kwargs):  # type: ignore[no-untyped-def]
         routed.append(str(candidate["project_id"]))
-        return None
 
     monkeypatch.setattr(cycle_wiring, "admit_candidate", _fake_admit)
     return ScheduleConfig(

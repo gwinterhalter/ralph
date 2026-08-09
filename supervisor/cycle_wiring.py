@@ -50,12 +50,12 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 from supervisor.admission import (
     AdmissionRejection,
@@ -80,7 +80,12 @@ from supervisor.attention import (
     plan_notifications,
 )
 from supervisor.candidate_enrichment import default_candidate_enricher
-from supervisor.transitions import IllegalTransitionError
+from supervisor.cost_circuit_breaker import (
+    BreakerConfig,
+    BreakerTrip,
+    IterationObservation,
+    evaluate_fleet,
+)
 from supervisor.notifications import (
     NotificationPort,
     NullNotificationPort,
@@ -93,18 +98,6 @@ from supervisor.reconcile import (
     RunCompletion,
     derive_reconcile_actions,
 )
-from supervisor.run_auditor import (
-    AuditConfig,
-    RunAuditReport,
-    run_audit_pass,
-)
-from supervisor.run_auditor import RunRecord as AuditRunRecord
-from supervisor.cost_circuit_breaker import (
-    BreakerConfig,
-    BreakerTrip,
-    IterationObservation,
-    evaluate_fleet,
-)
 from supervisor.repair_policy import (
     DEFAULT_CONFIDENCE_THRESHOLD,
     AutoRepairAuditRecord,
@@ -113,6 +106,12 @@ from supervisor.repair_policy import (
     build_audit_record,
     evaluate_repair,
 )
+from supervisor.run_auditor import (
+    AuditConfig,
+    RunAuditReport,
+    run_audit_pass,
+)
+from supervisor.run_auditor import RunRecord as AuditRunRecord
 from supervisor.safety_gates import (
     DEFAULT_CONCURRENCY_CEILING,
     KillSwitch,
@@ -127,6 +126,7 @@ from supervisor.scheduler import (
     SchedulerDecision,
     select_next_dispatch,
 )
+from supervisor.transitions import IllegalTransitionError
 
 if TYPE_CHECKING:
     from supervisor.ports import RegistryPort, RegistryRow
@@ -255,10 +255,10 @@ class ReconcileConfig:
     bounded checkpoint reconciles only its own disposable runs).
     """
 
-    active_runs_source: Callable[[], "Sequence[RegistryRow]"]
+    active_runs_source: Callable[[], Sequence[RegistryRow]]
     pid_alive: Callable[[int], bool] = _default_pid_alive
     hang_timeout_seconds: float = 1800.0
-    progress_at: Callable[["RegistryRow"], "str | None"] = field(
+    progress_at: Callable[[RegistryRow], str | None] = field(
         default=lambda row: (
             str(row.get("spawned_at"))
             if isinstance(row.get("spawned_at"), str) and row.get("spawned_at")
@@ -266,20 +266,20 @@ class ReconcileConfig:
         )
     )
     clock: Callable[[], datetime] = _utc_now_dt
-    project_filter: Callable[["RegistryRow"], bool] = field(
+    project_filter: Callable[[RegistryRow], bool] = field(
         default_factory=lambda: (lambda row: True)
     )
     #: Terminal-completion probe (D6 follow-on): reports a clean INITIATIVE_COMPLETE
     #: for a run (production reads its state-dir artifacts via run_lifecycle). Default
     #: never-completed → the failed/stall-only behaviour is unchanged.
-    completion_of: Callable[["RegistryRow"], "RunCompletion | None"] = field(
+    completion_of: Callable[[RegistryRow], RunCompletion | None] = field(
         default=lambda _row: None
     )
     #: Per-run hang-budget override (F-4): returns the run's seed
     #: ``budget.hang_timeout_seconds`` (production reads it off ``seed_path``), else
     #: ``None`` → the fleet-default ``hang_timeout_seconds`` applies. Default never
     #: overrides → unchanged behaviour.
-    hang_timeout_of: Callable[["RegistryRow"], "float | None"] = field(
+    hang_timeout_of: Callable[[RegistryRow], float | None] = field(
         default=lambda _row: None
     )
     #: Pending-gate probe: True iff the run persisted a needs-review gate that has no
@@ -288,11 +288,11 @@ class ReconcileConfig:
     #: branch so a gate-exited orchestrator reconciles ``paused_gate`` (recoverable +
     #: surfaced) instead of being mislabelled ``failed``. Default never-pending →
     #: unchanged behaviour.
-    gate_pending_of: Callable[["RegistryRow"], bool] = field(default=lambda _row: False)
+    gate_pending_of: Callable[[RegistryRow], bool] = field(default=lambda _row: False)
 
 
 def run_reconcile_step(
-    registry: "RegistryPort", config: ReconcileConfig
+    registry: RegistryPort, config: ReconcileConfig
 ) -> list[ReconcileAction]:
     """Compose the §4.4 step-1 Reconcile for one pass (robustness T1#1).
 
@@ -326,11 +326,11 @@ def run_reconcile_step(
             # A clean completion carries its own terminal_at + cost (read from the
             # run's terminal artifacts), not the row's last-known running cost.
             at = action.terminated_at or now_iso
-            cost = action.terminal_cost_usd or Decimal("0")
+            cost = action.terminal_cost_usd or Decimal(0)
         else:
             at = now_iso
             raw_cost = cost_by_project.get(action.project_id)
-            cost = raw_cost if isinstance(raw_cost, Decimal) else Decimal("0")
+            cost = raw_cost if isinstance(raw_cost, Decimal) else Decimal(0)
         registry.reconcile_run(
             action.project_id,
             action.run_status,
@@ -394,7 +394,7 @@ class ScheduleConfig:
     #: ``Registry.read_admitted``). Default empty → a candidate-only cycle is unchanged.
     #: Without this an ``admitted`` Project is dispatched-eligible per the scheduler but
     #: never appears in its input, so a held Project would be orphaned.
-    admitted_source: Callable[[], "Sequence[RegistryRow]"] = field(default=lambda: [])
+    admitted_source: Callable[[], Sequence[RegistryRow]] = field(default=list)
     #: Item 1 cross-initiative dependency gating: the set of ``complete`` project_ids a
     #: Candidate's ``depends_on`` is checked against (production wires
     #: ``Registry.read_completed_project_ids``). A Candidate with any unmet prerequisite is
@@ -453,7 +453,7 @@ class AttendConfig:
     #: unresolved escalation is paged once, not re-sent every cycle. An injected mutable set shared
     #: across cycles by the production wiring. ``None`` (the default) disables dedup — the plan is
     #: delivered as-is (back-compat for callers/tests that don't supply a ledger).
-    delivered_keys: "set[tuple[str, str, str]] | None" = None
+    delivered_keys: set[tuple[str, str, str]] | None = None
 
 
 # --- RegistryRow -> ProjectRecord adaptation (the OLB-11 wiring step) ---------
@@ -662,7 +662,7 @@ def _spawn_selected(
 
 
 def _surface_admission_outcome(
-    project_id: str, outcome: object, config: "ScheduleConfig"
+    project_id: str, outcome: object, config: ScheduleConfig
 ) -> None:
     """FUP-0871/0868: surface a non-dispatching admission outcome so it is never silent,
     and persist a spawn FAILURE detail onto the Run row.
@@ -806,10 +806,10 @@ class GuardConfig:
 
     breaker_config: BreakerConfig | None = None
     spend_histories: Callable[[], Mapping[str, Sequence[IterationObservation]]] = field(
-        default_factory=lambda: (lambda: {})
+        default_factory=lambda: (dict)
     )
     stall_signals: Callable[[], Mapping[str, StallSignal]] = field(
-        default_factory=lambda: (lambda: {})
+        default_factory=lambda: (dict)
     )
     confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD
     attention_store: AttentionStateStore = field(default_factory=AttentionStateStore)
@@ -1093,13 +1093,13 @@ class LearnConfig:
     write.
     """
 
-    runs_source: Callable[[], "Sequence[AuditRunRecord]"]
+    runs_source: Callable[[], Sequence[AuditRunRecord]]
     audit_config: AuditConfig = field(default_factory=AuditConfig)
-    report_sink: Callable[["RunAuditReport"], None] = lambda _report: None
+    report_sink: Callable[[RunAuditReport], None] = lambda _report: None
 
 
 def stall_signals_from_actions(
-    actions: "Sequence[ReconcileAction]",
+    actions: Sequence[ReconcileAction],
     *,
     repair_kind: RepairKind = RepairKind.REATTACH_STALLED_RUN,
     confidence: float = 0.8,
@@ -1132,7 +1132,7 @@ def stall_signals_from_actions(
     return signals
 
 
-def run_learn_step(config: LearnConfig) -> "RunAuditReport | None":
+def run_learn_step(config: LearnConfig) -> RunAuditReport | None:
     """Compose the §4.4 step-6 Learn for one pass (D1; FR-049).
 
     Reads the supplied Runs, runs the read-only cross-run audit, and hands the
@@ -1148,23 +1148,23 @@ def run_learn_step(config: LearnConfig) -> "RunAuditReport | None":
 
 
 __all__ = [
-    "RoundStateStore",
-    "AttentionStateStore",
-    "ScheduleConfig",
     "AttendConfig",
+    "AttentionStateStore",
     "GuardConfig",
     "GuardOutcome",
-    "StallSignal",
     "KillSwitchConfig",
     "KillSwitchOutcome",
     "LearnConfig",
-    "to_project_records",
-    "to_attention_escalation",
-    "run_schedule_step",
-    "run_schedule_fill_step",
+    "RoundStateStore",
+    "ScheduleConfig",
+    "StallSignal",
     "run_attend_step",
     "run_guard_step",
     "run_kill_switch_halt",
     "run_learn_step",
+    "run_schedule_fill_step",
+    "run_schedule_step",
     "stall_signals_from_actions",
+    "to_attention_escalation",
+    "to_project_records",
 ]

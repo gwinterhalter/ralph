@@ -271,15 +271,15 @@ def build_inbox(
 
 
 __all__ = [
+    "DEFAULT_CHURN_THRESHOLD",
+    "KIND_APPROVAL",
+    "KIND_BUDGET",
+    "KIND_CHURN",
+    "KIND_FAILED",
+    "KIND_GATE",
+    "KIND_LEARNING",
+    "KIND_REGRESSED",
+    "KIND_STALL",
     "InboxCard",
     "build_inbox",
-    "DEFAULT_CHURN_THRESHOLD",
-    "KIND_BUDGET",
-    "KIND_GATE",
-    "KIND_STALL",
-    "KIND_FAILED",
-    "KIND_APPROVAL",
-    "KIND_REGRESSED",
-    "KIND_LEARNING",
-    "KIND_CHURN",
 ]

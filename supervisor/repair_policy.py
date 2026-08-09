@@ -338,13 +338,13 @@ def build_repair_escalation(
 
 __all__ = [
     "DEFAULT_CONFIDENCE_THRESHOLD",
-    "ReversibilityClass",
-    "RepairKind",
+    "AutoRepairAuditRecord",
     "RepairAction",
     "RepairDecision",
-    "AutoRepairAuditRecord",
-    "classify_reversibility",
-    "evaluate_repair",
+    "RepairKind",
+    "ReversibilityClass",
     "build_audit_record",
     "build_repair_escalation",
+    "classify_reversibility",
+    "evaluate_repair",
 ]

@@ -142,9 +142,7 @@ def derive_runnable(
     for project in projects:
         if project.project_id in in_flight:
             continue
-        if project.lifecycle_state == RUNNING_STATE:
-            runnable.append(project)
-        elif project.lifecycle_state == ADMITTED_STATE and ceiling_headroom >= 1:
+        if project.lifecycle_state == RUNNING_STATE or project.lifecycle_state == ADMITTED_STATE and ceiling_headroom >= 1:
             runnable.append(project)
     return runnable
 

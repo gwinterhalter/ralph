@@ -2,7 +2,19 @@ import { test, expect } from "@playwright/test";
 
 // API responses are mocked so the smoke verifies the real browser wiring (render → click → POST)
 // without a Python server or DB. Each route returns a minimal but realistic payload.
+const unmockedApiCalls: string[] = [];
+
 test.beforeEach(async ({ page }) => {
+  // Drift guard: any /api/ request with no explicit mock below is a spec/app mismatch.
+  // Playwright checks routes in reverse registration order, so this catch-all is
+  // overridden by every specific mock registered after it. Recording and failing by
+  // name beats the silent vite-proxy fallthrough, which surfaces 5s later as an
+  // unrelated missing-element assertion -- which is how this went unseen for 2 months.
+  unmockedApiCalls.length = 0;
+  await page.route("**/api/**", (r) => {
+    unmockedApiCalls.push(r.request().method() + " " + new URL(r.request().url()).pathname);
+    return r.fulfill({ status: 599, json: { error: "unmocked in E2E" } });
+  });
   await page.route("**/api/inbox", (r) =>
     r.fulfill({
       json: {
@@ -35,6 +47,8 @@ test.beforeEach(async ({ page }) => {
   await page.route("**/api/projects", (r) => r.fulfill({ json: { projects: [], count: 0 } }));
   await page.route("**/api/runs", (r) => r.fulfill({ json: { runs: [], count: 0, total_cost_usd: "0" } }));
   await page.route("**/api/loop-status", (r) => r.fulfill({ json: { last_activity: null, seconds_since: null, active_guess: false } }));
+  await page.route("**/api/throttling", (r) => r.fulfill({ json: { count: 0, recent: [] } }));
+  await page.route("**/api/gates/answered", (r) => r.fulfill({ json: { gates: [], count: 0 } }));
   await page.route("**/api/stream*", (r) =>
     r.fulfill({ headers: { "content-type": "text/event-stream" }, body: "data: {}\n\n" }),
   );
@@ -58,4 +72,11 @@ test("home renders the needs-you inbox and Adopt fires a promote POST", async ({
   // Adopt on the learning card → POST /api/findings/.../promote
   await page.getByRole("button", { name: "adopt" }).click();
   await expect.poll(() => promoted).toContain("/promote");
+});
+
+test.afterEach(() => {
+  expect(
+    unmockedApiCalls,
+    'Unmocked API endpoints reached the vite proxy: ' + unmockedApiCalls.join(', '),
+  ).toEqual([]);
 });

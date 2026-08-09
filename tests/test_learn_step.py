@@ -20,7 +20,7 @@ def _runs() -> list[RunRecord]:
 
 def test_run_learn_step_noop_on_empty_source() -> None:
     sink: list[RunAuditReport] = []
-    cfg = LearnConfig(runs_source=lambda: [], report_sink=sink.append)
+    cfg = LearnConfig(runs_source=list, report_sink=sink.append)
     assert run_learn_step(cfg) is None
     assert sink == []  # no audit, no sink call
 

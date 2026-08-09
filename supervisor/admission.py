@@ -39,10 +39,10 @@ This module is a CONSUMER of two seams it never edits or re-implements:
 """
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Callable, Protocol, runtime_checkable
+from datetime import UTC, datetime
+from typing import Protocol, runtime_checkable
 
 from supervisor.ports import RegistryPort, RegistryRow
 from supervisor.safety_gates import (
@@ -435,7 +435,7 @@ def admission_gate(
 
 def _utc_now_iso() -> str:
     """The default ``spawned_at`` clock — an ISO-8601 UTC timestamp."""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def admit_and_spawn(
@@ -700,26 +700,26 @@ def _first_severe_finding(
 # Kept importable for downstream wiring symmetry with the OLB-06 seam.
 __all__ = [
     "ADMISSION_REASONS",
+    "EMPTY_REGISTRY",
+    "PREREQUISITE_INCOMPLETE",
     "REJECTION_REASONS",
     "SEED_INVALID",
-    "EMPTY_REGISTRY",
+    "SEVERITY_SEVERE",
     "SLUG_COLLISION",
     "UNRESOLVABLE_BLAST_RADIUS",
-    "PREREQUISITE_INCOMPLETE",
-    "SEVERITY_SEVERE",
-    "SeedFinding",
-    "SeedValidatorPort",
-    "SpawnResult",
-    "SpawnPort",
     "AdmissionRejection",
     "AdmitDecision",
     "AdmittedHold",
     "DependencyHold",
-    "RunRecord",
     "ReconciledFailure",
-    "discover_candidates",
-    "unmet_prerequisites",
+    "RunRecord",
+    "SeedFinding",
+    "SeedValidatorPort",
+    "SpawnPort",
+    "SpawnResult",
     "admission_gate",
     "admit_and_spawn",
     "admit_candidate",
+    "discover_candidates",
+    "unmet_prerequisites",
 ]

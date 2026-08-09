@@ -89,7 +89,7 @@ def evaluate_usage_windows(
         in_window = sorted(
             (e for e in events if e.ts >= cutoff), key=lambda e: e.ts
         )
-        used = sum((e.cost_usd for e in in_window), Decimal("0"))
+        used = sum((e.cost_usd for e in in_window), Decimal(0))
         used_by_window.append((window.name, used))
         if used < window.budget_usd:
             continue
@@ -120,9 +120,9 @@ def evaluate_usage_windows(
 
 
 __all__ = [
+    "UsageDecision",
     "UsageEvent",
     "UsageWindow",
     "WindowBreach",
-    "UsageDecision",
     "evaluate_usage_windows",
 ]

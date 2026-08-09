@@ -18,13 +18,13 @@ for (2). No live branch, no real process is ever touched.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Self
 
 import psutil
 import pytest
 
 from supervisor import __main__ as svmain
-from supervisor import cycle_wiring
-from supervisor import pid_probe
+from supervisor import cycle_wiring, pid_probe
 from supervisor.registry import Registry
 
 pytestmark = pytest.mark.unit
@@ -37,7 +37,7 @@ class _Cursor:
     def __init__(self, conn: _Conn) -> None:
         self._conn = conn
 
-    def __enter__(self) -> _Cursor:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *exc: object) -> None:

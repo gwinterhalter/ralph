@@ -90,11 +90,11 @@ def forecast_fleet(
 
     project_ids = set(costs_by_project) | set(open_work_counts)
     forecasts: list[ProjectForecast] = []
-    fleet_spent = Decimal("0")
-    fleet_remaining = Decimal("0")
+    fleet_spent = Decimal(0)
+    fleet_remaining = Decimal(0)
     for project_id in project_ids:
         costs = costs_by_project.get(project_id, [])
-        total_spent = sum(costs, Decimal("0"))
+        total_spent = sum(costs, Decimal(0))
         runs = len(costs)
         items = items_by_project.get(project_id, 0)
         # Prefer the per-CLOSED-ITEM basis (D1); fall back to per-Run mean; else no basis.
@@ -107,7 +107,7 @@ def forecast_fleet(
             basis = "per_run"
             sample = runs
         else:
-            unit_cost = Decimal("0")
+            unit_cost = Decimal(0)
             basis = "none"
             sample = 0
         open_count = int(open_work_counts.get(project_id, 0))
@@ -141,9 +141,11 @@ def forecast_fleet(
 def render_forecast(forecast: FleetForecast, *, ceiling_usd: Decimal | None = None) -> str:
     """Render the forecast pane (pure). Adds a runway-vs-ceiling line when a ceiling is supplied."""
     lines = [
-        f"cost forecast: fleet spent ${forecast.fleet_spent_usd} + projected remaining "
-        f"${forecast.fleet_projected_remaining_usd} = projected total "
-        f"${forecast.fleet_projected_total_usd}"
+        (
+            f"cost forecast: fleet spent ${forecast.fleet_spent_usd} + projected remaining "
+            f"${forecast.fleet_projected_remaining_usd} = projected total "
+            f"${forecast.fleet_projected_total_usd}"
+        )
     ]
     if ceiling_usd is not None:
         over = forecast.fleet_projected_total_usd > ceiling_usd
@@ -169,9 +171,9 @@ def forecast_breaches(forecast: FleetForecast, ceiling_usd: Decimal) -> bool:
 
 
 __all__ = [
-    "ProjectForecast",
     "FleetForecast",
+    "ProjectForecast",
+    "forecast_breaches",
     "forecast_fleet",
     "render_forecast",
-    "forecast_breaches",
 ]

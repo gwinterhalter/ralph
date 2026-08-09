@@ -20,6 +20,7 @@ import os
 import subprocess
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Self
 
 import pytest
 
@@ -170,7 +171,7 @@ class _Cursor:
     def __init__(self, conn: _Conn) -> None:
         self._conn = conn
 
-    def __enter__(self) -> _Cursor:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *exc: object) -> None:

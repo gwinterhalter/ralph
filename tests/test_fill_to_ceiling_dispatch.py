@@ -44,7 +44,6 @@ def _spawning_admit(reg: _GrowingReg):  # type: ignore[no-untyped-def]
 
     def _admit(candidate, **_kwargs):  # type: ignore[no-untyped-def]
         reg.running_ids.append(str(candidate["project_id"]))
-        return None
 
     return _admit
 
@@ -144,7 +143,6 @@ def test_hold_does_not_spin_the_loop(monkeypatch: pytest.MonkeyPatch) -> None:
 
     def _holding_admit(candidate, **_kwargs):  # type: ignore[no-untyped-def]
         calls["n"] += 1  # never grows running — the FR-019 ceiling hold
-        return None
 
     monkeypatch.setattr(cycle_wiring, "admit_candidate", _holding_admit)
     config = _config(reg, ceiling=5, max_dispatches=5)

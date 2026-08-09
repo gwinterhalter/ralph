@@ -143,4 +143,4 @@ def write_gate_response(
     return out
 
 
-__all__ = ["GATE_REQUEST_GLOB", "list_pending_gates", "list_answered_gates", "write_gate_response"]
+__all__ = ["GATE_REQUEST_GLOB", "list_answered_gates", "list_pending_gates", "write_gate_response"]

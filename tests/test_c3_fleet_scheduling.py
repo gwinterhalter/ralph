@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Sequence
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import cast
 
 import psycopg
@@ -326,8 +326,8 @@ def test_c3_attend_hook_intakes_escalation_and_plans_notification() -> None:
     live = _connect()
     try:
         registry = _registry(live)
-        raised_at = datetime(2026, 6, 5, 12, 0, tzinfo=timezone.utc)
-        now = datetime(2026, 6, 5, 12, 30, tzinfo=timezone.utc)
+        raised_at = datetime(2026, 6, 5, 12, 0, tzinfo=UTC)
+        now = datetime(2026, 6, 5, 12, 30, tzinfo=UTC)
         escalation = Escalation(
             project_id=PROJECT_D,
             gate_id="oltest_c3_gate_0001",

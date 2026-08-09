@@ -17,7 +17,7 @@ seam is exercised against the actual shipped projection, not a parallel fake).
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
@@ -36,7 +36,7 @@ from supervisor.status_surface import (
 WRITE_METHODS = frozenset({"set_lifecycle_state", "record_run", "update_run_status"})
 
 # A fixed build instant so the FR-061 freshness assertion is deterministic.
-NOW = datetime(2026, 6, 5, 12, 30, 0)
+NOW = datetime(2026, 6, 5, 12, 30, 0, tzinfo=UTC)
 
 
 def _project_row(

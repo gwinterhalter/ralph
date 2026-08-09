@@ -116,4 +116,4 @@ def has_pending_gate(seed_path: str | None) -> bool:
     return bool(requested - _response_indices(state))
 
 
-__all__ = ["latest_progress_ts", "has_pending_gate"]
+__all__ = ["has_pending_gate", "latest_progress_ts"]

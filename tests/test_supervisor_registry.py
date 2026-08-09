@@ -18,6 +18,8 @@ actual shipped write surface rather than a parallel fake.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import UTC
+from typing import Self
 
 import pytest
 
@@ -50,7 +52,7 @@ class _FakeCursor:
     def __init__(self, conn: _FakeConn) -> None:
         self._conn = conn
 
-    def __enter__(self) -> _FakeCursor:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *exc: object) -> None:
@@ -198,11 +200,11 @@ def test_read_completed_runs_filters_terminal_and_maps(
 ) -> None:
     """Item 2: read_completed_runs selects the terminal ralph_runs rows, renames
     project_slug -> project_id, and coerces the timestamp columns to ISO strings."""
-    from datetime import datetime, timezone
+    from datetime import datetime
     from decimal import Decimal
 
-    spawned = datetime(2026, 6, 1, 0, 0, 0, tzinfo=timezone.utc)
-    terminated = datetime(2026, 6, 1, 0, 10, 0, tzinfo=timezone.utc)
+    spawned = datetime(2026, 6, 1, 0, 0, 0, tzinfo=UTC)
+    terminated = datetime(2026, 6, 1, 0, 10, 0, tzinfo=UTC)
     conn.fetchall_result = [
         ("rid", "slug", "complete", Decimal("2.50"), spawned, terminated, {"k": "v"}, "K:/s/seed.md")
     ]

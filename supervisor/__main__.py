@@ -19,7 +19,7 @@ from __future__ import annotations
 import os
 import sys
 from collections.abc import Callable, Sequence
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from supervisor.candidate_enrichment import (
     make_seed_candidate_enricher,
@@ -36,20 +36,20 @@ from supervisor.cycle_wiring import (
     ScheduleConfig,
     stall_signals_from_actions,
 )
+from supervisor.heartbeats import read_heartbeats_from_log
 from supervisor.notifications import (
     NotificationPort,
     NullNotificationPort,
     build_notification_port,
 )
-from supervisor.heartbeats import read_heartbeats_from_log
-from supervisor.run_signals import has_pending_gate, latest_progress_ts
 from supervisor.pid_probe import format_pid_start_time, pid_alive, probe_pid_start_time
 from supervisor.ports import RegistryPort, RegistryRow
-from supervisor.run_auditor import RunAuditReport
-from supervisor.run_auditor import RunRecord as AuditRunRecord
-from supervisor.safety_gates import DEFAULT_CONCURRENCY_CEILING, KillSwitch
 from supervisor.reattach import derive_reattach_decisions
 from supervisor.reconcile import RunCompletion, derive_reconcile_actions
+from supervisor.run_auditor import RunAuditReport
+from supervisor.run_auditor import RunRecord as AuditRunRecord
+from supervisor.run_signals import has_pending_gate, latest_progress_ts
+from supervisor.safety_gates import DEFAULT_CONCURRENCY_CEILING, KillSwitch
 
 #: Default stall budget (seconds) for the Reconcile + Guard stall detection.
 DEFAULT_HANG_TIMEOUT_SECONDS = 1800.0
@@ -85,10 +85,10 @@ def build_production_cycle(
     workspace_root: str | os.PathLike[str] | None = None,
     events_log_path: str | os.PathLike[str] | None = None,
     pid_alive: Callable[[int], bool] = _pid_alive,
-    now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
     hang_timeout_seconds: float = DEFAULT_HANG_TIMEOUT_SECONDS,
-    completion_probe: Callable[[RegistryRow], "RunCompletion | None"] = lambda _row: None,
-    admitted_source: Callable[[], Sequence[RegistryRow]] = lambda: [],
+    completion_probe: Callable[[RegistryRow], RunCompletion | None] = lambda _row: None,
+    admitted_source: Callable[[], Sequence[RegistryRow]] = list,
     record_start_time: Callable[[str, str], None] | None = None,
     record_failure_detail: Callable[[str, str], None] | None = None,
     kill_switch: KillSwitch | None = None,
@@ -97,7 +97,7 @@ def build_production_cycle(
     learn_report_sink: Callable[[RunAuditReport], None] | None = None,
     attention_store: AttentionStateStore | None = None,
     notification_port: NotificationPort | None = None,
-    delivered_keys: "set[tuple[str, str, str]] | None" = None,
+    delivered_keys: set[tuple[str, str, str]] | None = None,
     concurrency_ceiling: int = DEFAULT_CONCURRENCY_CEILING,
     max_dispatches_per_cycle: int | None = None,
     dispatch_gate: Callable[[], bool] | None = None,
@@ -141,7 +141,7 @@ def build_production_cycle(
         seed = row.get("seed_path")
         return has_pending_gate(seed if isinstance(seed, str) else None)
 
-    def _hang_timeout_of(row: RegistryRow) -> "float | None":
+    def _hang_timeout_of(row: RegistryRow) -> float | None:
         """Per-run stall budget (F-4): the run's seed ``budget.hang_timeout_seconds``
         off its recorded ``seed_path``, else ``None`` → the fleet default applies."""
         seed = row.get("seed_path")
@@ -247,7 +247,9 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
     import time
 
     from supervisor.preflight import run_preflight
-    from supervisor.reconcile import ReconcileAction  # noqa: F401  (documents the reaper handoff)
+    from supervisor.reconcile import (
+        ReconcileAction,  # noqa: F401  (documents the reaper handoff)
+    )
 
     parser = argparse.ArgumentParser(prog="supervisor", description="Run the Outer Loop Supervisor.")
     parser.add_argument("--once", action="store_true", help="run a single cycle and exit")
@@ -307,13 +309,12 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
         )
     state_dir = os.environ.get("OL_SUPERVISOR_STATE_DIR", ".")
     events_log = os.path.join(state_dir, "logs", "events.jsonl")
-    from pathlib import Path
-
     # Operator drill knobs (all OFF/neutral by default — absent => unchanged behaviour):
     #  * hang-timeout override for the stall drill;
     #  * a KILL_SWITCH sentinel file in the state dir (FR-036 — refuse new dispatch);
     #  * an opt-in emergency cumulative-spend ceiling (T3#6 backstop — kill on breach).
     from decimal import Decimal
+    from pathlib import Path
 
     from supervisor.spend_backstop import EmergencySpendConfig, evaluate_spend_backstop
 
@@ -335,7 +336,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
 
     from supervisor.run_lifecycle import detect_initiative_complete, read_terminal_cost
 
-    def _completion_of(row: RegistryRow) -> "RunCompletion | None":
+    def _completion_of(row: RegistryRow) -> RunCompletion | None:
         """Terminal-completion probe: a run whose orchestrator emitted §13.1
         INITIATIVE_COMPLETE is reconciled ``complete`` (not mis-reaped ``failed`` on
         pid-death). Reads the run's state dir (the seed's sibling ``state/`` per the
@@ -347,12 +348,16 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
         if not detect_initiative_complete(state_dir):
             return None
         return RunCompletion(
-            terminated_at=datetime.now(timezone.utc).isoformat(),
+            terminated_at=datetime.now(UTC).isoformat(),
             terminal_cost_usd=read_terminal_cost(state_dir),
         )
 
     # §4.4(6) Learn wiring (Item 2): the live completed-Run source + report/corpus sinks.
-    from supervisor.attention import ESCALATION_KIND_ROUTINE, Escalation, intake_escalation
+    from supervisor.attention import (
+        ESCALATION_KIND_ROUTINE,
+        Escalation,
+        intake_escalation,
+    )
     from supervisor.cost_forecast import forecast_breaches, forecast_fleet
     from supervisor.effect_measure import (
         DEFAULT_MIN_POST_RUNS,
@@ -413,7 +418,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
 
             try:
                 cutoff = (
-                    datetime.now(timezone.utc) - timedelta(days=float(retention_raw))
+                    datetime.now(UTC) - timedelta(days=float(retention_raw))
                 ).isoformat()
                 pruned = registry.prune_events(before_iso=cutoff)
                 if pruned:
@@ -450,7 +455,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
                     f"${ceiling} — review budget / pause low-value projects"
                 ),
                 confidence=0.9,
-                raised_at=datetime.now(timezone.utc),
+                raised_at=datetime.now(UTC),
             )
             state = attention_store.load()
             attention_store.save(intake_escalation(state, escalation))
@@ -535,7 +540,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
         # store so the next Attend pass delivers them via the notification port (Item 3).
         if new_keys:
             escalations = findings_to_escalations(
-                all_findings, new_keys=set(new_keys), now=datetime.now(timezone.utc)
+                all_findings, new_keys=set(new_keys), now=datetime.now(UTC)
             )
             state = attention_store.load()
             for escalation in escalations:
@@ -557,7 +562,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
     # FUP-0879: seed the dedup ledger from the DB so a loop restart does NOT re-send escalations
     # that were already delivered (the in-memory-only ledger reset on each of the 4 restarts in the
     # 2026-06-11 run, re-emailing the routine offers). Keys are pipe-joined project|gate|raised_at.
-    def _key_from_str(s: str) -> "tuple[str, str, str]":
+    def _key_from_str(s: str) -> tuple[str, str, str]:
         parts = s.split("|", 2)
         while len(parts) < 3:
             parts.append("")
@@ -574,7 +579,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
     if not isinstance(notification_port, NullNotificationPort):
         print("supervisor: notification delivery ENABLED (OL_SUPERVISOR_SMTP_* configured).")
 
-    def _effect_parse_ts(value: object) -> "datetime | None":
+    def _effect_parse_ts(value: object) -> datetime | None:
         # events read from the DB carry a tz-aware datetime ts_utc (timestamptz); runs carry
         # ISO strings. Handle BOTH — a str-only parser silently disabled the run-window filter
         # (events DB ts is a datetime), putting every event in every bucket (live-found 2026-06-08).
@@ -605,7 +610,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
             print(f"supervisor: effect measure skipped ({exc}).")
             return
         # Pre-bucket each completed run's events by its [spawned_at, terminated_at] window (D2).
-        buckets: list[tuple[str, "datetime | None", "datetime | None", list[dict[str, object]]]] = []
+        buckets: list[tuple[str, datetime | None, datetime | None, list[dict[str, object]]]] = []
         for run in runs:
             pid = run.get("project_id")
             if not isinstance(pid, str):
@@ -663,7 +668,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
                         f"({record.detail}) — consider reverting via cf-* / re-propose"
                     ),
                     confidence=0.9,
-                    raised_at=datetime.now(timezone.utc),
+                    raised_at=datetime.now(UTC),
                 )
                 state = attention_store.load()
                 attention_store.save(intake_escalation(state, escalation))
@@ -709,7 +714,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
     # Max internal quota is not queryable; the operator sets the per-window proxy-dollar budget.
     from supervisor.usage_window import UsageEvent, UsageWindow, evaluate_usage_windows
 
-    def _decimal_env(name: str) -> "Decimal | None":
+    def _decimal_env(name: str) -> Decimal | None:
         raw = os.environ.get(name)
         if not raw:
             return None
@@ -742,7 +747,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
         if not usage_windows:
             return True
         widest = max(w.duration for w in usage_windows)
-        now_dt = datetime.now(timezone.utc)
+        now_dt = datetime.now(UTC)
         since = (now_dt - widest).isoformat()
         try:
             rows = registry.read_usage_events_since(since)
@@ -777,7 +782,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
             attention_store.save(intake_escalation(state, escalation))
         return decision.dispatch_allowed
 
-    def _const_gate(allowed: bool) -> "Callable[[], bool]":
+    def _const_gate(allowed: bool) -> Callable[[], bool]:
         """A by-value dispatch gate for this cycle's usage verdict (typed for mypy --strict)."""
         return lambda: allowed
 
@@ -802,7 +807,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
         "paused_gate": "NEEDS OPERATOR ANSWER",
     }
 
-    def _lifecycle_snapshot() -> "dict[str, str]":
+    def _lifecycle_snapshot() -> dict[str, str]:
         try:
             return {
                 str(p.get("project_id")): str(p.get("lifecycle_state") or "")
@@ -817,9 +822,9 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
     # should NOT read as a terminal stop. So STOP emails are DEFERRED one cycle: arm a failed/
     # halted project, and only email if it is STILL stopped on the following cycle (not recovered).
     # started/finished email immediately. _pending_stop maps project_id -> the armed stop state.
-    _pending_stop: "dict[str, str]" = {}
+    _pending_stop: dict[str, str] = {}
 
-    def _send_milestone(pid: str, state: str, verb: str, prev_state: "str | None") -> None:
+    def _send_milestone(pid: str, state: str, verb: str, prev_state: str | None) -> None:
         subject = f"[ol-build supervisor] project {pid} {verb}"
         body = (
             f"Project {pid} is now '{state}' ({verb}).\n"
@@ -831,7 +836,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live DB + 
         except Exception as exc:  # noqa: BLE001 - a notify failure must never abort the cycle
             print(f"supervisor: lifecycle email for {pid} skipped ({exc}).")
 
-    def _emit_lifecycle(prev: "dict[str, str]", curr: "dict[str, str]") -> None:
+    def _emit_lifecycle(prev: dict[str, str], curr: dict[str, str]) -> None:
         if not _notify_lifecycle:
             return
         # 1. Immediate milestones — started (-> running) / finished (-> complete).
@@ -931,8 +936,8 @@ if __name__ == "__main__":  # pragma: no cover
 
 
 __all__ = [
-    "build_production_cycle",
-    "main",
     "DEFAULT_HANG_TIMEOUT_SECONDS",
+    "build_production_cycle",
     "format_pid_start_time",  # re-exported from pid_probe (FR-013 live-probe call-site)
+    "main",
 ]
