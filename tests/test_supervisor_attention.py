@@ -10,7 +10,7 @@ notification send, and no file I/O.
 """
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta
+from datetime import UTC, datetime, time, timedelta
 
 import pytest
 
@@ -37,9 +37,9 @@ from supervisor.attention import (
 # time value the policy keys on is supplied here.
 BATCH_WINDOW = timedelta(minutes=15)
 # 14:00 — outside the QUIET_HOURS window below (an active window).
-ACTIVE_NOW = datetime(2026, 6, 5, 14, 0, 0)
+ACTIVE_NOW = datetime(2026, 6, 5, 14, 0, 0, tzinfo=UTC)
 # 23:00 — inside the QUIET_HOURS window below (a suppressed window).
-QUIET_NOW = datetime(2026, 6, 5, 23, 0, 0)
+QUIET_NOW = datetime(2026, 6, 5, 23, 0, 0, tzinfo=UTC)
 # 22:00 -> 07:00, wrapping past midnight.
 QUIET_HOURS = QuietHours(start=time(22, 0), end=time(7, 0))
 

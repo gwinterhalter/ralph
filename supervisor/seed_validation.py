@@ -114,9 +114,9 @@ def _declares_top_level_key(frontmatter: Sequence[str], key: str) -> bool:
 
 
 __all__ = [
-    "SS_SEED_MISSING",
-    "SS_NO_FRONTMATTER",
-    "SS_MISSING_REQUIRED_FIELD",
     "REQUIRED_SEED_KEYS",
+    "SS_MISSING_REQUIRED_FIELD",
+    "SS_NO_FRONTMATTER",
+    "SS_SEED_MISSING",
     "SeedReviewValidator",
 ]

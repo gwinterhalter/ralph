@@ -25,7 +25,7 @@ import os
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Protocol, Self, cast
 
 from supervisor import transitions
 from supervisor.effect_measure import EffectRecord
@@ -58,7 +58,7 @@ class _DBCursor(Protocol):
 
     def fetchone(self) -> Sequence[object] | None: ...
 
-    def __enter__(self) -> _DBCursor: ...
+    def __enter__(self) -> Self: ...
 
     def __exit__(self, *exc: object) -> None: ...
 
@@ -324,7 +324,7 @@ class Registry:
     # (FR-053). Concrete-only — NOT on the RegistryPort Protocol (no test-double ripple); the
     # production Learn wiring consumes them. Column names are SQL literals; values parameterised.
 
-    def upsert_learning_records(self, records: "Sequence[LearningRecord]") -> None:
+    def upsert_learning_records(self, records: Sequence[LearningRecord]) -> None:
         """UPSERT the per-completed-Run cost/duration/status corpus (keyed by run_id; idempotent)."""
         for rec in records:
             self._execute_write(
@@ -346,7 +346,7 @@ class Registry:
             )
 
     def upsert_audit_findings(
-        self, findings: "Sequence[AuditFinding]", *, runs_audited: int
+        self, findings: Sequence[AuditFinding], *, runs_audited: int
     ) -> list[str]:
         """UPSERT the Run-Auditor findings (keyed by finding_key) and return the NEW finding_keys.
 
@@ -408,7 +408,7 @@ class Registry:
         )
 
     def upsert_correction_attempts(
-        self, attempts: "Sequence[CorrectionAttempt]"
+        self, attempts: Sequence[CorrectionAttempt]
     ) -> None:
         """Capture correction-loop attempts (ol4), keyed by event_uuid (idempotent — ON CONFLICT
         DO NOTHING, since a logged correction event is immutable)."""
@@ -438,7 +438,7 @@ class Registry:
             rows = cur.fetchall()
         return [dict(zip(cols, row)) for row in rows]
 
-    def upsert_audit_effect(self, record: "EffectRecord") -> None:
+    def upsert_audit_effect(self, record: EffectRecord) -> None:
         """UPSERT a measured learning effect (ol7), recomputed per measure pass (keyed by finding_key)."""
         self._execute_write(
             "INSERT INTO run_audit_effects (finding_key, kind, subject, applied_at, before_metric, "
@@ -546,7 +546,7 @@ class Registry:
             rows = cur.fetchall()
         return [dict(zip(PROJECT_COLUMNS, row)) for row in rows]
 
-    def upsert_events(self, events: "Sequence[Mapping[str, object]]") -> int:
+    def upsert_events(self, events: Sequence[Mapping[str, object]]) -> int:
         """Ingest event-envelope dicts into the ``events`` table; return the count newly inserted.
 
         Idempotent: keyed by ``event_uuid`` (``ON CONFLICT DO NOTHING``), so re-reading an
@@ -623,7 +623,7 @@ class Registry:
             cur.execute(sql, (since_iso,))
             rows = cur.fetchall()
 
-        def _cost(payload: object) -> "Decimal | None":
+        def _cost(payload: object) -> Decimal | None:
             if isinstance(payload, str):
                 try:
                     payload = json.loads(payload)

@@ -280,7 +280,7 @@ def enrich_candidate_from_seed(
 
 
 def open_work_counts_for(
-    rows: "Sequence[RegistryRow]",
+    rows: Sequence[RegistryRow],
     *,
     workspace_root: str | os.PathLike[str] | None = None,
     seed_glob: str = _SEED_GLOB,
@@ -358,9 +358,9 @@ def default_candidate_enricher(row: RegistryRow) -> RegistryRow:
 
 __all__ = [
     "WORKSPACE_ROOT_ENV",
+    "default_candidate_enricher",
     "enrich_candidate_from_seed",
+    "make_seed_candidate_enricher",
     "open_work_counts_for",
     "seed_hang_timeout_seconds",
-    "make_seed_candidate_enricher",
-    "default_candidate_enricher",
 ]

@@ -9,7 +9,7 @@ the dedup, and the shared-store flow against a fake port (no socket).
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -23,7 +23,7 @@ from supervisor.cycle_wiring import AttendConfig, AttentionStateStore, run_atten
 
 pytestmark = pytest.mark.unit
 
-_T0 = datetime(2026, 6, 7, 12, 0, 0, tzinfo=timezone.utc)
+_T0 = datetime(2026, 6, 7, 12, 0, 0, tzinfo=UTC)
 
 
 def _esc(pid: str = "p1") -> Escalation:

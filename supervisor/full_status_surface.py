@@ -34,10 +34,11 @@ so the whole module — and the unit suite over it — stays hermetic.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 from supervisor.status_surface import (
     ACTIVE_RUN_RUNNING,
@@ -87,7 +88,7 @@ COST_NON_BINDING_NOTE = (
 # numeric(10,4) scale (mirrors run_lifecycle.TERMINAL_COST_SCALE so a rendered
 # total reads at the same grain the substrate stores). No float anywhere (NFR-007).
 _COST_SCALE = Decimal("0.0001")
-_ZERO_COST = Decimal("0").quantize(_COST_SCALE)
+_ZERO_COST = Decimal(0).quantize(_COST_SCALE)
 
 
 @dataclass(frozen=True)
@@ -309,8 +310,10 @@ def render_full_snapshot(snapshot: FullFleetSnapshot) -> str:
 
     lines = [
         "Outer Loop Supervisor — Full Fleet Status",
-        f"as of {snapshot.as_of.isoformat()} | "
-        f"refresh every {_format_interval(snapshot.refresh_interval)}",
+        (
+            f"as of {snapshot.as_of.isoformat()} | "
+            f"refresh every {_format_interval(snapshot.refresh_interval)}"
+        ),
         "",
         header,
         rule,
@@ -436,17 +439,17 @@ def run_status_loop(
 
 
 __all__ = [
-    "DEFAULT_REFRESH_INTERVAL",
-    "DEFAULT_HEARTBEAT_STALE_AFTER",
-    "HEARTBEAT_HEALTHY",
-    "HEARTBEAT_STALLED",
-    "HEARTBEAT_NA",
     "COST_COLUMN_LABEL",
     "COST_NON_BINDING_NOTE",
-    "ProjectFullStatusRow",
+    "DEFAULT_HEARTBEAT_STALE_AFTER",
+    "DEFAULT_REFRESH_INTERVAL",
+    "HEARTBEAT_HEALTHY",
+    "HEARTBEAT_NA",
+    "HEARTBEAT_STALLED",
     "FullFleetSnapshot",
+    "ProjectFullStatusRow",
+    "RefreshScheduler",
     "build_full_fleet_snapshot",
     "render_full_snapshot",
-    "RefreshScheduler",
     "run_status_loop",
 ]

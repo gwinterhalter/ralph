@@ -18,7 +18,7 @@ source, the thin ``main()`` reader, is NOT under closure test per gate
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -42,7 +42,7 @@ WRITE_METHODS = frozenset({"set_lifecycle_state", "record_run", "update_run_stat
 
 # A fixed build instant so the FR-061 freshness + FR-062 staleness assertions are
 # deterministic (no wall-clock read in the pure core — ``now`` is injected).
-NOW = datetime(2026, 6, 5, 12, 30, 0)
+NOW = datetime(2026, 6, 5, 12, 30, 0, tzinfo=UTC)
 
 
 def _project_row(
@@ -127,7 +127,7 @@ RUNNING: list[RegistryRow] = [
 
 OPEN_WORK_COUNTS = {"c1": 3, "c2": 7, "r1": 2, "r2": 5}
 CUMULATIVE_COSTS = {
-    "c1": Decimal("0"),
+    "c1": Decimal(0),
     "c2": Decimal("1.2345"),
     "r1": Decimal("4.5000"),
     "r2": Decimal("10.0001"),

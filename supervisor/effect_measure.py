@@ -23,8 +23,8 @@ Per-kind signal (one value per run; ``None`` = the run is not evidence and is ex
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 # Event-type / payload literals (mirror the emitters; kept local so this module imports no privates).
 _GATE_FIRE = "gate_fire"
@@ -85,7 +85,7 @@ def _measure_kind(kind: str, binding_class: str | None) -> str:
     return kind
 
 
-def run_signal(measure_kind: str, subject: str, events: "list[dict[str, object]] | tuple[dict[str, object], ...]") -> float | None:
+def run_signal(measure_kind: str, subject: str, events: list[dict[str, object]] | tuple[dict[str, object], ...]) -> float | None:
     """The per-run effect signal for one subject (``None`` = run is not evidence). Pure; never raises."""
     if measure_kind == _K_GATE:
         fired = escalated = False
@@ -171,7 +171,7 @@ def _event_references_subject(measure_kind: str, subject: str, event: dict[str, 
 def relevant_project_ids(
     kind: str,
     subject: str,
-    events: "list[dict[str, object]] | tuple[dict[str, object], ...]",
+    events: list[dict[str, object]] | tuple[dict[str, object], ...],
     *,
     binding_class: str | None = None,
 ) -> set[str]:
@@ -189,8 +189,8 @@ def measure_effect(
     kind: str,
     subject: str,
     *,
-    before_runs: "list[list[dict[str, object]]]",
-    after_runs: "list[list[dict[str, object]]]",
+    before_runs: list[list[dict[str, object]]],
+    after_runs: list[list[dict[str, object]]],
     binding_class: str | None = None,
     finding_key: str = "",
     applied_at: str | None = None,
@@ -238,13 +238,13 @@ def measure_effect(
 
 
 __all__ = [
-    "EffectRecord",
-    "PENDING",
     "CONFIRMED",
-    "NO_EFFECT",
-    "REGRESSED",
     "DEFAULT_MIN_POST_RUNS",
-    "run_signal",
-    "relevant_project_ids",
+    "NO_EFFECT",
+    "PENDING",
+    "REGRESSED",
+    "EffectRecord",
     "measure_effect",
+    "relevant_project_ids",
+    "run_signal",
 ]

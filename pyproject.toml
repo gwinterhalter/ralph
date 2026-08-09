@@ -16,6 +16,15 @@ dependencies = [
     # inside the probe with a graceful ImportError -> None fallback, so the hermetic
     # unit suite stays runnable without it; required in deployment for FR-013 to fire.
     "psutil>=5.9",
+    # supervisor/candidate_enrichment.py carries an UNCONDITIONAL module-level
+    # `import yaml` (it parses seed.md front-matter), and webui/server/app.py imports
+    # that module at import time — so the FastAPI adapter, the live-backend E2E server
+    # and 19 modules of the hermetic unit suite all fail with ModuleNotFoundError
+    # without it. It was never declared: nothing in the dependency closure of
+    # `pip install -e ".[web]"` pulls PyYAML transitively (verified in a clean venv).
+    # The `ignore_missing_imports` entry for `yaml` below covers the TYPE-CHECK env
+    # (no bundled stubs); it never made the runtime import optional.
+    "PyYAML>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -27,6 +36,23 @@ web = [
     "uvicorn>=0.29",
     "httpx>=0.27",
 ]
+
+[tool.setuptools.packages.find]
+# EXPLICIT package discovery. Without this, setuptools falls back to flat-layout
+# auto-discovery, finds 10 top-level directories (New, ops, lib, hooks, webui,
+# skills, schemas, flowchart, migrations, supervisor) and ABORTS with
+# "Multiple top-level packages discovered in a flat-layout" — which is what broke
+# `pip install -e .` on every webui-ci run since 2026-06-09.
+# The distribution's real Python packages are exactly two, and both are shipped:
+#   supervisor/  — the core package ([project] name, the `mypy --strict` gate target)
+#   webui/       — the FastAPI control-panel server the `[web]` extra exists for, and
+#                  the package the node job's live-backend E2E imports
+#                  (`python -m uvicorn webui.server.demo:app`).
+# Every other top-level directory is shell/SQL/JSON/docs and holds no importable
+# Python package (no __init__.py) — they are repo content, not distribution content.
+where = ["."]
+include = ["supervisor*", "webui*"]
+namespaces = false
 
 [tool.mypy]
 # FUP-0856: the enforced `mypy --strict` gate is PRODUCTION-only — the

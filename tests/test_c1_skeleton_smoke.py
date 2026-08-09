@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
@@ -65,7 +65,7 @@ WRITE_METHODS = frozenset(
 )
 
 # A fixed build instant so the FR-061 freshness assertion is deterministic.
-NOW = datetime(2026, 6, 5, 12, 30, 0)
+NOW = datetime(2026, 6, 5, 12, 30, 0, tzinfo=UTC)
 
 
 class _RecordingZeroRegistry:
@@ -133,7 +133,7 @@ def _spy_step_order(
     for step in EXPECTED_ORDER:
         original = getattr(cycle, f"_{step}")
 
-        def make_wrapper(step_name: str, real):  # noqa: ANN001 — local closure
+        def make_wrapper(step_name: str, real):
             def wrapper() -> None:
                 recorder.append(step_name)
                 return real()

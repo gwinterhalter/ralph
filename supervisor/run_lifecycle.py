@@ -19,11 +19,11 @@ import json
 # subprocess here only waits on a caller-supplied Popen handle (type + .wait());
 # it spawns no process of its own.
 import subprocess  # nosec B404
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
-from typing import Callable
 
 from supervisor.ports import RegistryPort
 
@@ -49,7 +49,7 @@ TERMINAL_COST_SCALE = Decimal("0.0001")
 
 def _utc_now_iso() -> str:
     """The default ``terminated_at`` clock — an ISO-8601 UTC timestamp."""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 @dataclass(frozen=True)
@@ -94,7 +94,7 @@ def read_terminal_cost(state_dir: Path) -> Decimal:
     """
     spend_file = state_dir / SPEND_FILE_NAME
     if not spend_file.is_file():
-        return Decimal("0").quantize(TERMINAL_COST_SCALE)
+        return Decimal(0).quantize(TERMINAL_COST_SCALE)
     data = json.loads(spend_file.read_text(encoding="utf-8"), parse_float=Decimal)
     raw = data.get("total_spend_usd", 0)
     cost = raw if isinstance(raw, Decimal) else Decimal(str(raw))
@@ -189,15 +189,15 @@ def reconcile_run_complete(
 
 __all__ = [
     "INITIATIVE_COMPLETE_SIGNAL",
-    "RUN_STATUS_COMPLETE",
     "LIFECYCLE_COMPLETE",
-    "SPEND_FILE_NAME",
     "ORCHESTRATOR_LOG_REL",
+    "RUN_STATUS_COMPLETE",
+    "SPEND_FILE_NAME",
     "TERMINAL_COST_SCALE",
     "RunTerminal",
-    "wait_for_orchestrator",
-    "read_terminal_cost",
     "detect_initiative_complete",
-    "resolve_run_terminal",
+    "read_terminal_cost",
     "reconcile_run_complete",
+    "resolve_run_terminal",
+    "wait_for_orchestrator",
 ]

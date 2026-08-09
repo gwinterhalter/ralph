@@ -25,7 +25,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[web]"
-          pip install ruff mypy pytest
+          # Pinned deliberately: an unpinned linter re-strictens whenever upstream
+          # broadens its default rule set, so the gate changes verdict with no code
+          # change. Bumping these is a reviewable event that triages the new findings.
+          pip install ruff==0.16.2 mypy==2.3.0 pytest==9.1.1
       - name: Ruff
         run: python -m ruff check supervisor tests webui
       - name: Mypy (strict, supervisor)

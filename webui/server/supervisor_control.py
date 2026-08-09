@@ -8,6 +8,7 @@ Injected into the app so tests substitute a fake runner (no real spawn).
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import sys
@@ -29,7 +30,7 @@ class SupervisorRunner:
         self.pid_file = Path(pid_file)
 
     def _spawn(self, args: list[str]) -> int:
-        proc = subprocess.Popen(  # noqa: S603 - argv built, not shell
+        proc = subprocess.Popen(
             [sys.executable, "-m", "supervisor", *args],
             cwd=str(self.repo_root), env=dict(os.environ),
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
@@ -56,12 +57,12 @@ class SupervisorRunner:
         if pid is None:
             return False
         try:
-            import psutil  # noqa: PLC0415
+            import psutil
 
             if psutil.pid_exists(pid):
                 psutil.Process(pid).terminate()
-        except Exception:  # noqa: BLE001 - best-effort stop
-            pass
+        except Exception:
+            logging.getLogger(__name__).debug("best-effort stop failed", exc_info=True)
         self.pid_file.unlink(missing_ok=True)
         return True
 
@@ -70,7 +71,7 @@ class SupervisorRunner:
         if pid is None:
             return False
         try:
-            import psutil  # noqa: PLC0415
+            import psutil
 
             return bool(psutil.pid_exists(pid))
         except Exception:  # noqa: BLE001

@@ -70,4 +70,4 @@ def probe_pid_start_time(pid: int) -> str | None:
         return None
 
 
-__all__ = ["pid_alive", "format_pid_start_time", "probe_pid_start_time"]
+__all__ = ["format_pid_start_time", "pid_alive", "probe_pid_start_time"]

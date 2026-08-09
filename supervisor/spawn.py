@@ -156,7 +156,7 @@ class OrchestratorSpawnPort:
                 # shell=False; argv is framework-internal constants (bash +
                 # orchestrator.sh + seed path), never caller text — no shell-injection
                 # vector, so the B603/S603 subprocess warnings are suppressed.
-                process = subprocess.Popen(  # noqa: S603  # nosec B603
+                process = subprocess.Popen(  # nosec B603
                     [self._bash, str(self._orchestrator_script), str(seed)],
                     cwd=str(cwd),
                     stdout=stream,
@@ -198,4 +198,4 @@ class OrchestratorSpawnPort:
         return None
 
 
-__all__ = ["SPAWN_LOG_SUFFIX", "SpawnHandle", "OrchestratorSpawnPort"]
+__all__ = ["SPAWN_LOG_SUFFIX", "OrchestratorSpawnPort", "SpawnHandle"]

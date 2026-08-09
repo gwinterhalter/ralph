@@ -6,7 +6,7 @@ composition that applies it through the RegistryPort write seam.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -29,7 +29,7 @@ from supervisor.reconcile import (
 
 pytestmark = pytest.mark.unit
 
-_NOW = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+_NOW = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
 _HANG = 1800.0
 
 

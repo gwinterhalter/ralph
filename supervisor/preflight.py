@@ -166,13 +166,13 @@ if __name__ == "__main__":  # pragma: no cover
 
 
 __all__ = [
-    "SchemaSnapshot",
-    "PreflightResult",
-    "evaluate_preflight",
-    "introspect",
-    "run_preflight",
+    "REQUIRED_ACTIVE_RUN_INDEX",
     "REQUIRED_PROJECT_COLUMNS",
     "REQUIRED_RALPH_RUNS_COLUMNS",
     "REQUIRED_RALPH_RUNS_NOT_NULL",
-    "REQUIRED_ACTIVE_RUN_INDEX",
+    "PreflightResult",
+    "SchemaSnapshot",
+    "evaluate_preflight",
+    "introspect",
+    "run_preflight",
 ]

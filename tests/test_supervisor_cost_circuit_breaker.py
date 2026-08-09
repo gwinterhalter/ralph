@@ -39,7 +39,7 @@ from supervisor.safety_gates import ESCALATION_TIER_TOP, PAUSED_SAFETY
 # A fixed config — every threshold the detectors key on is supplied here (the module
 # reads no seed). spend_delta_multiple 3x over a trailing window of 3; K=J=3.
 CONFIG = BreakerConfig(
-    spend_delta_multiple=Decimal("3"),
+    spend_delta_multiple=Decimal(3),
     trailing_window=3,
     spend_without_closure_k=3,
     target_loop_j=3,
@@ -174,8 +174,8 @@ def test_fr042_cost_surfacing_is_non_binding() -> None:
     assert evaluate(healthy, CONFIG).tripped is False  # high cost, no anomaly => no trip
 
     summary = summarize_cost(healthy)
-    assert summary.cumulative_usd == Decimal("4000")
-    assert summary.per_iteration_usd == (Decimal("1000"),) * 4
+    assert summary.cumulative_usd == Decimal(4000)
+    assert summary.per_iteration_usd == (Decimal(1000),) * 4
     assert summary.project_id == "proj-a"
 
     # Mechanically: no field/parameter is a dollar cap anywhere in the module.
@@ -268,8 +268,8 @@ def test_trailing_median_even_and_odd_windows() -> None:
     """``trailing_median_spend`` averages the two middle values for an even window and
     returns the middle one for an odd window; a degenerate window yields zero."""
     odd = [_obs(spend="10"), _obs(spend="30"), _obs(spend="20")]
-    assert trailing_median_spend(odd, window=3) == Decimal("20")
+    assert trailing_median_spend(odd, window=3) == Decimal(20)
     even = [_obs(spend="10"), _obs(spend="20"), _obs(spend="30"), _obs(spend="40")]
-    assert trailing_median_spend(even, window=4) == Decimal("25")
+    assert trailing_median_spend(even, window=4) == Decimal(25)
     assert trailing_median_spend([], window=3) == Decimal(0)
     assert trailing_median_spend(odd, window=0) == Decimal(0)

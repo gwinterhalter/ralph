@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from decimal import Decimal
+from typing import Self
 
 import pytest
 
@@ -31,7 +32,6 @@ from supervisor.ports import RegistryPort, RegistryRow
 from supervisor.registry import RUN_STATUSES, Registry
 from supervisor.safety_gates import BlastRadiusScope
 
-
 # --- A fake psycopg connection: records SQL, serves programmed read results ---
 # Mirrors the OLB-02 suite's in-memory harness (test_supervisor_registry.py) so
 # the reconcile-field extension is proven against the real Registry write surface.
@@ -44,7 +44,7 @@ class _FakeCursor:
     def __init__(self, conn: _FakeConn) -> None:
         self._conn = conn
 
-    def __enter__(self) -> _FakeCursor:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *exc: object) -> None:
@@ -145,7 +145,7 @@ def test_reconcile_run_rejects_out_of_set_status_before_any_write(
     with pytest.raises(ValueError):
         registry.reconcile_run(
             "p1", "bogus", terminated_at="2026-06-05T00:00:00+00:00",
-            terminal_cost_usd=Decimal("0"),
+            terminal_cost_usd=Decimal(0),
         )
 
     assert conn.executed == []

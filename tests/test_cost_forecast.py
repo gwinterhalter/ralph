@@ -52,7 +52,7 @@ def test_forecast_no_cost_history_is_zero_confidence() -> None:
     fc = forecast_fleet([], {"newproj": 10})
     p = fc.projects[0]
     assert p.project_id == "newproj"
-    assert p.projected_remaining_usd == Decimal("0")
+    assert p.projected_remaining_usd == Decimal(0)
     assert p.confidence == 0.0
 
 
@@ -66,9 +66,9 @@ def test_confidence_scales_with_runs() -> None:
 def test_render_and_breaches() -> None:
     fc = forecast_fleet([_row("p", "10.0")], {"p": 2})  # total 10 + 20 = 30
     assert fc.fleet_projected_total_usd == Decimal("30.0")
-    assert forecast_breaches(fc, Decimal("25")) is True
-    assert forecast_breaches(fc, Decimal("100")) is False
-    out = render_forecast(fc, ceiling_usd=Decimal("25"))
+    assert forecast_breaches(fc, Decimal(25)) is True
+    assert forecast_breaches(fc, Decimal(100)) is False
+    out = render_forecast(fc, ceiling_usd=Decimal(25))
     assert "projected total $30.0" in out
     assert "OVER budget" in out
 

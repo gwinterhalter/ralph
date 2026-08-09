@@ -43,7 +43,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import cast
 
@@ -65,7 +65,7 @@ from supervisor.cycle_wiring import (
 )
 from supervisor.ports import RegistryRow
 from supervisor.registry import DBConnection, Registry
-from supervisor.repair_policy import ReversibilityClass, RepairKind
+from supervisor.repair_policy import RepairKind, ReversibilityClass
 
 # --- Live branch gating (structural production-safety guard) ------------------
 DB_URL_ENV = "OL_SUPERVISOR_DB_URL"
@@ -117,7 +117,7 @@ _BREAKER_CONFIG = BreakerConfig(
 # (seed v1.6.2 gate_policy.confidence_threshold = 0.7).
 _CONFIDENCE_THRESHOLD = 0.7
 
-_RAISED_AT = datetime(2026, 6, 5, 12, 0, tzinfo=timezone.utc)
+_RAISED_AT = datetime(2026, 6, 5, 12, 0, tzinfo=UTC)
 
 
 # --- Branch substrate provisioning + restore (row-state only; no reshape) ------

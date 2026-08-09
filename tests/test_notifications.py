@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from email.message import EmailMessage
+from typing import Self
 
 import pytest
 
@@ -23,7 +24,7 @@ from supervisor.notifications import (
 
 pytestmark = pytest.mark.unit
 
-_T0 = datetime(2026, 1, 1, 9, 0, 0, tzinfo=timezone.utc)
+_T0 = datetime(2026, 1, 1, 9, 0, 0, tzinfo=UTC)
 
 
 def _esc(pid: str, *, tier_kind: str = "safety_gate", reversible: bool = False) -> Escalation:
@@ -60,7 +61,7 @@ class _FakeSmtp:
         self.sent.append(msg)
         return {}
 
-    def __enter__(self) -> "_FakeSmtp":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *exc: object) -> object:

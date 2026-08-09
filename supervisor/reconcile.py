@@ -111,13 +111,13 @@ def _seconds_since(iso_ts: str, now: datetime) -> float | None:
     return (now - then).total_seconds()
 
 
-def _no_completion(_row: RegistryRow) -> "RunCompletion | None":
+def _no_completion(_row: RegistryRow) -> RunCompletion | None:
     """Default completion probe: never completed (preserves the failed/stall-only
     behaviour for callers that don't wire a terminal-artifact probe)."""
     return None
 
 
-def _no_hang_override(_row: RegistryRow) -> "float | None":
+def _no_hang_override(_row: RegistryRow) -> float | None:
     """Default per-run hang-budget override: none (use the scalar ``hang_timeout_seconds``)."""
     return None
 
@@ -135,8 +135,8 @@ def derive_reconcile_actions(
     now: datetime,
     hang_timeout_seconds: float,
     progress_at: Callable[[RegistryRow], str | None] = _default_progress_at,
-    completion_of: Callable[[RegistryRow], "RunCompletion | None"] = _no_completion,
-    hang_timeout_of: Callable[[RegistryRow], "float | None"] = _no_hang_override,
+    completion_of: Callable[[RegistryRow], RunCompletion | None] = _no_completion,
+    hang_timeout_of: Callable[[RegistryRow], float | None] = _no_hang_override,
     gate_pending_of: Callable[[RegistryRow], bool] = _no_gate_pending,
 ) -> list[ReconcileAction]:
     """Return the terminal reconciliations owed for ``active_runs``.
@@ -222,17 +222,17 @@ def derive_reconcile_actions(
 
 
 __all__ = [
+    "LIFECYCLE_COMPLETE",
+    "LIFECYCLE_FAILED",
+    "LIFECYCLE_PAUSED_GATE",
+    "REASON_COMPLETED",
+    "REASON_DEAD_PID",
+    "REASON_PENDING_GATE",
+    "REASON_STALLED",
+    "RUN_COMPLETE",
+    "RUN_FAILED",
+    "RUN_HALTED",
     "ReconcileAction",
     "RunCompletion",
     "derive_reconcile_actions",
-    "RUN_FAILED",
-    "RUN_HALTED",
-    "RUN_COMPLETE",
-    "LIFECYCLE_FAILED",
-    "LIFECYCLE_PAUSED_GATE",
-    "LIFECYCLE_COMPLETE",
-    "REASON_DEAD_PID",
-    "REASON_STALLED",
-    "REASON_COMPLETED",
-    "REASON_PENDING_GATE",
 ]

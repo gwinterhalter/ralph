@@ -98,9 +98,9 @@ def derive_reattach_decisions(
 
 
 __all__ = [
-    "ReattachDecision",
-    "derive_reattach_decisions",
-    "DECISION_REATTACH",
     "DECISION_ORPHAN_DEAD",
     "DECISION_ORPHAN_REUSED",
+    "DECISION_REATTACH",
+    "ReattachDecision",
+    "derive_reattach_decisions",
 ]
