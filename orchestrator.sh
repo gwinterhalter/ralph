@@ -22,7 +22,7 @@ set -euo pipefail
 # contains .claude/skills. Truly portable across machines/drive letters (the prior hardcoded
 # "K:/Claude Code Factory/V3/Project_Docs" was stale and silently broke rl-* slash-command resolution,
 # forcing an `export CLAUDE_SKILLS_DIR=` at every dispatch). Still env-overridable via the `:-`.
-# FUP-1785 (2026-08-09): the 2026-07-29 derivation used a bare `pwd`, which under Git Bash/MSYS
+# FUP-1811 (2026-08-09): the 2026-07-29 derivation used a bare `pwd`, which under Git Bash/MSYS
 # returns a POSIX path (`/k/OneDrive - .../Factory_V3`). `claude` is a WINDOWS-NATIVE binary and the
 # invocation below is deliberately env-prefixed MSYS_NO_PATHCONV=1 (FUP-0823), so that POSIX form is
 # handed through untranslated, `--add-dir` resolves to nothing, the .claude/skills tree never loads,
