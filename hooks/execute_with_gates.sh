@@ -13,6 +13,19 @@ source "$SCRIPT_DIR/../lib/notify.sh"
 # shellcheck source=../lib/events.sh
 # FUP-0800 Phase 2: event-log emit helper (gate-broker + executor emits, Comprehensive_Event_Log_Spec v1.1).
 source "$SCRIPT_DIR/../lib/events.sh"
+# shellcheck source=../lib/cost_ledger.sh
+# FUP-1451: this hook runs as its own process and holds the three most expensive call sites in
+# the system (executor $72.35, report-recovery $22.91, answerer) — none of which recorded a cent
+# before this. Sourcing the shared ledger is what puts them on the same basis as everything else.
+source "$SCRIPT_DIR/../lib/cost_ledger.sh"
+# shellcheck source=../lib/redact.sh
+# FUP-1635: this hook copies `.permission_denials` VERBATIM out of the executor's result envelope
+# into `escalations/auto_mode_denial_*.json`, and each denial carries the full text of the script
+# the executor tried to run. The executor is an LLM authoring shell ad hoc, so nothing structurally
+# prevents a resolved credential landing in that text and becoming append-only record. Measured on
+# the 2026-08-02 factory_dryrun run: 10 denials across 3 escalation files, every one carrying an env
+# var NAME and none a value — latent, not realised, and unguarded. redact_artefact closes it.
+source "$SCRIPT_DIR/../lib/redact.sh"
 
 SEED="${1:?usage: execute_with_gates.sh <seed_path> <iter_dir>}"
 ITER_DIR="${2:?usage: execute_with_gates.sh <seed_path> <iter_dir>}"
@@ -197,7 +210,10 @@ for req in "$ITER_DIR"/gate_request_"${ITER}"_*.json; do
   # both broke naming + raced/overwrote the Answerer's JSON with markdown text.
   req_suffix="$(basename "$req" .json)"; req_suffix="${req_suffix#gate_request_}"
   resp_file="$ITER_DIR/gate_response_${req_suffix}.json"   # canonical FR-008 path — Answerer-written
-  answerer_stdout_file="$ITER_DIR/answerer_stdout_${req_suffix}.md"
+  # FUP-1451: capture the answerer as a JSON envelope so its cost is recoverable. The former
+  # .md capture was written and never read by anything in this repo, so nothing depends on the
+  # text shape; an unread blob is a poor trade for an unaccounted call.
+  answerer_stdout_file="$ITER_DIR/answerer_stdout_${req_suffix}.json"
   # FUP-0721 (seed schema 1.2): optional answerer_model override; see EXECUTOR_MODEL block
   # below for the read-and-flag idiom. Resolved here (per-dispatch site rather than top-of-
   # script) so the resolution is colocated with the consumer call site for grep-ability.
@@ -211,7 +227,14 @@ for req in "$ITER_DIR"/gate_request_"${ITER}"_*.json; do
   emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "answerer" "role_call" "" "$gate_id" "gate"
   EVENT_ANS_T0="$(date +%s%3N 2>/dev/null || echo 0)"
   # shellcheck disable=SC2086
-  claude -p $ANSWERER_MODEL_FLAG --add-dir "$CLAUDE_SKILLS_DIR" -- "/rl-operator-answerer $req" > "$answerer_stdout_file"
+  # --strict-mcp-config with no --mcp-config => zero MCP servers (2026-08-02). Without it this
+  # call inherits the USER'S GLOBAL MCP config and blocks starting github/postgres/supabase/
+  # filesystem via `npx -y` -- observed hanging at ~0 CPU with two orphan cmd.exe children.
+  # The Answerer classifies a gate against seed policy; it needs no MCP, exactly like the
+  # Planner. Keeping its MCP surface empty also keeps the global postgres entry's inline
+  # connection string (and its password) out of this process's command line.
+  claude -p $ANSWERER_MODEL_FLAG --output-format json --strict-mcp-config --add-dir "$CLAUDE_SKILLS_DIR" -- "/rl-operator-answerer $req" > "$answerer_stdout_file" < /dev/null
+  ledger_record "$STATE_DIR" "answerer" "$answerer_stdout_file"
   emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "answerer" "role_complete" \
     "$(( $(date +%s%3N 2>/dev/null || echo 0) - EVENT_ANS_T0 ))" "$gate_id" "gate" \
     "$(jq -nc --arg gid "$gate_id" '{gate_id:$gid}')"
@@ -401,14 +424,134 @@ RESULT_JSON_TMP="$ITER_DIR/.execution_result_${ITER}.cli.json"
 # FUP-0800 C.9: executor role_call + role_complete (duration across the claude --print call).
 emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "executor" "role_call"
 EVENT_EX_T0="$(date +%s%3N 2>/dev/null || echo 0)"
+# FUP-1475: prepend a standing execution contract to the plan the Executor receives.
+#
+# Iteration 0007 failed on a SINGLE Bash call that bundled two `rm -rf` with two `gh repo clone`
+# and their verification. Under --permission-mode auto the classifier denied the whole call, and
+# an allowlist entry cannot rescue it because the permission unit is the ENTIRE compound script,
+# not the individual commands inside it — every accreted `rm` grant in this factory's
+# settings.local.json is a single fully-literal command for exactly that reason.
+#
+# So the fix has to be producer-side, and it belongs HERE rather than in the planner skill: the
+# plan for 0007 never mentioned `rm -rf` at all. The Executor invented the pre-delete to make a
+# non-idempotent `gh repo clone` re-runnable. The gap was an ABSENCE of guidance, and a constraint
+# injected by the harness covers every initiative and every plan-authoring skill at once, instead
+# of waiting for each producer to be bumped. Writing it to a file (rather than piping a heredoc)
+# keeps the exact bytes the Executor saw as an inspectable per-iteration artifact.
+EXEC_STDIN="$ITER_DIR/.executor_stdin_${ITER}.md"
+# Guard the plan's existence EXPLICITLY. Before this change the Executor read the plan via
+# `< "$PLAN_PATH"`, so a missing plan failed the redirect with a clear "No such file" naming
+# the script line. Composing stdin moves that failure into a `cat`, which under `set -e` still
+# aborts (verified: same exit code, same failing check) but reports as a bare `cat:` error. An
+# explicit test says which file and why, and forecloses the worse shape entirely — a partially
+# built EXEC_STDIN containing the contract but NO PLAN, which would dispatch an Executor with
+# instructions and no work.
+if [[ ! -f "$PLAN_PATH" ]]; then
+  echo "execute_with_gates: session plan absent at $PLAN_PATH — refusing to dispatch the Executor with an execution contract but no plan" >&2
+  exit 1
+fi
+# FUP-1635: resolve the DB-helper directory for contract rule 4. The heredoc below is QUOTED
+# (<<'RL_EXEC_CONTRACT') and must stay quoted — rule 4 quotes the very shapes it bans, including
+# `$env:PGPASSWORD` and `PGPASSWORD="$SOMETHING"`, which an unquoted heredoc would expand away
+# (turning the prohibition into a blank). So the path is substituted afterwards via a token.
+# `|` is the sed delimiter because the path contains spaces, hyphens and backslashes but no pipe.
+#
+# The path is emitted in MIXED form (`K:/OneDrive - …`, cygpath -m), NOT the MSYS form `pwd`
+# returns (`/k/OneDrive - …`). The executor hands this path to native python.exe, and under
+# MSYS_NO_PATHCONV=1 (set by orchestrator.sh) nothing converts it — `/k/…` would resolve as a
+# drive-relative `K:\k\…` and fail. Mixed form is the one shape both MSYS bash and PowerShell
+# pass through intact, so the same contract line works whichever tool the executor picks.
+SUPPORT_FUNCTIONS_DIR="$(cd "$SCRIPT_DIR/../../support_functions" 2>/dev/null && pwd || echo "$SCRIPT_DIR/../../support_functions")"
+if command -v cygpath >/dev/null 2>&1; then
+  SUPPORT_FUNCTIONS_DIR="$(cygpath -m "$SUPPORT_FUNCTIONS_DIR" 2>/dev/null || echo "$SUPPORT_FUNCTIONS_DIR")"
+fi
+{
+  cat <<'RL_EXEC_CONTRACT' | sed "s|@@SUPPORT_FUNCTIONS@@|$SUPPORT_FUNCTIONS_DIR|g"
+<!-- Injected by hooks/execute_with_gates.sh (FUP-1475). Standing execution contract. -->
+# EXECUTION CONTRACT — read before running any command
+
+You are running headless under `--permission-mode auto`. A denied call costs the whole iteration,
+and the permission unit is the ENTIRE script you pass to Bash/PowerShell — not the individual
+commands within it. Three rules follow from that:
+
+1. **No destructive verbs in a multi-purpose call.** Never put `rm`, `rm -rf`, `rmdir`,
+   `Remove-Item`, `del`, `rd /s`, `git clean`, `git reset --hard`, `DROP`, `TRUNCATE`, or a
+   force-overwrite move into a script that also does other work. Bundling one with useful
+   commands gets the whole script denied and loses the useful work with it.
+
+2. **Prefer idempotent-by-construction over delete-then-recreate.** This is what actually
+   bit iteration 0007: `gh repo clone` is not re-runnable into an existing directory, so a
+   pre-delete was invented to compensate. Clone into a FRESH uniquely-named path instead
+   (e.g. `<name>_<iteration>` or a timestamp suffix) and leave the old one alone; use
+   `mkdir -p`, `cp -n`, `git fetch` into an existing clone, or `CREATE IF NOT EXISTS`. A step
+   that can simply be run twice never needs a destructive prologue.
+
+3. **If a destructive step is genuinely unavoidable, issue it as its own SINGLE-PURPOSE call**
+   — one command, one fully-literal path, nothing else in the script — so that it can be
+   allowlisted narrowly and so that its denial costs only that step. State in your report why
+   no idempotent alternative existed.
+
+4. **Never hand-write a database command. Call the helper module.** Do NOT construct
+   `psql` / `pg_dump` invocations, and above all do NOT prefix a script with a credential
+   assignment — `$env:PGPASSWORD = $env:SOMETHING`, `PGPASSWORD="$SOMETHING" psql …`, or a
+   `postgresql://user:pass@host` connection string. That shape bundles a secret assignment, an
+   absolute-path executable and a DB mutation into one script, and the classifier judges the
+   whole script: it is the single most reliably denied pattern in this system. It measurably
+   cost a Stage 5 mid-flight (FUP-1635). It is also how a live password reaches durable record.
+
+   Use these instead — each reads its credential from the environment INSIDE the process, so the
+   shell never sees a secret and there is nothing for the classifier to object to:
+
+   - `codefactory_build` (local, role `factory_app`):
+     `python "@@SUPPORT_FUNCTIONS@@/dryrun_build_db.py" --sql "SELECT 1;"`
+     (also `--json --sql …`, `--file <path.sql>`, `--whoami`)
+   - Supabase design corpus: `python "@@SUPPORT_FUNCTIONS@@/supabase_sql.py" …`
+
+   Invoke by ABSOLUTE path with no `cd` prefix and nothing else in the script — these helpers
+   need no working directory, and a `cd … && python …` compound is a second, avoidable reason to
+   be denied. If a database you need has no helper, say so in your report and continue with the
+   rest of the plan; do not improvise a psql call to work around a missing one.
+
+   Credential env var names (values are read by the helpers, never by you — never echo, print, or
+   `Write-Output` one, not even to check whether it is set): `CF_FACTORY_APP_PASSWORD` is
+   `factory_app` on the local execution DBs (DML only); `CF_DB_PASSWORD` is the local postgres
+   superuser; `SUPABASE_DB_PASSWORD` is the corpus. The latter two are the same value, so
+   exposing either has double the blast radius.
+
+Write only inside the iteration directory, the declared state directory, and the scratch
+workspace. Use paths you have READ back from the environment or a manifest; never hand-type a
+long absolute path from memory (a mistyped absolute path silently creates its whole parent
+chain outside the sandbox — FUP-1483).
+
+---
+
+RL_EXEC_CONTRACT
+  cat "$PLAN_PATH"
+} > "$EXEC_STDIN"
+# shellcheck disable=SC2086
+# --add-dir "$CLAUDE_SKILLS_DIR" (added 2026-08-06). THE EXECUTOR WAS THE ONLY SPAWN SITE WITHOUT IT.
+# The Planner, Answerer and plan-review spawns all pass it (orchestrator.sh:231, this file:236,
+# plan_review.sh:106/215); this call did not, and skills do NOT auto-discover from a sub-project
+# launch dir. Measured cost on factory_dryrun run 1: the seed's ONLY verification_bindings entry is
+# stage_emulate -> cf-cc-result-reviewer, and the work registry records 5 times that no reviewer
+# output was captured because the "cf-* skill set [was] not loaded in its own session" -- so on 5 of
+# 15 iterations the independent audit silently degraded to the Executor auditing its own work, which
+# is precisely the circularity the binding exists to prevent. A missing skill does not fail loudly:
+# the Executor substitutes an inline self-audit and the iteration still reports PASS.
+# $CLAUDE_SKILLS_DIR is exported by orchestrator.sh:36, derived from its own location
+# (ralph/../.. = the Factory_V3 root that contains .claude/skills) via `pwd -W`, so it is portable
+# across machines/drive letters AND carries the Windows path form that --add-dir requires -- an
+# MSYS `/k/...` form silently resolves nothing. Used rather than a literal path for exactly that
+# reason: hard-coding one here would re-create the stale absolute path that FUP-0743 removed.
 # shellcheck disable=SC2086
 claude --print --output-format json \
        --permission-mode "$posture_value" \
        $EXECUTOR_MODEL_FLAG \
+       --add-dir "$CLAUDE_SKILLS_DIR" \
        "${EXEC_ALLOW[@]}" \
        $STRICT_MCP_FLAG --mcp-config "$MCP_CONFIG" \
        --max-budget-usd "$PER_CALL_CAP" --max-turns "$MAX_TURNS" \
-       < "$PLAN_PATH" > "$RESULT_JSON_TMP" 2> "$RESULT_JSON_TMP.err"
+       < "$EXEC_STDIN" > "$RESULT_JSON_TMP" 2> "$RESULT_JSON_TMP.err"
 # Rate-limit detection (concurrency 2026-06-09): scan the executor's captured stderr; best-effort.
 if command -v detect_and_emit_rate_limit >/dev/null 2>&1; then
   detect_and_emit_rate_limit "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "executor" "" "$RESULT_JSON_TMP.err"
@@ -416,6 +559,17 @@ fi
 [[ -s "$RESULT_JSON_TMP.err" ]] && cat "$RESULT_JSON_TMP.err" >&2   # preserve prior stderr visibility
 rm -f "$RESULT_JSON_TMP.err" 2>/dev/null || true
 mv -f "$RESULT_JSON_TMP" "$RESULT_JSON"
+# FUP-1635: redact at the SOURCE, not only at the escalation copy. execution_result_NNNN.json is
+# where the executor's verbatim command text first lands, it is durable, and it is what every
+# downstream reader (ledger, §10.5 gate, the escalation writer, the Consumer, any later grep)
+# copies from. Redacting only the escalation would leave the original intact one directory away.
+# Runs before schema validation deliberately — redaction rewrites string CONTENT and never the
+# document shape, so the validator still sees the structure the executor produced.
+redact_artefact "$RESULT_JSON"
+# FUP-1451: the executor was the single largest unrecorded population ($72.35 of the $189.93 run).
+# Its cost was already being READ two lines below to decorate an llm_call event, and then thrown
+# away — the number was in hand the whole time and simply never reached the ledger.
+ledger_record "$STATE_DIR" "executor" "$RESULT_JSON"
 emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "executor" "role_complete" \
   "$(( $(date +%s%3N 2>/dev/null || echo 0) - EVENT_EX_T0 ))" "" "" \
   "$(jq -nc --arg tr "$(jq -r '.terminal_reason // empty' "$RESULT_JSON" 2>/dev/null)" '{terminal_reason:$tr}')"
@@ -483,6 +637,42 @@ done
 # deliverable_blocking.
 TERMINAL_REASON="$(jq -r '.terminal_reason' "$RESULT_JSON")"
 DENIALS_COUNT="$(jq -r '.permission_denials | length' "$RESULT_JSON")"
+
+# FUP-1452: probe whether the stage's declared output EXISTS, BEFORE classifying denials.
+#
+# The bug: DELIVERABLE_BLOCKING_COUNT below is computed as (denials - claude-spawn denials). That
+# subtraction never looks at a deliverable; it counts "denials that are not nested claude -p", then
+# the code fails the iteration and calls the result deliverable_blocking. Iteration 0001 was failed
+# with deliverable_blocking_count: 6 while all six denials were psql AUTH-VERIFICATION probes — the
+# Executor took another route, wrote applications=1 / jobs=1 / job_log=8, and its own report records
+# the substrate re-derivations as CONFIRMED. Iteration 0007 is the same shape. In both cases the
+# escalation fired on work that had been delivered.
+#
+# Why this is not a weakening: the escalation reason string is literally
+# "auto_mode_denial_deliverable_blocking", and the counter claims to count blocked deliverables. It
+# does not. Gating on the deliverable makes the code mean what it already says. The escalation
+# artifact and the notification are still written in every denial case; what changes is that a
+# delivered iteration is no longer KILLED before the Consumer — which is the component that
+# actually verifies the substrate (DB row counts + file existence) — ever gets to run. The gate was
+# pre-empting the real oracle on the strength of a proxy that does not measure what it names.
+#
+# The probe is deliberately the terminal deliverable the plan contract mandates, not a parse of the
+# plan's prose "§3 Outputs" section: no machine-readable declared-outputs field exists anywhere in
+# the seed, registry or hooks, and inventing a parse of free prose would be a guess dressed as a
+# check. Note the report is NOT required to carry a '## Items closed' section here — the numbered
+# report format real iterations emit (## 1. Summary ... ## 9. Artifacts produced) has no such
+# heading, so requiring it would re-fail exactly the iterations this fixes.
+DELIVERABLE_PRESENT=0
+_deliv_report="$ITER_DIR/execution_report_${ITER}.md"
+_deliv_size=0
+[[ -f "$_deliv_report" ]] && _deliv_size="$(wc -c < "$_deliv_report" 2>/dev/null | tr -d ' ' || echo 0)"
+# 200 bytes: enough to exclude a 0-byte or one-line stub, low enough that any genuine report
+# clears it (the real ones run 13 KB). terminal_reason must ALSO be "completed" — a report left
+# behind by a crashed or budget-capped run is not evidence of delivery.
+if [[ "$TERMINAL_REASON" == "completed" && "$_deliv_size" -ge 200 ]]; then
+  DELIVERABLE_PRESENT=1
+fi
+
 if [[ "$DENIALS_COUNT" -ne 0 ]]; then
   # Count verification_spawn-classified denials. The jq expression uses .tool_name first
   # (current claude --output-format json shape per FUP-0737), falling back to .tool (legacy
@@ -491,12 +681,24 @@ if [[ "$DENIALS_COUNT" -ne 0 ]]; then
   VERIFICATION_SPAWN_COUNT="$(jq -r '[.permission_denials[] | select(((.tool_name // .tool // "") == "Bash") and (((.tool_input.command // "") | test("\\bclaude\\s+(-p|--print)\\b")) or ((.reason // "") | test("\\bclaude\\s+(-p|--print)\\b"))))] | length' "$RESULT_JSON")"
   DELIVERABLE_BLOCKING_COUNT=$((DENIALS_COUNT - VERIFICATION_SPAWN_COUNT))
 
-  if [[ "$DELIVERABLE_BLOCKING_COUNT" -gt 0 ]]; then
-    # At least one deliverable_blocking denial — existing exit-1 path preserved.
+  if [[ "$DELIVERABLE_BLOCKING_COUNT" -gt 0 && "$DELIVERABLE_PRESENT" -eq 1 ]]; then
+    # FUP-1452: denials occurred, but the stage's declared output exists and the run terminated
+    # cleanly — the Executor routed around them. Record the denials (they are still a real signal
+    # worth reviewing: they show the posture is too tight for what the plan asked) and let the
+    # Consumer adjudicate against the actual substrate. Do NOT fail the iteration.
+    mkdir -p "$STATE_DIR/escalations"
+    esc_file="$STATE_DIR/escalations/auto_mode_denial_${ITER}_$(date -u +%s).json"
+    jq --arg iter "$ITER" --arg vsc "$VERIFICATION_SPAWN_COUNT" --arg dbc "$DELIVERABLE_BLOCKING_COUNT" --arg rp "$_deliv_report" --arg rs "$_deliv_size" \
+       '{iteration: $iter, classification: "auto_mode_denial_delivered", denials_count: (.permission_denials | length), verification_spawn_count: ($vsc | tonumber), deliverable_blocking_count: ($dbc | tonumber), deliverable_present: true, deliverable_path: $rp, deliverable_bytes: ($rs | tonumber), permission_denials: .permission_denials, terminal_reason: .terminal_reason}' "$RESULT_JSON" > "$esc_file"
+    redact_artefact "$esc_file"   # FUP-1635 — before this file becomes durable record
+    echo "execute_with_gates: auto_mode_denial with DELIVERABLE PRESENT — $DENIALS_COUNT denial(s) recorded to $esc_file, but $_deliv_report exists (${_deliv_size}B) and terminal_reason=completed, so the iteration is NOT failed (FUP-1452). The Consumer verifies the substrate." >&2
+  elif [[ "$DELIVERABLE_BLOCKING_COUNT" -gt 0 ]]; then
+    # At least one deliverable_blocking denial AND no deliverable — existing exit-1 path preserved.
     mkdir -p "$STATE_DIR/escalations"
     esc_file="$STATE_DIR/escalations/auto_mode_denial_${ITER}_$(date -u +%s).json"
     jq --arg iter "$ITER" --arg vsc "$VERIFICATION_SPAWN_COUNT" --arg dbc "$DELIVERABLE_BLOCKING_COUNT" \
        '{iteration: $iter, classification: "auto_mode_denial", denials_count: (.permission_denials | length), verification_spawn_count: ($vsc | tonumber), deliverable_blocking_count: ($dbc | tonumber), permission_denials: .permission_denials, terminal_reason: .terminal_reason}' "$RESULT_JSON" > "$esc_file"
+    redact_artefact "$esc_file"   # FUP-1635 — before this file becomes durable record
     echo "execute_with_gates: auto_mode_denial classification — escalation $esc_file (denials=$DENIALS_COUNT, verification_spawn=$VERIFICATION_SPAWN_COUNT, deliverable_blocking=$DELIVERABLE_BLOCKING_COUNT)" >&2
     NOTIFY="$(read_seed_field "$SEED" '.notification_channel' 2>/dev/null || echo "")"
     if [[ -n "$NOTIFY" && "$NOTIFY" != "null" ]]; then
@@ -560,13 +762,23 @@ case "$_plan_shape" in
         echo "execute_with_gates: FUP-0854/T1#2 — terminal_reason=completed but $_report_path is absent or lacks a '## Items closed' section; one bounded --resume follow-up to have the Executor emit/complete its report (no code/git change requested)" >&2
         _recovery_prompt="The build and all git steps for iteration ${ITER} are ALREADY complete, committed, tagged, and pushed — do NOT modify, rebuild, re-commit, re-tag, or push anything, and do NOT run any verification again. The only thing missing is the session plan's terminal deliverable: a COMPLETE report file at the absolute path ${_report_path}. Write (or complete) that file NOW from the work you just finished in this same session, using the Write tool. It MUST contain a top-level '## Items closed' section listing each registry work-item you closed this iteration as a bullet in the form '- OLB-NN — <title>' with its closing evidence (commit SHA, tag, cf-code-review BLOCKER/DRIFT counts, cf-pytest passed/skipped counts). If you closed no item this iteration, write the '## Items closed' heading followed by the single word 'none'. Then output only a one-line confirmation. Make no other changes."
         # shellcheck disable=SC2086
+        # --add-dir kept IDENTICAL to the primary spawn above: --resume restores the conversation,
+        # not the CLI surface, so omitting it here would silently drop the skills on the recovery
+        # call -- the same defect one code path over.
         claude --print --output-format json --resume "$_ex_session" \
                --permission-mode "$posture_value" \
                $EXECUTOR_MODEL_FLAG \
+               --add-dir "$CLAUDE_SKILLS_DIR" \
                "${EXEC_ALLOW[@]}" \
                $STRICT_MCP_FLAG --mcp-config "$MCP_CONFIG" \
                --max-budget-usd "$PER_CALL_CAP" --max-turns 12 \
-               <<<"$_recovery_prompt" >> "$STATE_DIR/logs/report_recovery.log" 2>&1 || true
+               <<<"$_recovery_prompt" > "$ITER_DIR/report_recovery_${ITER}.json" 2>>"$STATE_DIR/logs/report_recovery.log" || true
+        # FUP-1451: $22.91 of --resume recovery calls were invisible to every ledger because the
+        # envelope was appended straight into a shared text log, where no per-call JSON could be
+        # extracted. Capturing one envelope per iteration makes the cost recordable (and the
+        # recovery itself auditable); stderr still goes to the shared log.
+        cat "$ITER_DIR/report_recovery_${ITER}.json" >> "$STATE_DIR/logs/report_recovery.log" 2>/dev/null || true
+        ledger_record "$STATE_DIR" "report_recovery" "$ITER_DIR/report_recovery_${ITER}.json"
         if _report_complete; then
           echo "execute_with_gates: FUP-0854/T1#2 — recovery SUCCEEDED, $_report_path now present with a '## Items closed' section" >&2
         else

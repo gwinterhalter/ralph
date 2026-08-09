@@ -665,7 +665,7 @@ for ((i=0; i<count; i++)); do
           else
             # No recent audit — fall through to original claude -p invocation.
             # FUP-0745: --add-dir + -- required for slash-command resolution from ralph/ CWD.
-            claude -p --add-dir "$CLAUDE_SKILLS_DIR" -- "/cf-corpus-auditor target=$target" > "$tmp_out" 2>&1 || true
+            claude -p --add-dir "$CLAUDE_SKILLS_DIR" -- "/cf-corpus-auditor target=$target" > "$tmp_out" 2>&1 < /dev/null || true
             # cf-corpus-auditor v1.7 emits `- Report location: {path}` into stdout (status echo);
             # skill's own SKILL.md L210 confirms this is the declared output convention.
             report_file="$(grep -oE '^- Report location: .+$' "$tmp_out" | sed 's/^- Report location: //' | tail -1)"
@@ -699,7 +699,7 @@ for ((i=0; i<count; i++)); do
             # cf-cross-reference-audit v1.7 SKILL.md L122-129 Inputs require audit_type=;
             # default to db_columns (most-commonly-referenced Tier-1 audit per skill's audit-type table).
             # FUP-0745: --add-dir + -- required for slash-command resolution from ralph/ CWD.
-            claude -p --add-dir "$CLAUDE_SKILLS_DIR" -- "/cf-cross-reference-audit target=$target audit_type=db_columns mode=A severity_floor=severe" > "$tmp_out" 2>&1 || true
+            claude -p --add-dir "$CLAUDE_SKILLS_DIR" -- "/cf-cross-reference-audit target=$target audit_type=db_columns mode=A severity_floor=severe" > "$tmp_out" 2>&1 < /dev/null || true
             # Issues-file resolution: prefer explicit "Issues path:" line; else workspace-root-anchored glob
             # under audit/. SKILL.md L139-146 documents output at <workspace>/audit/<descriptor>_Issues_<date>_v1.0.md.
             issues_file="$(grep -oE '^Issues path: .+$' "$tmp_out" | sed 's/^Issues path: //' | tail -1)"
@@ -725,7 +725,7 @@ for ((i=0; i<count; i++)); do
             echo "stop_check: new_skills_clean VACUOUSLY-CLEAN — session_shape_catalog has no skill-authoring shape (FUP-0819 shortcut)" >&2
           else
             # FUP-0745: --add-dir + -- required for slash-command resolution from ralph/ CWD.
-            claude -p --add-dir "$CLAUDE_SKILLS_DIR" -- "/cf-skill-reviewer mode=A target=$target" > "$tmp_out" 2>&1 || true
+            claude -p --add-dir "$CLAUDE_SKILLS_DIR" -- "/cf-skill-reviewer mode=A target=$target" > "$tmp_out" 2>&1 < /dev/null || true
             # cf-skill-reviewer v1.9 SKILL.md L195-200 emits `## Recommended Action` header then
             # the value (KEEP / REPAIR / REBUILD) on a separate non-blank line. Awk picks the next
             # non-blank line after the header; grep validates KEEP.
@@ -763,7 +763,7 @@ for ((i=0; i<count; i++)); do
           else
             # No recent fix2 audit — fall through to original claude -p invocation.
             # FUP-0745: --add-dir + -- required for slash-command resolution from ralph/ CWD.
-            claude -p --add-dir "$CLAUDE_SKILLS_DIR" -- "/cf-doc-reviewer \\fix2 target=$effective_target" > "$tmp_out" 2>&1 || true
+            claude -p --add-dir "$CLAUDE_SKILLS_DIR" -- "/cf-doc-reviewer \\fix2 target=$effective_target" > "$tmp_out" 2>&1 < /dev/null || true
             if ! grep -qE 'All findings resolved:\s*YES' "$tmp_out"; then
               all_pass=0
             fi
@@ -790,7 +790,7 @@ for ((i=0; i<count; i++)); do
             exit 3
           fi
           # FUP-0745: --add-dir + -- required for slash-command resolution from ralph/ CWD.
-          claude -p --add-dir "$CLAUDE_SKILLS_DIR" -- "/$skill_name target=$target" > "$tmp_out" 2>&1 || true
+          claude -p --add-dir "$CLAUDE_SKILLS_DIR" -- "/$skill_name target=$target" > "$tmp_out" 2>&1 < /dev/null || true
           if ! grep -qE "$generic_marker" "$tmp_out"; then
             echo "stop_check: $kind predicate '$pred_name' (skill='$skill_name') generic-evaluator output does not match params.success_marker_pattern '$generic_marker'" >&2
             all_pass=0

@@ -22,7 +22,18 @@ set -euo pipefail
 # contains .claude/skills. Truly portable across machines/drive letters (the prior hardcoded
 # "K:/Claude Code Factory/V3/Project_Docs" was stale and silently broke rl-* slash-command resolution,
 # forcing an `export CLAUDE_SKILLS_DIR=` at every dispatch). Still env-overridable via the `:-`.
-export CLAUDE_SKILLS_DIR="${CLAUDE_SKILLS_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+# WINDOWS PATH FORM IS LOAD-BEARING (2026-08-02, FUP pending). `pwd` under Git Bash returns the
+# MSYS form `/k/OneDrive .../Factory_V3`. Every `claude -p` call below runs under
+# MSYS_NO_PATHCONV=1 / MSYS2_ARG_CONV_EXCL='*' — set so Git Bash does not mangle the leading `/`
+# of the `/rl-*` slash commands into `C:/Program Files/Git/rl-...`. But that same suppression stops
+# Git Bash converting THIS path too, and native claude.exe cannot resolve `/k/...`. The result is
+# that `--add-dir` silently fails, NO skills load, and every rl-* role call returns
+# "Unknown command: /rl-initiative-planner" with 0 turns and $0 cost — i.e. the loop burns its whole
+# iteration budget doing nothing, and the failure looks like a planner fault rather than a path fault.
+# Proven by controls on 2026-08-02: identical call, --add-dir "/k/..." => Unknown command (0 turns);
+# --add-dir "K:/..." => resolves (1 turn). `pwd -W` emits the Windows form; the `|| pwd` fallback
+# keeps this correct on Linux/macOS where `-W` does not exist and the POSIX form is already right.
+export CLAUDE_SKILLS_DIR="${CLAUDE_SKILLS_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && { pwd -W 2>/dev/null || pwd; })}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/seed.sh
@@ -40,12 +51,28 @@ source "$SCRIPT_DIR/lib/command_dispatch.sh"
 # shellcheck source=lib/events.sh
 # FUP-0800 Phase 2: local-first NDJSON event log + idempotent Supabase sync (Comprehensive_Event_Log_Spec v1.1).
 source "$SCRIPT_DIR/lib/events.sh"
+# shellcheck source=lib/cost_ledger.sh
+# FUP-1451: the single cost basis. Previously four code paths each kept a partial total of
+# the same quantity and all four disagreed; spend.json tracked exactly planner+consumer and
+# under-reported the run by 2.11x. Sourced here so run_claude_json records through it.
+source "$SCRIPT_DIR/lib/cost_ledger.sh"
+# shellcheck source=lib/path_guard.sh
+# FUP-1483: write containment. read_only_paths is a deny-list and cannot catch a write to a
+# place nobody thought to deny; these assert the positive (inside the sandbox).
+source "$SCRIPT_DIR/lib/path_guard.sh"
 
 SEED="${1:?usage: orchestrator.sh <seed_path>}"
 
 WORKSPACE_ROOT="$(read_seed_field "$SEED" .workspace_root)"
 STATE_DIR_REL="$(read_seed_field "$SEED" .state_dir_relative)"
 STATE_DIR="$WORKSPACE_ROOT/$STATE_DIR_REL"          # absolute; §6.1 layout root
+# FUP-1483: this join is the classic base+value double-join shape — if a seed ever declares
+# .state_dir_relative as an ABSOLUTE path it silently yields "$WORKSPACE_ROOT/K:/..." and the
+# whole run relocates. Assert containment at compose time rather than discovering it by
+# finding a mirror tree on the synced drive afterwards.
+if ! pg_assert_under "STATE_DIR (seed .state_dir_relative must be RELATIVE)" "$STATE_DIR" "$WORKSPACE_ROOT"; then
+  echo "HALT: state_dir_relative does not resolve inside workspace_root" >&2; exit 2
+fi
 WORK_REGISTRY="$(read_seed_field "$SEED" .work_registry)"
 # FUP-0720 cost instrumentation: read budget cap from seed; running spend in state dir.
 BUDGET_CAP="$(read_seed_field "$SEED" .budget.tokens_usd)"
@@ -87,6 +114,12 @@ export RL_EVENTS_BIN="$SCRIPT_DIR/lib/events.sh"
 # LIVE orchestrator already holds the per-state-dir lock. A stale lock (holder no longer alive — e.g.
 # after a hard kill -9 where the EXIT trap could not run) is reclaimed after the kill -0 liveness check.
 mkdir -p "$STATE_DIR"
+# FUP-1483: baseline the top-level entries of the workspace drive BEFORE any LLM call can run.
+# The harness cannot intercept a path an agent types into its own Write tool, so containment for
+# agent-composed paths has to be detective rather than preventive. The observed damage — a
+# mistyped absolute path whose parent directories were auto-created — always shows up as a NEW
+# top-level entry on the drive, which this makes visible at the next iteration boundary.
+pg_snapshot_fsroot "$STATE_DIR" "$WORKSPACE_ROOT"
 ORCH_LOCK="$STATE_DIR/orchestrator.lock"
 if [[ -f "$ORCH_LOCK" ]]; then
   _lock_pid="$(cat "$ORCH_LOCK" 2>/dev/null || echo "")"
@@ -124,9 +157,12 @@ run_claude_json() {
   current_spend="$(jq -r '.total_spend_usd' "$RUNNING_SPEND_FILE")"
   # FUP-0815: effective_cap = max($BUDGET_CAP, $budget_override) — operator bumps via
   # \btw bump <usd> write $STATE_DIR/budget_override.json; never reduce below seed cap.
-  local effective_cap="$BUDGET_CAP"
+  local effective_cap="$BUDGET_CAP" cap_source=""
   if [[ -f "$STATE_DIR/budget_override.json" ]]; then
     effective_cap="$(jq -rn --argjson seed "$BUDGET_CAP" --argjson ovr "$(jq -r '.budget_cap_usd' "$STATE_DIR/budget_override.json")" '[$seed, $ovr] | max')"
+    # FUP-1484: carry the provenance into every message that prints the cap, so a reader can
+    # tell "the cap is 400" from "the seed said 60 and an override raised it to 400".
+    [[ "$effective_cap" != "$BUDGET_CAP" ]] && cap_source=" (seed=$BUDGET_CAP, raised by budget_override.json)"
   fi
   remaining_budget="$(jq -rn --argjson cap "$effective_cap" --argjson cur "$current_spend" '$cap - $cur')"
   # FUP-0842: soft-threshold budget_warning — fires once per run when remaining drops below 20% of
@@ -141,8 +177,13 @@ run_claude_json() {
     touch "$STATE_DIR/.budget_warning_emitted" 2>/dev/null || true
   fi
   if awk "BEGIN { exit !($remaining_budget <= 0) }"; then
-    log "HALT: BUDGET_EXHAUSTED before next claude -p (spend=$current_spend cap=$BUDGET_CAP)"
-    dispatch_notification "$SEED" "$STATE_DIR" budget_exhausted "$(jq -nc --arg sp "$current_spend" --arg cap "$BUDGET_CAP" '{iteration:"", reason:"run_claude_json_pre_call", spend:$sp, cap:$cap}')"
+    # FUP-1484: print the cap the guard ACTUALLY compared against (effective_cap), plus the
+    # override provenance when one is in force. Printing $BUDGET_CAP here made the log
+    # contradict the guard the moment an operator bumped the budget: the run kept going at
+    # "spend=90.04 cap=60" because the real comparison was against 400, which reads as a
+    # broken guard rather than an honoured override.
+    log "HALT: BUDGET_EXHAUSTED before next claude -p (spend=$current_spend cap=$effective_cap$cap_source)"
+    dispatch_notification "$SEED" "$STATE_DIR" budget_exhausted "$(jq -nc --arg sp "$current_spend" --arg cap "$effective_cap" --arg seedcap "$BUDGET_CAP" '{iteration:"", reason:"run_claude_json_pre_call", spend:$sp, cap:$cap, seed_cap:$seedcap}')"
     echo "HALT: BUDGET_EXHAUSTED" >&2; exit 2
   fi
   # FUP-0823: env-prefix MSYS_NO_PATHCONV=1 + MSYS2_ARG_CONV_EXCL='*' ONLY on the claude
@@ -168,8 +209,26 @@ run_claude_json() {
   local claude_rc=0
   set +e
   # shellcheck disable=SC2086
+  # STDIN MUST BE CLOSED (2026-08-02). stdout and stderr were redirected here from the start;
+  # stdin never was, so `claude -p` inherited whatever the dispatching shell had. Under a
+  # backgrounded / non-tty launch that handle never delivers and never closes: claude logs
+  # "Warning: no stdin data received in 3s, proceeding without it" and carries on, but every
+  # tool subprocess it spawns INHERITS the same dead handle and blocks on it forever.
+  # Observed signature: 0-byte planner.json, ~4.6s CPU across 9 minutes, and two orphan cmd.exe
+  # children at 0 CPU. The loop neither progresses nor reports -- the worst failure shape here,
+  # because nothing times out and nothing escalates. claude's own warning names the fix.
+  # NO MCP FOR THE PLANNER/CONSUMER ROLES (2026-08-02). This call passed no MCP flag at all, so
+  # claude fell back to the USER'S GLOBAL config and launched every server declared there --
+  # observed: github, postgres, supabase and filesystem, each via `npx -y`, each spawning
+  # cmd.exe -> npx-cli -> node and sitting at ~1s CPU without ever becoming ready. The role call
+  # then blocked behind servers it has no use for: the Planner and Consumer are documented as
+  # having no DB access (only the Executor gets --mcp-config), so their correct MCP surface is
+  # EMPTY. --strict-mcp-config restricts the process to servers from --mcp-config, and none is
+  # passed here, so nothing is started. This also shrinks the secret blast radius: the global
+  # postgres entry carries an inline connection string, and every launch put that credential
+  # into the process table.
   MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
-    claude -p $role_model_flag --permission-mode "$POSTURE_VALUE" --output-format json --max-budget-usd "$remaining_budget" --add-dir "$CLAUDE_SKILLS_DIR" -- "$@" > "$out_file" 2> "$llm_err"
+    claude -p $role_model_flag --permission-mode "$POSTURE_VALUE" --output-format json --max-budget-usd "$remaining_budget" --strict-mcp-config --add-dir "$CLAUDE_SKILLS_DIR" -- "$@" > "$out_file" 2> "$llm_err" < /dev/null
   claude_rc=$?
   set -e
   RUN_CLAUDE_LAST_RC="$claude_rc"
@@ -227,10 +286,19 @@ run_claude_json() {
   # one the caller's guard reports.
   call_cost="$(jq -r '.total_cost_usd // 0' "$out_file" 2>/dev/null || echo 0)"
   [[ -n "$call_cost" && "$call_cost" != "null" ]] || call_cost=0
-  new_total="$(jq -rn --argjson cur "$current_spend" --argjson cc "$call_cost" '$cur + $cc')"
-  jq --argjson nt "$new_total" '.total_spend_usd = $nt' "$RUNNING_SPEND_FILE" > "$RUNNING_SPEND_FILE.tmp" \
-    && mv "$RUNNING_SPEND_FILE.tmp" "$RUNNING_SPEND_FILE"
-  log "claude -p call_cost=$call_cost running_total=$new_total cap=$BUDGET_CAP model=${rm_val:-<cli-default>}"
+  # FUP-1451: record through the shared ledger instead of hand-rolling the rollup here. This
+  # block WAS the entire accounting for the run, which is precisely the defect — it is
+  # reachable only from run_claude_json, so the executor, plan_review, the --resume report
+  # recovery and the answerer contributed nothing. ledger_record() re-derives spend.json from
+  # the append-only ledger, so every role that calls it now lands in the same total.
+  local _ledger_role="orchestrator"
+  case "$*" in
+    *rl-initiative-planner*) _ledger_role="planner" ;;
+    *rl-iteration-consumer*) _ledger_role="consumer" ;;
+  esac
+  ledger_record "$STATE_DIR" "$_ledger_role" "$out_file"
+  new_total="$(ledger_total "$STATE_DIR")"
+  log "claude -p role=$_ledger_role call_cost=$call_cost running_total=$new_total cap=$effective_cap$cap_source model=${rm_val:-<cli-default>}"
   # FUP-0842: per-call cost/latency primitive (llm_call) — the §13 Q5/Q6 cost-per-iteration/role/model
   # source. role inferred from the slash-command in the prompt; tokens read from the CLI JSON `usage`;
   # duration_ms = call wall-clock; subject_kind="llm_call" per the spec §6.2 envelope addition. §6.3.
@@ -524,7 +592,20 @@ while true; do
   emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "planner" "role_call"
   EVENT_PL_T0="$(date +%s%3N 2>/dev/null || echo 0)"
   ROLE_MODEL="$(read_seed_field "$SEED" .planner_model 2>/dev/null || echo "")" \
-    run_claude_json "$ITER_DIR/planner.json" "/rl-initiative-planner $STATE_DIR $ITER_DIR" \
+    # SELF-PARENT DISCLOSURE (2026-08-02). Without this, the Planner explores the filesystem,
+    # finds a live `claude -p` writing into its own iteration directory, concludes a competing
+    # automated run is racing it, and blocks. That competing process IS the orchestrator that
+    # invoked it — it was detecting its own parent. Observed in canary iter 0003, which cost 20
+    # turns / $1.09 to produce an unanswerable question. Stating the invocation topology removes
+    # the false premise at source, which is cheaper and more reliable than forbidding the wrong
+    # conclusion after the fact.
+    # MUST STAY ON ONE LINE. A first attempt at this disclosure embedded a real newline in the
+    # prompt string; because this file is CRLF that newline became \r\n, the carriage return
+    # rode into the slash-command argument, and claude -p HUNG — 11 minutes, 0-byte planner.json,
+    # 13s CPU, no error. A hang is the worst failure shape here: the loop neither progresses nor
+    # reports. Keep it single-line, and keep the wording free of characters bash would re-parse.
+    run_claude_json "$ITER_DIR/planner.json" \
+      "/rl-initiative-planner $STATE_DIR $ITER_DIR -- CONTEXT: you are invoked BY the bash orchestrator as its Planner role call. The orchestrator process holding the lock on this state dir and writing into this iteration directory is YOUR OWN PARENT, not a competing run: never treat it as a race, and never propose waiting for it or killing it. This is the headless claude -p surface with no operator attached, so a question cannot be answered. Emit a session_plan, or a gate_request JSON, or HALT with a structured code, per Core Principle 3." \
       2> "$ITER_DIR/planner.stderr"
   # Extract markdown result for any downstream consumer expecting the textual emission:
   jq -r '.result // empty' "$ITER_DIR/planner.json" > "$ITER_DIR/planner.stdout"
@@ -615,11 +696,48 @@ while true; do
       exit 0
     fi
   else
-    log "ITERATION $ITER Planner escalated without plan — skipping plan_review; routing gate_request(s) via execute_with_gates"
-    # FUP-0842: iteration_failed — the Planner produced no session_plan (escalated-without-plan path);
-    # the iteration did not reach a clean close. reason per the spec §6.2 enum.
-    emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "orchestrator" "iteration_failed" "" "" "" \
-      "$(jq -nc --arg it "$ITER" '{reason:"planner_no_plan", iteration:$it}')"
+    # 2026-08-02 — CONTRACT-VIOLATION DISCRIMINATION (enforced rung).
+    # Two very different things previously both recorded `planner_no_plan`:
+    #   (a) a LEGITIMATE escalation — no plan, but one or more gate_request_*.json enumerating
+    #       the blocking ambiguity. This is Path A working as designed (§10.3).
+    #   (b) a CONTRACT VIOLATION — no plan AND no gate_request. The Planner's own SKILL.md Core
+    #       Principle 3 is categorical: on the headless `claude -p` surface it must route every
+    #       would-be question to a gate_request or a structured HALT, and "NEVER emits an
+    #       interactive question ... attempting it is a hard contract violation
+    #       (HEADLESS_ASKUSERQUESTION_FORBIDDEN)". Observed 2026-08-02 (canary iter 0003): the
+    #       Planner burned 20 turns / $1.09 and returned an interactive either/or question
+    #       ("Do you want me to (a) wait ... or (b) kill that claude -p process now?") — an
+    #       unanswerable prompt on a surface with no operator attached.
+    # That rule lived ONLY as prose in the skill, so nothing detected the breach: it was
+    # absorbed as an ordinary no-plan iteration and the real defect stayed invisible. The
+    # discrimination below is the enforcement — it does not prevent the violation, but it
+    # names it, so a recurrence is a finding rather than a silence.
+    if compgen -G "$ITER_DIR/gate_request_${ITER}_*.json" > /dev/null 2>&1 \
+       || compgen -G "$STATE_DIR/escalations/gate_request_${ITER}_*.json" > /dev/null 2>&1; then
+      log "ITERATION $ITER Planner escalated without plan — skipping plan_review; routing gate_request(s) via execute_with_gates"
+      # FUP-0842: iteration_failed — the Planner produced no session_plan (escalated-without-plan path);
+      # the iteration did not reach a clean close. reason per the spec §6.2 enum.
+      emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "orchestrator" "iteration_failed" "" "" "" \
+        "$(jq -nc --arg it "$ITER" '{reason:"planner_no_plan", iteration:$it}')"
+    else
+      log "ITERATION $ITER CONTRACT VIOLATION: Planner returned neither a session_plan nor a gate_request (HEADLESS_ASKUSERQUESTION_FORBIDDEN) — see planner.stdout"
+      mkdir -p "$STATE_DIR/escalations" 2>/dev/null || true
+      # Persist a real gate_request so the Supervisor's has_pending_gate() probe classifies this
+      # as an operator-answerable pause rather than an unexplained failure (same rationale as
+      # FUP-0862 above), and carry the offending emission so the breach is diagnosable later.
+      jq -nc --arg it "$ITER" \
+             --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+             --rawfile out "$ITER_DIR/planner.stdout" \
+        '{iteration:$it, gate:"0001", kind:"gate_human",
+          reason:"headless_askuserquestion_forbidden",
+          detail:"Planner returned neither session_plan nor gate_request. SKILL.md Core Principle 3 forbids an interactive question on the headless surface.",
+          planner_emission:($out[0:2000]), ts:$ts}' \
+        > "$STATE_DIR/escalations/gate_request_${ITER}_0001.json" 2>/dev/null || true
+      dispatch_notification "$SEED" "$STATE_DIR" gate_human \
+        "$(jq -nc --arg it "$ITER" '{iteration:$it, reason:"headless_askuserquestion_forbidden"}')"
+      emit_event "$STATE_DIR" "$EVENT_PROJECT_ID" "$EVENT_SLUG" "$ITER" "orchestrator" "iteration_failed" "" "" "" \
+        "$(jq -nc --arg it "$ITER" '{reason:"headless_askuserquestion_forbidden", iteration:$it}')"
+    fi
   fi
 
   # Phase 4b P4-03(b): capture execute_with_gates.sh exit code (0/1/2) and branch.
@@ -667,7 +785,17 @@ while true; do
       # command was never honored — it had to be hard-killed). Increment the failed target's
       # fail_count here, escalate gate_human at >=3, then poll the operator command channel so a
       # pause is honored even on a failed iteration.
-      ewg_item="$(awk -F': *' '/^target_item_id:/{v=$2; gsub(/[[:space:]"]/,"",v); print v; exit}' "$ITER_DIR/session_plan_${ITER}.md" 2>/dev/null || echo "")"
+      # FUP-1477: the anchor was ^target_item_id: but EVERY planner-emitted session plan writes
+      # the field markdown-bolded — "**target_item_id:** STAGE-3b" — so the rule body never ran
+      # and $ewg_item was always empty. With it empty the whole fail-count increment below is
+      # skipped, so the >=3 repeated-failure escalation could never fire from this path. Proven
+      # against the live run: plan 0007 (bold only) -> "", plans 0008+ -> STAGE-N, and those only
+      # match because every plan since 0008 carries a DUPLICATED unbolded line as a manual
+      # workaround for this bug. Fixing the extraction retires that workaround.
+      # Two changes, both required: allow optional leading "**", and strip "*" in the gsub —
+      # relaxing the anchor alone still yields "**STAGE-3b" because -F': *' splits at the first
+      # ": " and leaves the closing "**" attached to the value.
+      ewg_item="$(awk -F': *' '/^\*{0,2}target_item_id:/{v=$2; gsub(/[[:space:]"*]/,"",v); print v; exit}' "$ITER_DIR/session_plan_${ITER}.md" 2>/dev/null || echo "")"
       if [[ -n "$ewg_item" ]]; then
         EWG_FC="$STATE_DIR/fail_counts.json"; [[ -f "$EWG_FC" ]] || echo '[]' > "$EWG_FC"
         jq --arg i "$ewg_item" --arg it "$ITER" \
@@ -801,6 +929,28 @@ while true; do
     cur_registry_hash="$(registry_hash "$WORK_REGISTRY")"
     jq --arg h "$cur_registry_hash" '.work_registry_hash_at_snapshot = $h' "$STATE_DIR/state_snapshot.json" > "$STATE_DIR/state_snapshot.json.tmp" \
       && mv "$STATE_DIR/state_snapshot.json.tmp" "$STATE_DIR/state_snapshot.json"
+  fi
+
+  # FUP-1451: reconcile the ledger against the INDEPENDENT on-disk envelope basis at every
+  # iteration boundary. A wrapper that everyone is supposed to call is an instructed-rung
+  # control and fails the moment someone adds a call site without it; this is the check that
+  # FIRES. Non-fatal by design — the run is not wrong, the ACCOUNTING is, and halting a good
+  # run over a bookkeeping gap would trade a visible problem for a worse one. It is loud in
+  # the log and in a durable artifact so it cannot be missed.
+  if ! ledger_reconcile "$STATE_DIR" "${LEDGER_TOLERANCE_USD:-0.50}"; then
+    log "COST RECONCILIATION DIVERGENCE — see cost_reconciliation_failed.json (accounting defect, run continues)"
+    printf '{"iteration":"%s","ledger_usd":%s,"disk_envelopes_usd":%s,"ts":"%s","detail":"a claude call site is not recording through ledger_record()"}\n' \
+      "$ITER" "$(ledger_total "$STATE_DIR")" "$(ledger_disk_total "$STATE_DIR")" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      > "$STATE_DIR/cost_reconciliation_failed.json" 2>/dev/null || true
+  fi
+
+  # FUP-1483: did this iteration create anything outside the sandbox?
+  if ! pg_check_fsroot "$STATE_DIR"; then
+    log "SANDBOX ESCAPE detected at iteration $ITER end — see path_guard output above"
+    mkdir -p "$STATE_DIR/escalations" 2>/dev/null || true
+    printf '{"iteration":"%s","classification":"sandbox_escape","ts":"%s"}\n' \
+      "$ITER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      > "$STATE_DIR/escalations/sandbox_escape_${ITER}.json" 2>/dev/null || true
   fi
 
   # Budget check

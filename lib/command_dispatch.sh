@@ -122,7 +122,16 @@ EOF
         local ws_root
         ws_root="$(read_seed_field "$seed" .workspace_root 2>/dev/null || echo "")"
         [[ "$ws_root" == "null" ]] && ws_root=""
-        [[ -n "$ws_root" ]] && registry_path="${ws_root%/}/$work_registry"
+        # FUP-1483 (sibling class): unconditionally joining workspace_root to work_registry is
+        # a base+value double-join, and .work_registry IS absolute in the live seed — the join
+        # produced "K:/.../Factory_V3/K:/OneDrive - .../factory_dryrun_stages.md". It escaped
+        # notice only because the value is reported in a snapshot and never opened. This is the
+        # exact concatenation shape FUP-1483 was filed against; the filed incident turned out to
+        # be an agent typo, but this one is real. Only join when the value is genuinely relative.
+        case "$work_registry" in
+          /*|[A-Za-z]:[/\\]*) registry_path="$work_registry" ;;
+          *) [[ -n "$ws_root" ]] && registry_path="${ws_root%/}/$work_registry" ;;
+        esac
       fi
       pending_gate="$(jq -r '.pending_gate // null' "$state_dir/state_snapshot.json" 2>/dev/null || echo "null")"
       snapshot="$(jq -nc \

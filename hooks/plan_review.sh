@@ -28,6 +28,11 @@ if [[ -z "$EVENT_PROJECT_ID" || "$EVENT_PROJECT_ID" == "null" ]]; then
   [[ -z "$EVENT_PROJECT_ID" || "$EVENT_PROJECT_ID" == "null" ]] && EVENT_PROJECT_ID="$EVENT_SLUG"
 fi
 
+# shellcheck source=../lib/cost_ledger.sh
+# FUP-1451: this hook is a separate PROCESS from the orchestrator, so it must source the ledger
+# itself; the shared state is the ledger file under $STATE_DIR, guarded by an mkdir lock.
+source "$SCRIPT_DIR/../lib/cost_ledger.sh"
+
 # FUP-0720 cost instrumentation: read budget cap from seed; default to 20 USD on failure.
 SEED_PATH="$STATE_DIR/seed.md"
 BUDGET_CAP=$(read_seed_field "$SEED_PATH" .budget.tokens_usd 2>/dev/null || echo 20)
@@ -50,12 +55,31 @@ PLAN_REVIEW_MODEL_FLAG=""
 # transient abort does NOT, so the two were indistinguishable to the orchestrator). Retry the call
 # up to 3 attempts with linear backoff; only a persistent failure propagates. Usage:
 #   run_claude_retry <out_file> <claude args...>
+# FUP-1451: cost recording lives INSIDE this wrapper, not at its call sites. plan_review spent
+# $27.54 on the factory_dryrun run and recorded none of it, because recording was something each
+# call site had to remember to add and neither of these two did. Worse, the loop below retries up
+# to 3x, so a flaky round billed up to three unrecorded calls. Putting ledger_record here makes
+# every present and future caller of this wrapper correct by construction.
 run_claude_retry() {
   local _out="$1"; shift
   local _attempt _rc=0
   for _attempt in 1 2 3; do
     _rc=0
-    claude "$@" > "$_out" || _rc=$?
+    # stdin closed + empty MCP surface (2026-08-02), applied centrally so BOTH callers of this
+    # wrapper inherit it: the plan reviewer and the planner's --revise callback. Neither needs
+    # MCP. Without --strict-mcp-config the call falls back to the user's GLOBAL config and
+    # blocks starting github/postgres/supabase/filesystem via `npx -y`; without `< /dev/null`
+    # it inherits a never-closing stdin under a backgrounded launch and its tool subprocesses
+    # wedge on it. Both failure modes are silent hangs, and a hang inside a RETRY loop is worse
+    # than one outside it: the wrapper would sit through three attempts before propagating.
+    claude --strict-mcp-config "$@" > "$_out" < /dev/null || _rc=$?
+    # Record BEFORE the rc test: a call that exits non-zero still cost money, and a retried
+    # round costs money per attempt. Recording only successful calls would rebuild the same
+    # under-count this fix exists to remove. The attempt number is in the dedup key so three
+    # attempts against one output file record as three distinct calls, not one.
+    ledger_record_cost "$STATE_DIR" "plan_review" \
+      "$(jq -r '.total_cost_usd // 0' "$_out" 2>/dev/null || echo 0)" \
+      "plan_review:$(basename "$_out"):attempt${_attempt}"
     [[ "$_rc" -eq 0 ]] && return 0
     if [[ "$_attempt" -lt 3 ]]; then sleep $(( _attempt * 15 )); fi
   done
@@ -101,8 +125,20 @@ for round in 1 2 3 4 5; do
   # line-format regex. Previously a clean 0/0 review whose Findings line varied in
   # spacing/bold/leading-char failed the strict regex and looped to the 5-round cap
   # despite zero blocking findings. COSMETIC never blocks (reviewer Step 6 model).
-  rr_fb="$(printf '%s' "$CLEAN_RESULT" | grep -oE 'Findings:[[:space:]]*[0-9]+[[:space:]]+BLOCKER' | grep -oE '[0-9]+' | head -1)"
-  rr_fd="$(printf '%s' "$CLEAN_RESULT" | grep -oE '[0-9]+[[:space:]]+DRIFT' | grep -oE '[0-9]+' | head -1)"
+  # (2026-08-02) TWO defects fixed here, both proven by controls against the live round-2 output.
+  # (1) FATAL: under `set -euo pipefail` a non-matching grep makes the whole command substitution
+  #     fail, and a simple assignment inherits that status -- so the script ABORTED here, before
+  #     the `-1` fallback two lines below could ever run. That fallback was DEAD CODE. The abort
+  #     surfaced to orchestrator.sh as rc=1 -> a spurious plan_review_nonconvergence gate_human.
+  #     It fired ONLY when the plan was CLEAN: round 1 ('Findings: 1 BLOCKER, 5 DRIFT') parsed
+  #     fine; round 2 ('Findings: 1 DRIFT (...), 0 BLOCKER, 0 COSMETIC') aborted -- so a review
+  #     that found nothing blocking could never converge. '|| true' restores the author's intent:
+  #     unparseable => -1 => fall through to the KEEP / resolved-in-pass routes below.
+  # (2) ORDER ASSUMPTION: the BLOCKER parse required BLOCKER to follow 'Findings:' IMMEDIATELY,
+  #     so a reviewer reporting DRIFT first scored rr_fb=-1 even while printing '0 BLOCKER'.
+  #     Made symmetric with the DRIFT parse (order-independent). Counts stay advisory.
+  rr_fb="$(printf '%s' "$CLEAN_RESULT" | grep -oE '[0-9]+[[:space:]]+BLOCKER' | grep -oE '[0-9]+' | head -1 || true)"
+  rr_fd="$(printf '%s' "$CLEAN_RESULT" | grep -oE '[0-9]+[[:space:]]+DRIFT' | grep -oE '[0-9]+' | head -1 || true)"
   [[ -z "$rr_fb" ]] && rr_fb=-1
   [[ -z "$rr_fd" ]] && rr_fd=-1
   # (2026-07-01) Additive convergence route — recognise an explicit reviewer KEEP verdict.
@@ -123,12 +159,39 @@ for round in 1 2 3 4 5; do
   printf '%s' "$CLEAN_RESULT" | grep -qiE '(recommendation|conclusion|verdict|result|bottom line)[[:space:]:.-]*keep([^a-zA-Z0-9]|$)' && rr_keep=1
   printf '%s' "$CLEAN_RESULT" | grep -qiE 'ready for (the )?(executor|dispatch)' && rr_keep=1
   printf '%s' "$CLEAN_RESULT" | grep -qiE '(recommendation|conclusion|verdict|result)[[:space:]:.-]*revise([^a-zA-Z0-9]|$)' && rr_revise=1
+  # (2026-08-02) THIRD additive route — the reviewer FIXED what it found in the same pass.
+  # cf-session-plan-reviewer's Delivery Format reports the count it DISCOVERED ("Findings: 1
+  # DRIFT") and, separately, whether it repaired them ("All DRIFTs resolved: YES") — it is a
+  # producer-fix reviewer, not a read-only one. The strict route above parses the DISCOVERED
+  # count, so a review that found one DRIFT and fixed it scores rr_fd=1 and cannot converge;
+  # the KEEP route does not fire either because this reviewer states resolution rather than a
+  # KEEP verdict. Observed 2026-08-03 on factory_dryrun_canary6 iteration 0001: a review whose
+  # own text said "Findings: 0 ... All DRIFTs resolved: YES" was escalated as
+  # plan_review_nonconvergence, blocking a clean 38 KB plan from ever reaching the Executor.
+  # SAFETY: resolution of DRIFTs says nothing about BLOCKERs, so this route additionally
+  # requires that NO non-zero BLOCKER count appears anywhere in the text, and is guarded by the
+  # same explicit-REVISE veto as the KEEP route. It only ADDS a route; both paths above are
+  # untouched.
+  # The affirmative is REQUIRED, not optional. A first cut made "(yes|true)" optional, which made
+  # "All DRIFTs resolved: NO" match as RESOLVED — the negative statement scoring as the positive.
+  # It slipped through testing because the control that caught it was ALSO carrying an explicit
+  # REVISE verdict, so it blocked for the wrong reason and the flaw stayed invisible. Demand the
+  # explicit affirmative, then veto on an explicit negative regardless.
+  rr_resolved=0
+  printf '%s' "$CLEAN_RESULT" | grep -qiE 'all[[:space:]]+(drifts?|findings?)[[:space:]]+(are[[:space:]]+)?resolved[[:space:]:.-]*(yes|true)([^a-zA-Z0-9]|$)' && rr_resolved=1
+  printf '%s' "$CLEAN_RESULT" | grep -qiE 'all[[:space:]]+(drifts?|findings?)[[:space:]]+(are[[:space:]]+)?(not[[:space:]]+)?resolved[[:space:]:.-]*(no|false)([^a-zA-Z0-9]|$)' && rr_resolved=0
+  rr_blockers_present=0
+  printf '%s' "$CLEAN_RESULT" | grep -qE '[1-9][0-9]*[[:space:]]+BLOCKER' && rr_blockers_present=1
+
   rr_converged=0
   if printf '%s' "$CLEAN_RESULT" | grep -qF '## Session Plan Review Complete' \
      && [[ "$rr_fb" -eq 0 && "$rr_fd" -eq 0 ]]; then
     rr_converged=1
   elif [[ "$rr_keep" -eq 1 && "$rr_revise" -eq 0 ]]; then
     rr_converged=1
+  elif [[ "$rr_resolved" -eq 1 && "$rr_blockers_present" -eq 0 && "$rr_revise" -eq 0 ]]; then
+    rr_converged=1
+    echo "plan_review: converged via resolved-in-pass route (reviewer reported all DRIFTs resolved, no BLOCKER count present)" >&2
   fi
   rr_verdict="revise"; [[ "$rr_converged" -eq 1 ]] && rr_verdict="converged"
   # Item-2 FR-052: stamp the session-plan shape on the revise_round event so the Run-Auditor's
