@@ -16,17 +16,17 @@ def test_disabled_by_default_never_fires() -> None:
     # Default config (ceiling None) is OFF — preserves the breaker no-cap design.
     cfg = EmergencySpendConfig()
     assert cfg.ceiling_usd is None
-    assert evaluate_spend_backstop(Decimal("999999"), cfg, project_id="p") is None
+    assert evaluate_spend_backstop(Decimal(999999), cfg, project_id="p") is None
 
 
 def test_below_ceiling_no_trip() -> None:
-    cfg = EmergencySpendConfig(ceiling_usd=Decimal("400"))
+    cfg = EmergencySpendConfig(ceiling_usd=Decimal(400))
     assert evaluate_spend_backstop(Decimal("399.9999"), cfg, project_id="p") is None
 
 
 def test_at_ceiling_trips_kill() -> None:
-    cfg = EmergencySpendConfig(ceiling_usd=Decimal("400"))
-    esc = evaluate_spend_backstop(Decimal("400"), cfg, project_id="p")
+    cfg = EmergencySpendConfig(ceiling_usd=Decimal(400))
+    esc = evaluate_spend_backstop(Decimal(400), cfg, project_id="p")
     assert esc is not None
     assert esc.killed is True
     assert esc.tier == ESCALATION_TIER_TOP
@@ -35,7 +35,7 @@ def test_at_ceiling_trips_kill() -> None:
 
 
 def test_above_ceiling_reason_carries_both_figures() -> None:
-    cfg = EmergencySpendConfig(ceiling_usd=Decimal("400"))
+    cfg = EmergencySpendConfig(ceiling_usd=Decimal(400))
     esc = evaluate_spend_backstop(Decimal("412.50"), cfg, project_id="ol_build")
     assert esc is not None
     assert "412.50" in esc.reason and "400" in esc.reason

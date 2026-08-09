@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Sequence
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import cast
 
@@ -103,7 +103,7 @@ _RUNNING_FLEET = (PROJECT_A, PROJECT_B, PROJECT_C)
 # candidate clears the read-only invariant and reaches the Kill-Switch floor check).
 READ_ONLY_CORPUS = "Project_Docs_Current\\"
 
-_NOW = datetime(2026, 6, 5, 12, 0, tzinfo=timezone.utc)
+_NOW = datetime(2026, 6, 5, 12, 0, tzinfo=UTC)
 
 
 # --- Branch substrate provisioning + restore (row-state only; no reshape) ------

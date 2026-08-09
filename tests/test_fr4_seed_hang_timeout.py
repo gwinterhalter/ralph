@@ -8,7 +8,7 @@ seed_hang_timeout_seconds`` -> ``derive_reconcile_actions(hang_timeout_of=...)``
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -23,7 +23,7 @@ from supervisor.reconcile import (
 
 pytestmark = pytest.mark.unit
 
-_NOW = datetime(2026, 6, 7, 12, 0, 0, tzinfo=timezone.utc)
+_NOW = datetime(2026, 6, 7, 12, 0, 0, tzinfo=UTC)
 
 
 def _row(minutes_ago: float) -> dict[str, object]:

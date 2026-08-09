@@ -14,7 +14,7 @@ The app-password is read from the environment by ``SmtpConfig`` and is never log
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -25,7 +25,11 @@ from supervisor.attention import (
     NotificationPlan,
     UrgencyTier,
 )
-from supervisor.notifications import SmtpConfig, SmtpNotificationPort, build_notification_port
+from supervisor.notifications import (
+    SmtpConfig,
+    SmtpNotificationPort,
+    build_notification_port,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -41,7 +45,7 @@ def _plan() -> NotificationPlan:
         reversible=False,
         suggested_option=None,
         confidence=1.0,
-        raised_at=datetime.now(timezone.utc),
+        raised_at=datetime.now(UTC),
     )
     return NotificationPlan(
         batches=(NotificationBatch(tier=UrgencyTier.TOP, escalations=(esc,)),), deferred=()

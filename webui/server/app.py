@@ -14,12 +14,13 @@ Run (local): set PROD_DB_URL (+ OL_SUPERVISOR_STATE_DIR), then
 from __future__ import annotations
 
 import json
+import logging
 import os
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict
-from datetime import datetime, timedelta, timezone
-from decimal import Decimal, ROUND_HALF_UP
+from datetime import UTC, datetime, timedelta
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any, Protocol, cast
 
@@ -38,8 +39,8 @@ from supervisor.control_panel import (
 )
 from supervisor.cost_forecast import forecast_fleet
 from supervisor.full_status_surface import FullFleetSnapshot, build_full_fleet_snapshot
-from supervisor.safety_gates import DEFAULT_CONCURRENCY_CEILING
 from supervisor.inbox import build_inbox
+from supervisor.safety_gates import DEFAULT_CONCURRENCY_CEILING
 from webui.server import audit_log, gates
 from webui.server.supervisor_control import SupervisorRunner
 
@@ -80,7 +81,7 @@ class RegistryLike(Protocol):
 # sync endpoints (and the SSE stream) in a threadpool, a single psycopg connection would be used
 # concurrently -- unsafe -- so hand out a lock-serialized proxy. The connection is rebuilt only if
 # it has dropped (conn.closed). Single-operator localhost GUI: serialization cost is negligible.
-import threading  # noqa: E402,PLC0415
+import threading
 
 _registry_singleton: RegistryLike | None = None
 _registry_build_lock = threading.Lock()
@@ -91,7 +92,7 @@ class _LockedRegistry:
     """Serializes every DB call on the shared connection through one lock (psycopg3
     Connections are not safe for concurrent use across threads)."""
 
-    def __init__(self, base: object, lock: "threading.Lock") -> None:
+    def __init__(self, base: object, lock: threading.Lock) -> None:
         self._base = base
         self._lock = lock
 
@@ -108,7 +109,9 @@ class _LockedRegistry:
 
 
 def _default_registry_provider() -> RegistryLike:
-    from supervisor.registry import Registry  # noqa: PLC0415 - lazy: only the live server needs a DB
+    from supervisor.registry import (
+        Registry,
+    )
 
     global _registry_singleton
     if not os.environ.get("PROD_DB_URL"):
@@ -126,10 +129,10 @@ def _default_registry_provider() -> RegistryLike:
 
 
 def _default_dispatcher(argv: list[str]) -> tuple[int, str]:
-    import subprocess  # noqa: PLC0415 - lazy; only the live apply path needs it
+    import subprocess
 
     try:
-        p = subprocess.run(argv, check=False, capture_output=True, text=True)  # noqa: S603 - argv built
+        p = subprocess.run(argv, check=False, capture_output=True, text=True)
     except FileNotFoundError:
         return 127, "`claude` not on PATH"
     return p.returncode, (p.stdout or "") + (f"\n{p.stderr}" if p.stderr else "")
@@ -213,7 +216,7 @@ def create_app(
     allow_apply: bool = True,
     dispatcher: Dispatcher = _default_dispatcher,
     token: str | None = None,
-    runner: "SupervisorRunner | Any | None" = None,
+    runner: SupervisorRunner | Any | None = None,
     allow_supervisor_control: bool = True,
 ) -> FastAPI:
     """Build the API. ``registry_provider`` is called per request (inject a fake in tests).
@@ -254,7 +257,7 @@ def create_app(
         return await call_next(request)
 
     def _now_iso() -> str:
-        return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     def _record(action: str, target: str, by: str, detail: str = "") -> None:
         try:
@@ -266,7 +269,7 @@ def create_app(
     def _inbox_payload(reg: RegistryLike) -> tuple[dict[str, Any], dict[str, Any]]:
         """(inbox, fleet) dicts from one snapshot — shared by /api/inbox, /api/fleet, /api/stream."""
         snap = build_full_fleet_snapshot(
-            reg, now=datetime.now(timezone.utc), concurrency_ceiling=_resolve_ceiling(),  # type: ignore[arg-type]
+            reg, now=datetime.now(UTC), concurrency_ceiling=_resolve_ceiling(),  # type: ignore[arg-type]
             cumulative_costs=_cost_by_project(reg),  # completed terminal + live in-flight spend
         )
         cards = build_inbox(
@@ -300,10 +303,10 @@ def create_app(
             try:
                 data = json.loads((Path(seed).parent / "state" / "spend.json").read_text(encoding="utf-8"))
                 raw = data.get("total_spend_usd")
-                cost = Decimal(str(raw)) if raw is not None else Decimal("0")
+                cost = Decimal(str(raw)) if raw is not None else Decimal(0)
             except (OSError, ValueError, json.JSONDecodeError, ArithmeticError):
                 continue
-            totals[pid] = totals.get(pid, Decimal("0")) + cost
+            totals[pid] = totals.get(pid, Decimal(0)) + cost
         return totals
 
     def _cost_by_project(reg: RegistryLike) -> dict[str, Decimal]:
@@ -315,12 +318,12 @@ def create_app(
             pid = str(run.get("project_id") or "")
             raw = run.get("terminal_cost_usd")
             try:
-                cost = Decimal(str(raw)) if raw is not None else Decimal("0")
+                cost = Decimal(str(raw)) if raw is not None else Decimal(0)
             except Exception:  # noqa: BLE001
-                cost = Decimal("0")
-            totals[pid] = totals.get(pid, Decimal("0")) + cost
+                cost = Decimal(0)
+            totals[pid] = totals.get(pid, Decimal(0)) + cost
         for pid, live in _live_spend_by_project(reg).items():
-            totals[pid] = totals.get(pid, Decimal("0")) + live
+            totals[pid] = totals.get(pid, Decimal(0)) + live
         return totals
 
     # ---- reads -------------------------------------------------------------------------------
@@ -358,8 +361,8 @@ def create_app(
         ``max_events`` bounds the stream (tests pass 1); unbounded by default until the client
         disconnects. The sync generator is iterated in Starlette's threadpool, so the sleep + sync
         DB reads don't block the event loop."""
-        def gen() -> "Any":
-            import time  # noqa: PLC0415
+        def gen() -> Any:
+            import time
 
             count = 0
             while True:
@@ -425,7 +428,7 @@ def create_app(
                 "status": status,
                 "attention_debt": p.get("attention_debt") or 0,
                 "depends_on": list(deps) if isinstance(deps, (list, tuple)) else [],
-                "cost_usd": _money2(cost.get(pid, Decimal("0"))),
+                "cost_usd": _money2(cost.get(pid, Decimal(0))),
                 "runs": runs_by_project.get(pid, 0),
                 "issue": str(issue) if issue else None,
                 "run_status": lr.get("run_status"),
@@ -451,7 +454,7 @@ def create_app(
             for r in reg.read_completed_runs()
         ]
         out.sort(key=lambda r: str(r["terminated_at"] or ""), reverse=True)
-        total = sum((Decimal(str(r["cost_usd"] or "0")) for r in out), Decimal("0"))
+        total = sum((Decimal(str(r["cost_usd"] or "0")) for r in out), Decimal(0))
         return {"runs": out, "count": len(out), "total_cost_usd": _money2(total)}
 
     @app.get("/api/loop-status")
@@ -467,13 +470,13 @@ def create_app(
                 ts = e.get("ts_utc")
                 if isinstance(ts, datetime):
                     stamps.append(ts)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:
+            logging.getLogger(__name__).debug("events freshness probe failed", exc_info=True)
         for run in reg.read_completed_runs():
             raw = run.get("terminated_at")
             if isinstance(raw, str) and raw:
                 try:
-                    stamps.append(datetime.fromisoformat(raw.replace("Z", "+00:00")))
+                    stamps.append(datetime.fromisoformat(raw))
                 except ValueError:
                     pass
         managed = bool(sup_runner.loop_running())
@@ -482,8 +485,8 @@ def create_app(
                     "managed_running": managed}
         last = max(stamps)
         if last.tzinfo is None:
-            last = last.replace(tzinfo=timezone.utc)
-        secs = (datetime.now(timezone.utc) - last).total_seconds()
+            last = last.replace(tzinfo=UTC)
+        secs = (datetime.now(UTC) - last).total_seconds()
         return {"last_activity": last.isoformat(), "seconds_since": int(secs),
                 "active_guess": managed or secs < 600, "managed_running": managed}
 
@@ -513,7 +516,7 @@ def create_app(
     @app.get("/api/events")
     def events(
         project: str | None = Query(default=None),
-        type: str | None = Query(default=None),  # noqa: A002 - matches the CLI's --type flag
+        type: str | None = Query(default=None),
         limit: int = Query(default=50, ge=1, le=100000),
     ) -> dict[str, Any]:
         reg = registry_provider()
@@ -713,7 +716,7 @@ def create_app(
         days: float = Query(gt=0), by: str = Query(default="operator")
     ) -> dict[str, object]:
         reg = registry_provider()
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
         deleted = reg.prune_events(before_iso=cutoff)
         _record("events-prune", f"{days}d", by, f"deleted {deleted}")
         return {"deleted": deleted, "before": cutoff}
@@ -760,7 +763,9 @@ def create_app(
         return {"stopped": stopped}
 
     if static_dir is not None and Path(static_dir).is_dir():
-        from fastapi.staticfiles import StaticFiles  # noqa: PLC0415 - only when serving a built UI
+        from fastapi.staticfiles import (
+            StaticFiles,
+        )
 
         app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="ui")
     else:

@@ -51,9 +51,9 @@ the OLB-10 ``supervisor.attention.Escalation`` carries, threaded in here as a pl
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import Sequence
 
 #: Canonical terminal Run statuses the FR-049 "completed Runs" set keys on
 #: (``supervisor.transitions`` legal-state set / ``run_lifecycle.RUN_STATUS_COMPLETE``).
@@ -227,7 +227,7 @@ def derive_correction_findings(
     return findings
 
 
-def finding_key(finding: "AuditFinding") -> str:
+def finding_key(finding: AuditFinding) -> str:
     """Stable identity for a finding: ``<kind>:<subject>[:<binding_class>]``.
 
     The same pattern recurring across audit passes maps to one key (one persisted row; one

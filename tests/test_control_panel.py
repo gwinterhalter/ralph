@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
-
-from datetime import datetime, timedelta, timezone
 
 from supervisor.control_panel import (
     EventMetrics,
@@ -37,7 +36,7 @@ def _snapshot(as_of: datetime) -> FullFleetSnapshot:
         counts_by_lifecycle_state={},
         total_attention_debt=0,
         total_open_work_count=0,
-        total_cumulative_cost_usd=Decimal("0"),
+        total_cumulative_cost_usd=Decimal(0),
         running_count=0,
         stalled_count=0,
         concurrency_ceiling=2,
@@ -120,7 +119,7 @@ def test_render_metrics_is_stringy() -> None:
 
 
 def test_run_status_panel_once_renders_a_single_snapshot() -> None:
-    t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    t0 = datetime(2026, 1, 1, tzinfo=UTC)
     emitted: list[str] = []
     slept: list[float] = []
     rc = run_status_panel(
@@ -138,7 +137,7 @@ def test_run_status_panel_once_renders_a_single_snapshot() -> None:
 
 def test_run_status_panel_rejects_nonpositive_interval() -> None:
     # The RefreshScheduler bound must be positive (FR-061); the panel surfaces that.
-    t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    t0 = datetime(2026, 1, 1, tzinfo=UTC)
     with pytest.raises(ValueError, match="interval"):
         run_status_panel(
             lambda: _snapshot(t0), once=True, interval_seconds=0.0, emit=lambda _s: None

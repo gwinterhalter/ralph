@@ -13,9 +13,9 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip("fastapi")
-from fastapi.testclient import TestClient  # noqa: E402
+from fastapi.testclient import TestClient
 
-from webui.server.app import create_app  # noqa: E402
+from webui.server.app import create_app
 
 
 class FakeRegistry:

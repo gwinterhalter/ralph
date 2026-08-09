@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC
 from decimal import Decimal
 
 import pytest
@@ -299,7 +300,7 @@ def test_fr051_and_fr052_findings_fire() -> None:
 
 
 def test_findings_to_escalations_surfaces_only_new_keys() -> None:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     findings = [
         AuditFinding(
@@ -317,7 +318,7 @@ def test_findings_to_escalations_surfaces_only_new_keys() -> None:
             routes_to="operator + cf-session-plan-reviewer",
         ),
     ]
-    now = datetime(2026, 6, 8, 9, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 6, 8, 9, 0, tzinfo=UTC)
     # Only g1 is NEW (the shape finding is already-known → not re-surfaced).
     escalations = findings_to_escalations(
         findings, new_keys={"answerer_dsl_candidate:g1"}, now=now
@@ -390,7 +391,7 @@ def test_derive_correction_findings_fires_on_recurrence() -> None:
 
 
 def test_findings_to_escalations_empty_when_no_new() -> None:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     findings = [
         AuditFinding(
@@ -401,7 +402,7 @@ def test_findings_to_escalations_empty_when_no_new() -> None:
             routes_to="x",
         )
     ]
-    assert findings_to_escalations(findings, new_keys=set(), now=datetime.now(timezone.utc)) == []
+    assert findings_to_escalations(findings, new_keys=set(), now=datetime.now(UTC)) == []
 
 
 def test_read_events_jsonl_missing_file(tmp_path: object) -> None:

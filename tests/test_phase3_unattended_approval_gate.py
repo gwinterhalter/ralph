@@ -50,7 +50,6 @@ def _spawning_admit(fleet: _Fleet):  # type: ignore[no-untyped-def]
 
     def _admit(candidate, **_kwargs):  # type: ignore[no-untyped-def]
         fleet.running_ids.append(str(candidate["project_id"]))
-        return None
 
     return _admit
 

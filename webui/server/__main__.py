@@ -17,9 +17,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=8787)
     args = parser.parse_args(argv)
 
-    import uvicorn  # noqa: PLC0415 - lazy: only the live server needs it
+    import uvicorn
 
-    from webui.server.app import _default_static_dir, create_app  # noqa: PLC0415
+    from webui.server.app import _default_static_dir, create_app
 
     static = _default_static_dir()
     app = create_app(static_dir=static)

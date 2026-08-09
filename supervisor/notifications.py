@@ -19,9 +19,10 @@ used and nothing is sent.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from email.message import EmailMessage
-from typing import Callable, Protocol, cast
+from typing import Protocol, Self, cast
 
 from supervisor.attention import NotificationBatch, NotificationPlan
 
@@ -39,7 +40,7 @@ class SmtpConfig:
     use_tls: bool = True
 
     @classmethod
-    def from_env(cls) -> "SmtpConfig | None":
+    def from_env(cls) -> SmtpConfig | None:
         """Build from env, or None when not configured.
 
         Prefers explicit ``OL_SUPERVISOR_SMTP_*`` overrides, then falls back to the proven
@@ -82,7 +83,7 @@ class SmtpClient(Protocol):
     def starttls(self) -> object: ...
     def login(self, user: str, password: str) -> object: ...
     def send_message(self, msg: EmailMessage) -> object: ...
-    def __enter__(self) -> "SmtpClient": ...
+    def __enter__(self) -> Self: ...
     def __exit__(self, *exc: object) -> object: ...
 
 
@@ -216,11 +217,11 @@ def build_notification_port(
 
 
 __all__ = [
-    "SmtpConfig",
-    "SmtpClient",
     "NotificationPort",
     "NullNotificationPort",
+    "SmtpClient",
+    "SmtpConfig",
     "SmtpNotificationPort",
-    "render_batch",
     "build_notification_port",
+    "render_batch",
 ]

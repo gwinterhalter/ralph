@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -21,8 +21,8 @@ def test_keeps_newest_progress_per_project() -> None:
         {"project_id": "p2", "subject_kind": "role_complete", "ts_utc": "2026-06-05T04:10:00Z"},
     ]
     hb = latest_heartbeats(events)
-    assert hb["p1"] == datetime(2026, 6, 5, 5, 30, tzinfo=timezone.utc)
-    assert hb["p2"] == datetime(2026, 6, 5, 4, 10, tzinfo=timezone.utc)
+    assert hb["p1"] == datetime(2026, 6, 5, 5, 30, tzinfo=UTC)
+    assert hb["p2"] == datetime(2026, 6, 5, 4, 10, tzinfo=UTC)
 
 
 def test_non_heartbeat_events_and_bad_rows_ignored() -> None:
@@ -33,7 +33,7 @@ def test_non_heartbeat_events_and_bad_rows_ignored() -> None:
         {"project_id": "p1", "event_type": "phase_complete", "ts_utc": "2026-06-05T03:00:00Z"},  # the only valid
     ]
     hb = latest_heartbeats(events)
-    assert hb == {"p1": datetime(2026, 6, 5, 3, 0, tzinfo=timezone.utc)}
+    assert hb == {"p1": datetime(2026, 6, 5, 3, 0, tzinfo=UTC)}
 
 
 def test_empty() -> None:
@@ -49,7 +49,7 @@ def test_read_from_log(tmp_path) -> None:  # type: ignore[no-untyped-def]
         encoding="utf-8",
     )
     hb = read_heartbeats_from_log(log)
-    assert hb == {"ol_build": datetime(2026, 6, 5, 23, 50, tzinfo=timezone.utc)}
+    assert hb == {"ol_build": datetime(2026, 6, 5, 23, 50, tzinfo=UTC)}
 
 
 def test_read_from_missing_log() -> None:

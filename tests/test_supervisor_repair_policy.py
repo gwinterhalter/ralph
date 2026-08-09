@@ -14,7 +14,7 @@ case holds all three grant conditions and toggles only the safety-gate predicate
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -33,7 +33,7 @@ from supervisor.repair_policy import (
 # A fixed threshold + clock — the policy reads neither a seed nor a wall-clock; both
 # are supplied here (gate olb13-repair-teardown-build-substrate = A).
 THRESHOLD = 0.7
-RAISED_AT = datetime(2026, 6, 5, 12, 0, tzinfo=timezone.utc)
+RAISED_AT = datetime(2026, 6, 5, 12, 0, tzinfo=UTC)
 
 #: The four §11.3 v1.0 repair classes whose default Reversibility Class is reversible.
 REVERSIBLE_KINDS = (

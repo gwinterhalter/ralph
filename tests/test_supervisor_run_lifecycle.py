@@ -22,7 +22,6 @@ from supervisor.run_lifecycle import (
     wait_for_orchestrator,
 )
 
-
 # ---- read_terminal_cost (FR-014 / NFR-007 exact Decimal at numeric(10,4) grain) ----
 
 def test_cost_absent_ledger_is_zero(tmp_path: Path) -> None:
