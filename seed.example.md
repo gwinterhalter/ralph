@@ -138,7 +138,7 @@ Optional fields (§8.2): `target_order[]`, `initiative.description`, `initiative
 
 ## `completion_predicate[].check_kind` enum (§8.4)
 
-`registry_zero_open` (registry has no open items) · `artefact_exists` (a named file exists) · `skill_clean` (a named skill run returns clean against a target) · `doc_review_clean` (cf-doc-reviewer returns zero findings on a named doc).
+`registry_zero_open` (registry has no open items) · `artefact_exists` (a named file exists) · `skill_clean` (a named skill run returns clean against a target) · `doc_review_clean` (cf-doc-reviewer returns zero findings on a named doc) · `db_zero_open` (a SQL-scoped set in the corpus database is empty; `params.scope_sql` REQUIRED, `params.table` defaults to `public.followups`; fails CLOSED on an unreachable database, a missing `SUPABASE_DB_PASSWORD`, a query error or an unparseable result — added 2026-08-08).
 
 ## Change History
 

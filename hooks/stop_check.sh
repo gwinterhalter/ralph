@@ -527,6 +527,83 @@ for ((i=0; i<count; i++)); do
         esac
       fi
       ;;
+    db_zero_open)
+      # DB-BACKED completion predicate (added 2026-08-08). The registry_zero_open family counts
+      # pipe-delimited Priority/Status cells in a STATIC markdown register, so an item that
+      # never reaches that file cannot affect completion AT ANY VALUE, and a Phase-Z INSERT
+      # into the tracker can GROW the backlog while the loop still reports INITIATIVE_COMPLETE.
+      # This arm asks the table instead of the file. It is ADDITIVE: the zero_open_gaps arm
+      # above is unchanged, and a seed may declare both.
+      #
+      # FAIL CLOSED (design ruling). A missing credential, an absent psql, an unreachable
+      # host, a query error, or a result that does not parse as a non-negative integer all
+      # BLOCK completion (all_pass=0) and are logged with the literal marker DB-UNREACHABLE,
+      # so that state stays distinguishable in the log from a genuine non-zero open count.
+      # A completion predicate that cannot SEE its target must never certify it is empty.
+      #
+      # Seed contract (§8.4 enum row added in seed.example.md):
+      #   params.scope_sql  REQUIRED — the scoped set as a SQL boolean predicate, e.g.
+      #                     "project_id = 'factory_design' AND status = 'pending'".
+      #                     Absent / empty / null → exit 3 (HALT). There is deliberately NO
+      #                     default: an unvalidatable scope must FAIL, never match everything,
+      #                     because a scope that matches everything is the permissive failure
+      #                     this predicate exists to prevent.
+      #   params.table      optional — defaults to public.followups; must be a plain
+      #                     [schema.]table identifier or exit 3.
+      # The password is read from SUPABASE_DB_PASSWORD into the psql child's PGPASSWORD and
+      # is never placed on a command line, echoed, or interpolated into any log line; psql
+      # stderr is deliberately NOT printed for the same reason (universal-rules.md #14).
+      pred_name="$(read_seed_field "$SEED" ".completion_predicate[$i].name")"
+      scope_sql="$(read_seed_field "$SEED" ".completion_predicate[$i].params.scope_sql" 2>/dev/null || echo "")"
+      if [[ -z "$scope_sql" || "$scope_sql" == "null" ]]; then
+        echo "stop_check: db_zero_open predicate '$pred_name' missing params.scope_sql — no default scope exists (an unvalidatable scope fails closed, it does not match everything)" >&2; exit 3
+      fi
+      if [[ "$scope_sql" == *";"* || "$scope_sql" == *"--"* || "$scope_sql" == *"/*"* ]]; then
+        echo "stop_check: db_zero_open predicate '$pred_name' params.scope_sql rejected — a scope predicate may not contain ';', '--' or '/*'" >&2; exit 3
+      fi
+      db_table="$(read_seed_field "$SEED" ".completion_predicate[$i].params.table" 2>/dev/null || echo "")"
+      if [[ -z "$db_table" || "$db_table" == "null" ]]; then
+        db_table="public.followups"
+      fi
+      if ! [[ "$db_table" =~ ^[a-z_][a-z0-9_]*(\.[a-z_][a-z0-9_]*)?$ ]]; then
+        echo "stop_check: db_zero_open predicate '$pred_name' params.table '$db_table' is not a plain [schema.]table identifier" >&2; exit 3
+      fi
+      # psql resolution mirrors support_functions/supabase_sql.py so the two callers cannot
+      # disagree about which binary and which connection FIELDS reach the corpus DB.
+      db_psql="${PSQL_EXE:-}"
+      if [[ -z "$db_psql" || ! -x "$db_psql" ]]; then
+        db_psql="C:/Program Files/PostgreSQL/18/bin/psql.exe"
+        [[ -x "$db_psql" ]] || db_psql="$(command -v psql 2>/dev/null || echo "")"
+      fi
+      db_conn="host=${SUPABASE_DB_HOST:-db.eybdbshxswutgaaylpol.supabase.co} port=${SUPABASE_DB_PORT:-5432} dbname=${SUPABASE_DB_NAME:-postgres} user=${SUPABASE_DB_USER:-postgres} sslmode=require"
+      if [[ -z "$db_psql" || ! -x "$db_psql" ]]; then
+        echo "stop_check: db_zero_open predicate '$pred_name' DB-UNREACHABLE — no psql binary found (set PSQL_EXE); blocking completion" >&2
+        all_pass=0
+      elif [[ -z "${SUPABASE_DB_PASSWORD:-}" ]]; then
+        echo "stop_check: db_zero_open predicate '$pred_name' DB-UNREACHABLE — SUPABASE_DB_PASSWORD is unset; blocking completion" >&2
+        all_pass=0
+      else
+        set +e
+        db_out="$(PGPASSWORD="$SUPABASE_DB_PASSWORD" "$db_psql" "$db_conn" -tAqX -v ON_ERROR_STOP=1 \
+          -c "SELECT count(*) FROM $db_table WHERE ($scope_sql);" 2>/dev/null)"
+        db_rc=$?
+        set -e
+        db_out="${db_out//$'\r'/}"
+        db_out="${db_out//[[:space:]]/}"
+        if [[ "$db_rc" -ne 0 ]]; then
+          echo "stop_check: db_zero_open predicate '$pred_name' DB-UNREACHABLE — psql exited $db_rc against $db_table; blocking completion" >&2
+          all_pass=0
+        elif ! [[ "$db_out" =~ ^[0-9]+$ ]]; then
+          echo "stop_check: db_zero_open predicate '$pred_name' DB-UNREACHABLE — psql exited 0 but the result did not parse as a non-negative integer; blocking completion" >&2
+          all_pass=0
+        elif [[ "$db_out" -eq 0 ]]; then
+          echo "stop_check: db_zero_open predicate '$pred_name' OPEN=$db_out in $db_table WHERE ($scope_sql) — pass" >&2
+        else
+          echo "stop_check: db_zero_open predicate '$pred_name' OPEN=$db_out in $db_table WHERE ($scope_sql) — blocking completion" >&2
+          all_pass=0
+        fi
+      fi
+      ;;
     skill_clean|doc_review_clean)
       # Phase 4b P4-02 / FUP-0641: per-skill clean-marker map. Markers DERIVED from each
       # skill's SKILL.md output spec at implement time. FUP-0696 alignment 2026-05-24:
