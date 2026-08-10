@@ -1,38 +1,19 @@
 #!/usr/bin/env bash
-# FUP-0857: reject non-fast-forward (force) pushes to already-pushed refs.
-#
-# Why: the bypassPermissions integration_checkpoint iterations (FUP-0853) run with
-# the Claude Code auto-mode classifier OFF, so a `git push --force` / `--force-with-lease`
-# is no longer denied at the permission layer (the iter-0025 cosmetic force-push was
-# only caught because that iteration ran under `auto`). This git-level guard enforces
-# the standing "no --force / no history rewrite to pushed refs" rule regardless of the
-# permission mode in effect.
-#
-# Behaviour: a brand-new remote ref (new branch/tag) and a fast-forward update PASS; a
-# branch rewind or a moved tag (remote sha is not an ancestor of the local sha) is
-# REFUSED. Ref deletions pass (explicit, not a content rewrite). A genuine, intentional
-# force has the standard escape hatch: `git push --no-verify`.
-#
-# Install (local, not committed): git config core.hooksPath .githooks
-
-set -uo pipefail
-
-zero="0000000000000000000000000000000000000000"
-status=0
-
-while read -r local_ref local_sha remote_ref remote_sha; do
-  # Deletion (local all-zero) or a brand-new remote ref (remote all-zero): allow.
-  if [[ "$local_sha" == "$zero" || "$remote_sha" == "$zero" ]]; then
-    continue
-  fi
-  # Fast-forward iff the remote tip is an ancestor of the local tip.
-  if ! git merge-base --is-ancestor "$remote_sha" "$local_sha" 2>/dev/null; then
-    echo "pre-push: REFUSING non-fast-forward update to ${remote_ref}" >&2
-    echo "  remote ${remote_sha:0:12} is not an ancestor of local ${local_sha:0:12}" >&2
-    echo "  (force-push / history rewrite). Standing rule: no --force to pushed refs." >&2
-    echo "  Override an intentional force with: git push --no-verify" >&2
-    status=1
-  fi
-done
-
-exit "$status"
+# CF_SECRET_SCAN_HOOK_V1  (idempotent marker - do not remove)
+# stdin is captured ONCE and replayed to every consumer: a chained prior hook
+# reading stdin would otherwise starve the scanner and leave it silently inert.
+set -u
+SCANNER='K:/CF-Backup/scripts/secret-scan/Invoke-SecretScan.ps1'
+HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
+PRIOR="$HOOK_DIR/pre-push.pre-secret-scan"
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+PAYLOAD="$(cat)"
+rc=0
+if [ -f "$PRIOR" ]; then
+  printf '%s\n' "$PAYLOAD" | bash "$PRIOR" "$@" || rc=$?
+  if [ "$rc" -ne 0 ]; then echo "pre-push: chained prior hook FAILED rc=$rc" >&2; fi
+fi
+printf '%s\n' "$PAYLOAD" | powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$SCANNER" -Mode Push -RepoRoot "$REPO_ROOT"
+src=$?
+if [ "$src" -ne 0 ]; then rc=$src; fi
+exit $rc

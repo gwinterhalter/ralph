@@ -1,0 +1,3 @@
+# Hooks are bash scripts; a CRLF checkout gives a broken shebang and leaves
+# the secret-scan hooks installed but inert.
+* text eol=lf

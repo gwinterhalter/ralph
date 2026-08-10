@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# CF_SECRET_SCAN_HOOK_V1  (idempotent marker - do not remove)
+# Runs any pre-existing pre-commit logic (preserved as pre-commit.pre-secret-scan),
+# then the CF secret scanner in Staged mode. Fails if EITHER fails.
+set -u
+SCANNER='K:/CF-Backup/scripts/secret-scan/Invoke-SecretScan.ps1'
+HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
+PRIOR="$HOOK_DIR/pre-commit.pre-secret-scan"
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+rc=0
+if [ -f "$PRIOR" ]; then
+  bash "$PRIOR" "$@" || rc=$?
+  if [ "$rc" -ne 0 ]; then echo "pre-commit: chained prior hook FAILED rc=$rc" >&2; fi
+fi
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$SCANNER" -Mode Staged -RepoRoot "$REPO_ROOT"
+src=$?
+if [ "$src" -ne 0 ]; then rc=$src; fi
+exit $rc
