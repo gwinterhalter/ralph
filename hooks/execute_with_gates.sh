@@ -404,6 +404,7 @@ EVENT_EX_T0="$(date +%s%3N 2>/dev/null || echo 0)"
 # shellcheck disable=SC2086
 claude --print --output-format json \
        --permission-mode "$posture_value" \
+       --add-dir "$CLAUDE_SKILLS_DIR" \
        $EXECUTOR_MODEL_FLAG \
        "${EXEC_ALLOW[@]}" \
        $STRICT_MCP_FLAG --mcp-config "$MCP_CONFIG" \
@@ -562,6 +563,7 @@ case "$_plan_shape" in
         # shellcheck disable=SC2086
         claude --print --output-format json --resume "$_ex_session" \
                --permission-mode "$posture_value" \
+               --add-dir "$CLAUDE_SKILLS_DIR" \
                $EXECUTOR_MODEL_FLAG \
                "${EXEC_ALLOW[@]}" \
                $STRICT_MCP_FLAG --mcp-config "$MCP_CONFIG" \
